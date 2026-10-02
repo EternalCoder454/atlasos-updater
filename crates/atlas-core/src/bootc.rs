@@ -262,9 +262,11 @@ impl Status {
             .or(self.spec.image.as_ref())
     }
 
-    /// The channel of the booted ref (`stable`, `testing`), if it has one.
+    /// The channel the system follows (`stable`, `testing`), if it has one.
+    /// That is `spec.image`, which a switch changes at once; the booted ref
+    /// keeps the old channel until the restart.
     pub fn channel(&self) -> Option<Channel> {
-        self.booted_ref()?.channel()
+        self.spec.image.as_ref().or(self.booted_ref())?.channel()
     }
 
     /// True when a staged deployment exists.
@@ -344,6 +346,20 @@ mod tests {
         assert!(s.update_available(), "cached update, nothing staged");
         assert_eq!(s.channel(), Some(Channel::Testing));
         assert_eq!(s.booted_ref().unwrap().transport_or_default(), "registry");
+    }
+
+    #[test]
+    fn channel_follows_a_switch_before_the_restart() {
+        let json = r#"{
+            "spec": {"image": {"image": "ghcr.io/eternalcoder454/atlasos:testing", "transport": "registry"}},
+            "status": {
+                "booted": {"image": {"image": {"image": "ghcr.io/eternalcoder454/atlasos:stable", "transport": "registry"}}},
+                "staged": {"image": {"image": {"image": "ghcr.io/eternalcoder454/atlasos:testing", "transport": "registry"}}}
+            }
+        }"#;
+        let s = Status::from_json(json).unwrap();
+        assert_eq!(s.channel(), Some(Channel::Testing));
+        assert_eq!(s.booted_ref().unwrap().channel(), Some(Channel::Stable));
     }
 
     #[test]

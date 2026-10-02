@@ -68,14 +68,24 @@ AtlasPage {
         Item {
             Layout.fillWidth: true
         }
+        // After a switch the restart is the one thing left to do.
+        readonly property bool switched: page.backend.restartNeeded && page.choice === page.backend.channel
+
         SecondaryButton {
             text: qsTr("Restart to update")
-            visible: page.backend.restartNeeded
+            visible: page.backend.restartNeeded && !parent.switched
+            enabled: !page.backend.busy
+            onClicked: page.backend.restartNow()
+        }
+        PrimaryButton {
+            text: qsTr("Restart to update")
+            visible: parent.switched
             enabled: !page.backend.busy
             onClicked: page.backend.restartNow()
         }
         PrimaryButton {
             text: qsTr("Switch channel")
+            visible: !parent.switched
             enabled: !page.backend.busy && page.choice !== "" && page.choice !== page.backend.channel
             onClicked: confirm.open()
         }
