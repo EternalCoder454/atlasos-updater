@@ -144,7 +144,9 @@ AtlasPage {
                     text: qsTr("Report on GitHub instead")
                     visible: card.modelData.githubUrl.length > 0
                     onClicked: {
-                        Qt.openUrlExternally(card.modelData.githubUrl);
+                        if (page.backend.isSafeLink(card.modelData.githubUrl)) {
+                            Qt.openUrlExternally(card.modelData.githubUrl);
+                        }
                         page.backend.discardReport(card.modelData.eventId);
                     }
                 }

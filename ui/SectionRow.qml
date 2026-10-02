@@ -35,7 +35,7 @@ Item {
     }
 
     Layout.fillWidth: true
-    implicitHeight: Math.max(Math.round(Kirigami.Units.gridUnit * 2.7), content.implicitHeight + Kirigami.Units.largeSpacing * 1.6)
+    implicitHeight: Math.max(Math.round(Kirigami.Units.gridUnit * 2.5), content.implicitHeight + Kirigami.Units.largeSpacing * 1.6)
 
     Accessible.role: root.clickable ? Accessible.Button : Accessible.ListItem
     Accessible.name: root.title

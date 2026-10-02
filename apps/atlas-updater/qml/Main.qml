@@ -49,6 +49,21 @@ QQC2.ApplicationWindow {
         }
     }
 
+    // A scheduled restart did not happen.
+    Connections {
+        target: root.backend
+        function onRestartProblem(text) {
+            problemDialog.text = text;
+            problemDialog.open();
+        }
+    }
+    ConfirmDialog {
+        id: problemDialog
+        title: qsTr("Restart problem")
+        acceptText: qsTr("OK")
+        showReject: false
+    }
+
     component NavItem: SidebarItem {
         required property string page
         Layout.fillWidth: true
@@ -122,7 +137,7 @@ QQC2.ApplicationWindow {
                 NavItem {
                     page: "reports"
                     text: qsTr("Crash reports")
-                    icon.name: "emblem-important"
+                    icon.name: "dialog-warning"
                 }
                 NavItem {
                     page: "about"

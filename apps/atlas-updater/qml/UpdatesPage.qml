@@ -102,7 +102,6 @@ AtlasPage {
         Layout.alignment: Qt.AlignLeft
         visible: page.backend.reportsCount > 0
         text: qsTr("A crash report is waiting. Review it")
-        icon.name: "emblem-important"
         onClicked: page.openReports()
     }
 

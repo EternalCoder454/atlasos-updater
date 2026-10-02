@@ -55,7 +55,12 @@ AtlasPage {
         SectionRow {
             title: qsTr("Project page")
             chevron: true
-            onClicked: Qt.openUrlExternally("https://github.com/EternalCoder454/AtlasOS")
+            onClicked: {
+                var url = "https://github.com/EternalCoder454/AtlasOS";
+                if (page.backend.isSafeLink(url)) {
+                    Qt.openUrlExternally(url);
+                }
+            }
         }
     }
 }

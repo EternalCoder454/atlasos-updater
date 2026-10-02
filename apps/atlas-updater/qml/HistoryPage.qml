@@ -42,7 +42,7 @@ AtlasPage {
             delegate: SectionRow {
                 id: row
                 required property var modelData
-                iconName: row.modelData.current ? "emblem-checked" : "view-history"
+                iconName: row.modelData.current ? "checkmark" : "view-history"
                 title: row.modelData.current ? qsTr("%1 (running now)").arg(row.modelData.version) : row.modelData.version
                 subtitle: {
                     var t = qsTr("First started %1").arg(Dates.longDate(row.modelData.booted));
