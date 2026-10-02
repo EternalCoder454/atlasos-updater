@@ -166,7 +166,8 @@ fn unsafe_definition(chars: &[char]) -> Option<usize> {
     if chars.get(k) != Some(&'[') {
         return None;
     }
-    let close = (k + 1..n).find(|&i| chars[i] == ']')?;
+    // the first `]` that is not escaped (`[a\]b]: dest`)
+    let close = (k + 1..n).find(|&i| chars[i] == ']' && chars[i - 1] != '\\')?;
     if chars.get(close + 1) != Some(&':') {
         return None;
     }
@@ -182,6 +183,32 @@ fn unsafe_definition(chars: &[char]) -> Option<usize> {
     (!starts_https(&dest)).then_some(k)
 }
 
+/// For each backtick run (maximal, so a longer run is never split) the start
+/// of the next run of exactly the same length, indexed by its start.
+fn code_closers(chars: &[char]) -> Vec<Option<(usize, usize)>> {
+    let n = chars.len();
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '`' {
+            let st = i;
+            while i < n && chars[i] == '`' {
+                i += 1;
+            }
+            runs.push((st, i - st));
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = vec![None; n];
+    let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for &(st, len) in runs.iter().rev() {
+        out[st] = seen.get(&len).map(|&c| (len, c));
+        seen.insert(len, st);
+    }
+    out
+}
+
 fn sanitize_line(line: &str) -> String {
     let mut chars: Vec<char> = line.chars().take(MAX_LINE + 1).collect();
     let cut = chars.len() > MAX_LINE;
@@ -190,6 +217,7 @@ fn sanitize_line(line: &str) -> String {
     let next_gt = next_of(&chars, '>');
     let next_paren = next_of(&chars, ')');
     let escape_def = unsafe_definition(&chars);
+    let closers = code_closers(&chars);
     let mut o = Out {
         s: String::with_capacity(n),
         bs: 0,
@@ -204,8 +232,36 @@ fn sanitize_line(line: &str) -> String {
         match c {
             // No `![` ever survives, so no Markdown image can be formed
             // (however the brackets are nested or split over lines).
+            // (An escaped bracket is literal text.)
             '[' if o.last == Some('!') => {
+                o.push('\\');
+                o.push('[');
                 i += 1;
+                continue;
+            }
+            // A code span is literal in Markdown, so it passes through as is
+            // (`Vec<String>`). Only a span that really closes on this line; an
+            // escaped or unclosed run is plain text and is handled as such.
+            '`' if o.bs.is_multiple_of(2) && (i == 0 || chars[i - 1] != '`') => {
+                if let Some((len, close)) = closers[i] {
+                    for &ch in &chars[i..close + len] {
+                        o.push(ch);
+                    }
+                    i = close + len;
+                } else {
+                    while i < n && chars[i] == '`' {
+                        o.push('`');
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            '`' => {
+                // an escaped run: all of it is text (never an opener here)
+                while i < n && chars[i] == '`' {
+                    o.push('`');
+                    i += 1;
+                }
                 continue;
             }
             // A link whose target is not https loses its target.
@@ -221,6 +277,10 @@ fn sanitize_line(line: &str) -> String {
                     o.push(']');
                     if next_paren[i + 2] < n {
                         i = next_paren[i + 2] + 1;
+                        // `](x)(http://...)` must not join into a new target
+                        if chars.get(i) == Some(&'(') {
+                            o.push(' ');
+                        }
                     } else {
                         o.push(' ');
                         i += 1;
@@ -242,8 +302,12 @@ fn sanitize_line(line: &str) -> String {
                     let autolink = starts_https(inner)
                         && !inner.iter().any(|c| c.is_whitespace() || *c == '<');
                     if autolink || tag_is_plain(inner) {
-                        o.push('<');
-                        i += 1;
+                        // the whole tag at once: a backtick inside an autolink
+                        // is not the start of a code span
+                        for &ch in &chars[i..=gt] {
+                            o.push(ch);
+                        }
+                        i = gt + 1;
                         continue;
                     }
                 }
@@ -261,11 +325,52 @@ fn sanitize_line(line: &str) -> String {
     o.s
 }
 
+/// A fence line: up to 3 spaces, then 3 or more backticks (none in the rest
+/// of the line) or tildes. Returns the fence character and its length.
+fn fence_of(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start_matches(' ');
+    if line.len() - t.len() > 3 {
+        return None;
+    }
+    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let len = t.chars().take_while(|&x| x == c).count();
+    let rest = &t[len..];
+    (len >= 3 && !(c == '`' && rest.contains('`'))).then_some((c, len))
+}
+
 /// Release notes are untrusted text. Nothing in the result can make Qt load
 /// a resource: no Markdown image survives, no HTML except plain formatting
-/// tags, and links keep only `https://` targets. Linear time and no recursion.
+/// tags, and links keep only `https://` targets. Code spans and fenced code
+/// blocks are literal text and pass through. Linear time, no recursion.
 pub fn sanitize(md: &str) -> String {
-    md.lines().map(sanitize_line).collect::<Vec<_>>().join("\n")
+    // MD4C ends a line at \r too
+    let md = md.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = Vec::new();
+    // the fence that is open, and whether the previous line was blank (a
+    // fence only counts after a blank line, so it is never inside an HTML
+    // block or a paragraph that Markdown may read differently)
+    let mut open: Option<(char, usize)> = None;
+    let mut prev_blank = true;
+    for line in md.lines() {
+        let blank = line.trim().is_empty();
+        match (open, fence_of(line)) {
+            (Some((c, len)), f) => {
+                let closes = f.is_some_and(|(fc, fl)| fc == c && fl >= len)
+                    && line.trim().chars().all(|x| x == c);
+                if closes {
+                    open = None;
+                }
+                out.push(line.to_string());
+            }
+            (None, Some(f)) if prev_blank => {
+                open = Some(f);
+                out.push(line.to_string());
+            }
+            _ => out.push(sanitize_line(line)),
+        }
+        prev_blank = blank;
+    }
+    out.join("\n")
 }
 
 /// Pulls `.body` out of a GitHub release JSON document.
@@ -368,7 +473,7 @@ mod tests {
         }
         assert_eq!(
             sanitize("Hi ![pixel](http://t.example/p.png) there"),
-            "Hi !pixel] there"
+            "Hi !\\[pixel] there"
         );
     }
 
@@ -480,5 +585,39 @@ mod tests {
         assert_eq!(fetch(&t, "44.2").unwrap(), Notes::Found("hello".into()));
         assert_eq!(fetch(&t, "44.3").unwrap(), Notes::Missing);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn round5_sanitizer_cases() {
+        // a dropped target cannot be joined with a following one
+        let o = sanitize("[a](x)(http://evil.example/p)");
+        assert!(!o.contains("](http://"), "{o}");
+        // code spans and fences are literal text
+        assert_eq!(sanitize("use `Vec<String>` here"), "use `Vec<String>` here");
+        assert_eq!(
+            sanitize("text\n\n```\nlet v: Vec<String>;\n![x](http://e/i.png)\n```\nafter <b>"),
+            "text\n\n```\nlet v: Vec<String>;\n![x](http://e/i.png)\n```\nafter <b>"
+        );
+        // ... but not a fence glued to a paragraph, nor an unclosed span
+        assert!(!sanitize("para\n```\n![x](http://e/i.png)").contains("![x]"));
+        let o = sanitize("`unclosed ![x](http://e/i.png)");
+        assert!(!o.contains("![x]"), "{o}");
+        // a backtick inside an autolink does not open a span
+        let o = sanitize("<https://a`b> ![i](http://e/i.png) `");
+        assert!(!o.contains("![i]"), "{o}");
+        // an escaped backtick does not open one either
+        let o = sanitize("\\`x ![i](http://e/i.png) `");
+        assert!(!o.contains("![i]"), "{o}");
+        // a bare CR ends a line
+        let o = sanitize("x\r[r]: http://e/p");
+        assert!(o.contains("\n\\[r]:"), "{o:?}");
+        // an escaped bracket in a definition label
+        let o = sanitize("[a\\]b]: http://x");
+        assert!(o.starts_with("\\["), "{o}");
+        // `!` before a bracket stays visible
+        assert_eq!(
+            sanitize("Fixed![#12](https://x.y/1)"),
+            "Fixed!\\[#12](https://x.y/1)"
+        );
     }
 }
