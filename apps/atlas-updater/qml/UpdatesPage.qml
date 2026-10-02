@@ -356,7 +356,8 @@ AtlasPage {
             value: page.backend.loaded ? page.version(page.backend.currentVersion, page.backend.currentDate) : "…"
         }
         SectionRow {
-            title: qsTr("Ready to install")
+            // "Ready to install" only once it is downloaded.
+            title: !page.backend.hasStaged && page.backend.updateAvailable ? qsTr("Available") : qsTr("Ready to install")
             value: page.backend.hasStaged ? page.version(page.backend.stagedVersion, page.backend.stagedDate) : (page.backend.updateAvailable ? qsTr("%1, not downloaded yet").arg(page.backend.availableVersion) : qsTr("Nothing waiting"))
         }
         SectionRow {
