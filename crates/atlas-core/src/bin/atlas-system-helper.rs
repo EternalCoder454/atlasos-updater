@@ -49,7 +49,14 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match serve(builder, Arc::new(SystemBootc), IDLE_TIMEOUT).await {
+            match serve(
+                builder,
+                Arc::new(SystemBootc),
+                IDLE_TIMEOUT,
+                Some(events::DEFAULT_PATH.into()),
+            )
+            .await
+            {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("atlas-system-helper: {e}");

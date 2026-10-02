@@ -7,10 +7,13 @@
 pub mod events;
 pub mod service;
 
+use std::cmp::Ordering as Cmp;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::bootc::{Channel, Status};
 use crate::history;
@@ -18,6 +21,10 @@ use crate::history;
 /// bootc is always run by absolute path.
 pub const BOOTC: &str = "/usr/bin/bootc";
 const STDERR_TAIL: usize = 4096;
+/// Most output kept from bootc (stdout and stderr each).
+const OUTPUT_CAP: usize = 4 * 1024 * 1024;
+const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
+const LONG_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Errors returned over D-Bus as `net.eterneon.atlas.Error.*`.
 #[derive(Debug, zbus::DBusError)]
@@ -37,24 +44,84 @@ pub trait BootcRunner: Send + Sync + 'static {
     fn run(&self, args: &[&str]) -> Result<String, String>;
 }
 
-/// The real runner: `/usr/bin/bootc` with a cleared environment.
+/// The real runner: `/usr/bin/bootc` with a cleared environment, a wall-clock
+/// timeout (2 minutes for status and check, 60 for upgrade, rollback and
+/// switch) and capped output.
 pub struct SystemBootc;
 
 impl BootcRunner for SystemBootc {
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        let out = Command::new(BOOTC)
-            .args(args)
-            .env_clear()
-            .env("PATH", "/usr/sbin:/usr/bin")
-            .env("LANG", "C.UTF-8")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run {BOOTC}: {e}"))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(tail(&String::from_utf8_lossy(&out.stderr), STDERR_TAIL))
+        let short = matches!(args, ["status", ..] | ["upgrade", "--check"]);
+        let timeout = if short { SHORT_TIMEOUT } else { LONG_TIMEOUT };
+        run_limited(Path::new(BOOTC), args, timeout, OUTPUT_CAP)
+    }
+}
+
+/// Read `r` to the end, keeping at most `cap` bytes; the flag says if more
+/// came (the rest is drained so the child never blocks on a full pipe).
+fn read_capped(mut r: impl Read, cap: usize) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    let mut over = false;
+    let mut buf = [0u8; 16 * 1024];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 {
+            break;
         }
+        let room = cap.saturating_sub(kept.len());
+        kept.extend_from_slice(&buf[..n.min(room)]);
+        over |= n > room;
+    }
+    (kept, over)
+}
+
+/// Run `program` with a cleared environment; kill it after `timeout`; fail if
+/// it prints more than `cap` bytes on stdout.
+fn run_limited(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    cap: usize,
+) -> Result<String, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin")
+        .env("LANG", "C.UTF-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
+    let out = child.stdout.take().ok_or("no stdout")?;
+    let err = child.stderr.take().ok_or("no stderr")?;
+    let out_t = std::thread::spawn(move || read_capped(out, cap));
+    let err_t = std::thread::spawn(move || read_capped(err, cap));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // readers end when the pipes close; do not wait for stragglers
+                return Err(format!(
+                    "bootc did not finish within {} s and was stopped",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("waiting for bootc failed: {e}")),
+        }
+    };
+    let (stdout, over) = out_t.join().map_err(|_| "reader failed")?;
+    let (stderr, _) = err_t.join().map_err(|_| "reader failed")?;
+    if status.success() {
+        if over {
+            return Err("bootc printed too much output".into());
+        }
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    } else {
+        Err(tail(&String::from_utf8_lossy(&stderr), STDERR_TAIL))
     }
 }
 
@@ -69,6 +136,21 @@ fn tail(s: &str, max: usize) -> String {
         start += 1;
     }
     s[start..].to_string()
+}
+
+/// Compare dotted numeric versions like `44.20261008`; `None` if either has a
+/// non-numeric part.
+fn version_cmp(a: &str, b: &str) -> Option<Cmp> {
+    let parse = |v: &str| {
+        v.split('.')
+            .map(|p| p.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    let (mut a, mut b) = (parse(a)?, parse(b)?);
+    let n = a.len().max(b.len());
+    a.resize(n, 0);
+    b.resize(n, 0);
+    Some(a.cmp(&b))
 }
 
 /// The five operations.
@@ -93,6 +175,12 @@ impl Op {
         }
     }
 
+    /// True for operations that change the system (they hold a shutdown
+    /// inhibitor in the service).
+    pub fn changes_system(&self) -> bool {
+        matches!(self, Op::Upgrade | Op::Rollback | Op::SwitchChannel(_))
+    }
+
     /// Reject bad arguments before anything else happens.
     pub fn validate(&self) -> Result<(), HelperError> {
         if let Op::SwitchChannel(c) = self {
@@ -103,7 +191,8 @@ impl Op {
     }
 }
 
-/// Runs operations one at a time on a [`BootcRunner`].
+/// Runs operations on a [`BootcRunner`]: one changing operation at a time;
+/// `Status` is read-only and never takes the busy flag.
 pub struct Core {
     runner: Arc<dyn BootcRunner>,
     busy: AtomicBool,
@@ -140,7 +229,13 @@ impl Core {
     }
 
     /// Record the outcome of the operations that change the system.
-    fn record_outcome(&self, op: &Op, result: &Result<String, HelperError>) {
+    /// `staged_before` is the staged digest before an upgrade.
+    fn record_outcome(
+        &self,
+        op: &Op,
+        staged_before: Option<&str>,
+        result: &Result<String, HelperError>,
+    ) {
         let (ok, fail) = match op {
             Op::Upgrade => ("update-staged", "update-failed"),
             Op::Rollback => ("rollback-requested", "rollback-failed"),
@@ -149,14 +244,19 @@ impl Core {
         };
         match result {
             Ok(json) => {
-                let staged = Status::from_json(json)
-                    .ok()
-                    .and_then(|s| s.status.staged)
+                let staged = Status::from_json(json).ok().and_then(|s| s.status.staged);
+                let version = staged
+                    .as_ref()
                     .and_then(|b| b.version().map(str::to_string));
                 match op {
-                    // nothing staged: there was no update, nothing to record
-                    Op::Upgrade if staged.is_none() => {}
-                    Op::Upgrade | Op::Rollback => self.event(ok, staged, None),
+                    // nothing new staged: no update, or the same one as before
+                    Op::Upgrade => {
+                        let digest = staged.as_ref().and_then(|b| b.digest());
+                        if digest.is_some() && digest != staged_before {
+                            self.event(ok, version, None);
+                        }
+                    }
+                    Op::Rollback => self.event(ok, version, None),
                     _ => self.event(ok, None, None),
                 }
             }
@@ -172,6 +272,9 @@ impl Core {
     /// Run `op` and return `bootc status --json` after it. Blocking.
     pub fn execute(&self, op: &Op) -> Result<String, HelperError> {
         op.validate()?;
+        if *op == Op::Status {
+            return self.status_json();
+        }
         if self
             .busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -180,8 +283,13 @@ impl Core {
             return Err(HelperError::Busy("another operation is running".into()));
         }
         let _guard = BusyGuard(&self.busy);
+        let before = (self.events.is_some() && *op == Op::Upgrade)
+            .then(|| self.status().ok())
+            .flatten()
+            .and_then(|s| s.status.staged)
+            .and_then(|b| b.digest().map(str::to_string));
         let result = self.run_op(op);
-        self.record_outcome(op, &result);
+        self.record_outcome(op, before.as_deref(), &result);
         result
     }
 
@@ -206,12 +314,21 @@ impl Core {
                 let new = booted
                     .with_channel(channel)
                     .map_err(|e| HelperError::InvalidArgument(e.to_string()))?;
-                self.bootc(&[
-                    "switch",
-                    "--transport",
-                    new.transport_or_default(),
-                    &new.image,
-                ])?;
+                let mut args = vec!["switch", "--transport", new.transport_or_default()];
+                match new.signature.as_ref() {
+                    None => {}
+                    Some(serde_json::Value::String(s)) if s == "insecure" => {}
+                    Some(serde_json::Value::String(s)) if s == "containerPolicy" => {
+                        args.push("--enforce-container-sigpolicy");
+                    }
+                    Some(_) => {
+                        return Err(HelperError::Failed(
+                            "the booted image uses a signature setting this helper cannot carry over; use bootc switch by hand".into(),
+                        ));
+                    }
+                }
+                args.push(&new.image);
+                self.bootc(&args)?;
             }
         }
         self.status_json()
@@ -237,41 +354,46 @@ impl Core {
         let wrote = history::record_boot(path, &status, &history::now_rfc3339())
             .map_err(|e| HelperError::Failed(format!("cannot write history: {e}")))?;
         if let (true, Some(prior)) = (wrote, prior) {
-            let now = status
-                .status
-                .booted
-                .as_ref()
-                .and_then(|b| b.version().map(str::to_string));
-            self.boot_event(&prior, now);
+            let booted = status.status.booted.as_ref();
+            let version = booted.and_then(|b| b.version().map(str::to_string));
+            let image = booted
+                .and_then(|b| b.image.as_ref())
+                .map(|i| i.image.image.clone());
+            self.boot_event(&prior, version, image.as_deref());
         }
         Ok(wrote)
     }
 
-    /// `update-applied`, `rollback-applied` or `automatic-rollback`, from the
-    /// versions of the previous and the current boot. An older version
-    /// without a `rollback-requested` since the previous boot is automatic
-    /// (greenboot gave up and ostree went back).
-    fn boot_event(&self, prior: &history::Entry, now: Option<String>) {
+    /// `update-applied`, `rollback-applied`, `automatic-rollback` or
+    /// `channel-switch-applied`, from the previous and the current boot.
+    /// A different image name or tag is a channel switch, not an update. An
+    /// older version without a `rollback-requested` since the previous boot
+    /// is automatic (greenboot gave up and ostree went back). Versions that
+    /// are not dotted numbers record nothing.
+    fn boot_event(&self, prior: &history::Entry, now: Option<String>, image: Option<&str>) {
+        if image.is_some_and(|i| !prior.image.is_empty() && i != prior.image) {
+            self.event("channel-switch-applied", now, None);
+            return;
+        }
         let (Some(old), Some(new)) = (prior.version.as_deref(), now.as_deref()) else {
             return;
         };
-        if new > old {
-            self.event("update-applied", now.clone(), None);
-        } else if new < old {
-            let requested = self.events.as_deref().is_some_and(|p| {
-                events::read(p)
-                    .iter()
-                    .any(|e| e.event == "rollback-requested" && e.time >= prior.first_booted)
-            });
-            self.event(
-                if requested {
+        match version_cmp(new, old) {
+            Some(Cmp::Greater) => self.event("update-applied", now.clone(), None),
+            Some(Cmp::Less) => {
+                let requested = self.events.as_deref().is_some_and(|p| {
+                    events::read(p)
+                        .iter()
+                        .any(|e| e.event == "rollback-requested" && e.time >= prior.first_booted)
+                });
+                let name = if requested {
                     "rollback-applied"
                 } else {
                     "automatic-rollback"
-                },
-                now.clone(),
-                None,
-            );
+                };
+                self.event(name, now.clone(), None);
+            }
+            _ => {}
         }
     }
 
@@ -299,6 +421,7 @@ mod tests {
         calls: Mutex<Vec<Vec<String>>>,
         status: String,
         fail_on: Option<&'static str>,
+        after_upgrade: Option<String>,
     }
 
     impl Fake {
@@ -307,6 +430,7 @@ mod tests {
                 calls: Mutex::default(),
                 status: status.into(),
                 fail_on: None,
+                after_upgrade: None,
             })
         }
         fn calls(&self) -> Vec<Vec<String>> {
@@ -324,7 +448,11 @@ mod tests {
                 return Err("boom".into());
             }
             if args == ["status", "--json"] {
-                return Ok(self.status.clone());
+                let upgraded = self.calls.lock().unwrap().iter().any(|c| c == &["upgrade"]);
+                return Ok(match (&self.after_upgrade, upgraded) {
+                    (Some(a), true) => a.clone(),
+                    _ => self.status.clone(),
+                });
             }
             Ok(String::new())
         }
@@ -420,6 +548,7 @@ mod tests {
         let f = Arc::new(Fake {
             calls: Mutex::default(),
             status: PLAIN.into(),
+            after_upgrade: None,
             fail_on: Some("upgrade"),
         });
         match core(&f).execute(&Op::Upgrade) {
@@ -460,7 +589,12 @@ mod tests {
         let t = std::thread::spawn(move || c2.execute(&Op::Upgrade));
         started_rx.recv().unwrap();
         assert!(c.is_busy());
-        assert!(matches!(c.execute(&Op::Status), Err(HelperError::Busy(_))));
+        // Status is read-only and never takes the busy flag
+        assert!(c.execute(&Op::Status).is_ok());
+        assert!(matches!(
+            c.execute(&Op::CheckForUpdate),
+            Err(HelperError::Busy(_))
+        ));
         assert!(matches!(
             c.execute(&Op::Rollback),
             Err(HelperError::Busy(_))
@@ -508,7 +642,13 @@ mod tests {
     #[test]
     fn operations_record_events() {
         let d = tempfile::tempdir().unwrap();
-        let ok = Fake::new(BOOTED_WITH_UPDATE); // has a staged deployment
+        // nothing staged before the upgrade, a staged deployment after it
+        let ok = Arc::new(Fake {
+            calls: Mutex::default(),
+            status: PLAIN.into(),
+            fail_on: None,
+            after_upgrade: Some(BOOTED_WITH_UPDATE.into()),
+        });
         let c = with_ev(&ok, &d);
         c.execute(&Op::Upgrade).unwrap();
         c.execute(&Op::Rollback).unwrap();
@@ -524,6 +664,11 @@ mod tests {
                 .as_deref(),
             Some("44.20261008")
         );
+        // the same deployment already staged: not a new event
+        let dd = tempfile::tempdir().unwrap();
+        let cc = with_ev(&Fake::new(BOOTED_WITH_UPDATE), &dd);
+        cc.execute(&Op::Upgrade).unwrap();
+        assert!(names(&dd).is_empty());
         // no staged deployment: nothing was updated
         let d2 = tempfile::tempdir().unwrap();
         with_ev(&Fake::new(PLAIN), &d2)
@@ -536,6 +681,7 @@ mod tests {
             let f = Arc::new(Fake {
                 calls: Mutex::default(),
                 status: PLAIN.into(),
+                after_upgrade: None,
                 fail_on: Some(what),
             });
             assert!(with_ev(&f, &d3).execute(&op).is_err());
@@ -621,5 +767,102 @@ mod tests {
                 "net.eterneon.atlas.system.switch-channel"
             ]
         );
+    }
+
+    #[test]
+    fn dotted_version_compare() {
+        assert_eq!(
+            version_cmp("44.20261008", "44.20261001"),
+            Some(Cmp::Greater)
+        );
+        assert_eq!(version_cmp("44.9", "44.10"), Some(Cmp::Less));
+        assert_eq!(version_cmp("44.1", "44.1.0"), Some(Cmp::Equal));
+        assert_eq!(version_cmp("44.x", "44.1"), None);
+    }
+
+    #[test]
+    fn image_change_between_boots_is_a_channel_switch() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("history.jsonl");
+        let testing = BOOTED_WITH_UPDATE.replace("atlasos:stable", "atlasos:testing");
+        with_ev(&Fake::new(BOOTED_WITH_UPDATE), &d)
+            .record_boot(&p)
+            .unwrap();
+        let newer = testing
+            .replace("44.20261001", "44.20261003")
+            .replace(&"1".repeat(64), &"9".repeat(64));
+        with_ev(&Fake::new(&newer), &d).record_boot(&p).unwrap();
+        assert_eq!(names(&d), ["channel-switch-applied"]);
+    }
+
+    /// The fixture with `signature` added to the booted ref (the third
+    /// `"transport"`: spec, staged, booted).
+    fn signed(sig: &str) -> String {
+        let pat = "\"transport\": \"registry\"";
+        let (i, _) = BOOTED_WITH_UPDATE.match_indices(pat).nth(2).unwrap();
+        let end = i + pat.len();
+        format!(
+            "{}, \"signature\": {sig}{}",
+            &BOOTED_WITH_UPDATE[..end],
+            &BOOTED_WITH_UPDATE[end..]
+        )
+    }
+
+    #[test]
+    fn switch_carries_the_signature_policy_or_refuses() {
+        let f = Fake::new(&signed("\"containerPolicy\""));
+        core(&f)
+            .execute(&Op::SwitchChannel("testing".into()))
+            .unwrap();
+        assert!(f.calls()[1].contains(&"--enforce-container-sigpolicy".to_string()));
+        assert_eq!(
+            f.calls()[1].last().unwrap(),
+            "ghcr.io/eternalcoder454/atlasos:testing"
+        );
+        let f = Fake::new(&signed("\"insecure\""));
+        core(&f)
+            .execute(&Op::SwitchChannel("testing".into()))
+            .unwrap();
+        assert!(!f.calls()[1].contains(&"--enforce-container-sigpolicy".to_string()));
+        let f = Fake::new(&signed("{\"ostreeRemoteSignature\": \"fedora\"}"));
+        assert!(matches!(
+            core(&f).execute(&Op::SwitchChannel("testing".into())),
+            Err(HelperError::Failed(_))
+        ));
+        assert_eq!(f.calls().len(), 1, "refused before switching");
+    }
+
+    #[test]
+    fn runner_times_out_and_caps_output() {
+        let sh = Path::new("/bin/sh");
+        let t = Instant::now();
+        let e = run_limited(sh, &["-c", "sleep 30"], Duration::from_millis(300), 1000).unwrap_err();
+        assert!(e.contains("was stopped") && t.elapsed() < Duration::from_secs(10));
+        let e = run_limited(
+            sh,
+            &["-c", "yes | head -c 3000000"],
+            Duration::from_secs(20),
+            1000,
+        )
+        .unwrap_err();
+        assert!(e.contains("too much"));
+        assert_eq!(
+            run_limited(
+                sh,
+                &["-c", "echo hi; echo $LANG"],
+                Duration::from_secs(20),
+                1000
+            )
+            .unwrap(),
+            "hi\nC.UTF-8\n"
+        );
+        let e = run_limited(
+            sh,
+            &["-c", "echo bad >&2; exit 3"],
+            Duration::from_secs(20),
+            1000,
+        )
+        .unwrap_err();
+        assert_eq!(e, "bad");
     }
 }

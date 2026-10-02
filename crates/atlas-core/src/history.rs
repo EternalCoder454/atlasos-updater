@@ -1,9 +1,8 @@
 //! Boot history: `/var/lib/atlas-core/history.jsonl`, one JSON object per line,
 //! appended by `atlas-system-helper record-boot` when the booted digest changes.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,15 +58,8 @@ pub fn append_if_new(path: &Path, entry: &Entry) -> io::Result<bool> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let mut line = serde_json::to_string(entry).map_err(io::Error::other)?;
-    line.push('\n');
-    let mut f = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o644)
-        .open(path)?;
-    f.write_all(line.as_bytes())?;
-    f.sync_all()?;
+    let line = serde_json::to_string(entry).map_err(io::Error::other)?;
+    crate::fsutil::append_line(path, &line, 0o644)?;
     Ok(true)
 }
 

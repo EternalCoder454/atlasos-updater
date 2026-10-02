@@ -186,7 +186,6 @@ impl std::error::Error for RefError {}
 /// Transports a switch may use. The transport of the booted ref is kept as is.
 const TRANSPORTS: &[&str] = &[
     "registry",
-    "docker",
     "oci",
     "oci-archive",
     "containers-storage",

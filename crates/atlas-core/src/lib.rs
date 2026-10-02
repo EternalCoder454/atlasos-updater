@@ -13,6 +13,7 @@ pub mod bootc;
 pub mod crash;
 #[cfg(feature = "flatpak")]
 pub mod flatpak;
+mod fsutil;
 pub mod helper;
 pub mod helper_client;
 pub mod history;
