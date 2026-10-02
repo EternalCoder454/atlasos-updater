@@ -48,9 +48,10 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
     s_previousHandler = qInstallMessageHandler(messageHandler);
-    // Together these give the D-Bus name net.eterneon.atlas.updater.
+    // The application name matches the binary and the app ID; the name and the
+    // domain give the single-instance D-Bus name.
     QApplication::setOrganizationDomain(QStringLiteral("atlas.eterneon.net"));
-    QApplication::setApplicationName(QStringLiteral("updater"));
+    QApplication::setApplicationName(QStringLiteral("atlas-updater"));
     QApplication::setApplicationDisplayName(QStringLiteral("Atlas Updater"));
     QApplication::setApplicationVersion(QStringLiteral(ATLAS_UPDATER_VERSION));
     QApplication::setDesktopFileName(QStringLiteral("net.eterneon.atlas.updater"));
