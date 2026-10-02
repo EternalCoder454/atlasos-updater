@@ -481,7 +481,15 @@ impl qobject::Backend {
             }
             Err(OpError::Cancelled) => {
                 if foreground {
-                    self.as_mut().set_info_text(q(errors::DENIED_TEXT));
+                    let action = match op {
+                        Op::Check => "check for updates",
+                        Op::Upgrade => "download updates",
+                        Op::Rollback => "roll back the update",
+                        Op::Switch(_) => "switch channels",
+                        Op::Status => "read the update state",
+                    };
+                    self.as_mut()
+                        .set_error_text(q(&errors::denied_text(action)));
                 }
             }
             Err(OpError::Message(m)) => {

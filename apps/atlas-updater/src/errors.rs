@@ -44,8 +44,14 @@ pub fn friendly(e: &Error) -> OpError {
     }
 }
 
-/// Authorization needed by `Cancelled`, in words.
-pub const DENIED_TEXT: &str = "Authorization was cancelled or denied. Nothing was changed.";
+/// What `Cancelled` says for `action` ("check for updates"): polkit refuses
+/// without a prompt in an inactive or remote session, and a dismissed prompt
+/// looks the same, so the text covers both. Shown as an error, never silently.
+pub fn denied_text(action: &str) -> String {
+    format!(
+        "You aren't allowed to {action} from this session, or the password prompt was cancelled. Nothing was changed."
+    )
+}
 
 fn dbus_message(e: &zbus::Error) -> String {
     if let zbus::Error::MethodError(name, _, _) = e {
@@ -74,6 +80,13 @@ mod tests {
             message: String::new(),
         };
         assert_eq!(friendly(&e), OpError::Cancelled);
+    }
+
+    #[test]
+    fn a_denial_names_the_action() {
+        let t = denied_text("check for updates");
+        assert!(t.starts_with("You aren't allowed to check for updates from this session"));
+        assert!(t.contains("Nothing was changed"));
     }
 
     #[test]
