@@ -105,12 +105,14 @@ pub fn is_safe_link(link: &str) -> bool {
 
 /// Last labels that are file extensions or names of tools and are not top-level
 /// domains: `Node.js`, `notes.txt`. Real TLDs (`md`, `rs`, `py`, `sh`, `zip`,
-/// `pl`, `cc`, `so`, ...) must never be listed: `microsoft.zip` is a site.
+/// `pl`, `cc`, `so`, `java`, ...) must never be listed: `microsoft.zip` is a site.
+/// Checked against IANA tlds-alpha-by-domain.txt version 2026100200; new gTLDs
+/// can appear, so keep this list short.
 const FILE_TAILS: &[&str] = &[
     "js", "ts", "rb", "go", "cpp", "hpp", "txt", "json", "toml", "yaml", "yml", "xml", "html",
     "htm", "css", "csv", "log", "conf", "cfg", "ini", "lock", "rpm", "deb", "gz", "xz", "tar",
     "tgz", "iso", "img", "png", "jpg", "jpeg", "gif", "svg", "pdf", "doc", "docx", "odt", "rlib",
-    "service", "desktop", "patch", "diff", "php", "java", "kt", "lua", "mjs", "cjs", "jsx", "tsx",
+    "service", "desktop", "patch", "diff", "php", "kt", "lua", "mjs", "cjs", "jsx", "tsx",
 ];
 
 /// Drops a leading `www.` when at least two labels remain.
@@ -240,7 +242,9 @@ pub fn render(md: &str) -> String {
                         out.push_str("</a>");
                         // Text that names another site than the link goes to:
                         // show where it really goes.
-                        if text_host(&text).is_some_and(|t| t != strip_www(&host)) {
+                        if text_host(&text)
+                            .is_some_and(|t| t != strip_www(host.trim_end_matches('.')))
+                        {
                             out.push_str(" (");
                             escape(&host, &mut out);
                             out.push(')');
@@ -306,7 +310,7 @@ pub fn render_plain(md: &str) -> String {
             }
             Event::End(TagEnd::Link) => {
                 if let Some((Some(host), text)) = links.pop()
-                    && text_host(&text).is_some_and(|t| t != strip_www(&host))
+                    && text_host(&text).is_some_and(|t| t != strip_www(host.trim_end_matches('.')))
                 {
                     out.push_str(" (");
                     out.push_str(&host);
@@ -596,6 +600,7 @@ mod tests {
             "[bank.md](https://evil.example)",
             "[README.md](https://evil.example)",
             "[bank.rs](https://evil.example)",
+            "[oracle.java](https://evil.example)",
         ] {
             assert!(render(md).contains("</a> (evil.example)"), "{md}");
             assert!(render_plain(md).ends_with("(evil.example)"), "{md}");
@@ -609,6 +614,8 @@ mod tests {
         ] {
             assert!(render(md).contains("</a> (evil.example)"), "{md}");
         }
+        assert!(!render("[bank.com](https://bank.com./)").contains("</a> ("));
+        assert!(!render_plain("[bank.com](https://bank.com./)").contains('('));
         assert!(!render("[www.com](https://www.com/)").contains("</a> ("));
         assert!(render("[www.com](https://evil.example/)").contains("</a> (evil.example)"));
         // the plain text carries the same warning and drops hidden characters

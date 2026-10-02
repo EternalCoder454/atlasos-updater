@@ -14,7 +14,7 @@ pub mod qobject {
         #[qproperty(bool, busy, cxx_name = "busy")]
         #[qproperty(QString, busy_text, cxx_name = "busyText")]
         /// The system operation that set `busy` ("check", "download",
-        /// "rollback", "cancelRollback", "switch", "status" or "sendReport"),
+        /// "rollback", "cancelRollback", "switch" or "sendReport"),
         /// or "" when none runs. Only that operation clears it.
         #[qproperty(QString, busy_op, cxx_name = "busyOp")]
         /// The app operation behind `appsBusy` ("checkApps" or "updateApps"),
@@ -23,7 +23,7 @@ pub mod qobject {
         /// A restart of the computer has been asked for and has not ended.
         #[qproperty(bool, restarting, cxx_name = "restarting")]
         /// The operation whose failure set `errorText` (the `busyOp` names,
-        /// plus "restart", "crashSetting", "discardReport" and "timer", which
+        /// plus "status", "restart", "crashSetting", "discardReport" and "timer", which
         /// only ever appear here); "" when `errorText` is empty.
         #[qproperty(QString, error_op, cxx_name = "errorOp")]
         #[qproperty(bool, loaded, cxx_name = "loaded")]
@@ -266,6 +266,7 @@ pub struct BackendRust {
     reports_count: i32,
     sent_json: QString,
     fixtures_active: bool,
+    fixture_notified: String,
 
     // Not exposed to QML.
     config: Config,
@@ -540,6 +541,10 @@ impl qobject::Backend {
         }
         match res {
             Ok(st) => {
+                // a good read ends the "status" error a failed first read left
+                if self.error_op().to_string() == "status" {
+                    self.as_mut().set_error("", QString::default());
+                }
                 self.as_mut().apply_status(&st);
                 if foreground {
                     let v = self.rust().view.clone();
@@ -612,11 +617,22 @@ impl qobject::Backend {
             .set_available_is_rollback(v.available_is_rollback);
         let staged = v.staged.clone();
         // Tell the user once per staged image, even across restarts of the tray.
+        // (fixture mode keeps this in memory and never touches real settings)
+        let fix = self.rust().fixtures.is_some();
+        let seen = if fix {
+            Some(self.rust().fixture_notified.clone())
+        } else {
+            rc::get(RC_NOTIFIED, "StagedDigest")
+        };
         if staged.present
             && !staged.digest.is_empty()
-            && rc::get(RC_NOTIFIED, "StagedDigest").as_deref() != Some(staged.digest.as_str())
+            && seen.as_deref() != Some(staged.digest.as_str())
         {
-            rc::set(RC_NOTIFIED, "StagedDigest", Some(&staged.digest));
+            if fix {
+                self.as_mut().rust_mut().fixture_notified = staged.digest.clone();
+            } else {
+                rc::set(RC_NOTIFIED, "StagedDigest", Some(&staged.digest));
+            }
             self.as_mut().update_staged(q(&staged.version));
         }
         // Notes follow the version, but only while a window is open.
@@ -845,8 +861,13 @@ impl qobject::Backend {
                 }
             });
         }) {
-            let _ =
-                qt_fail.queue(|obj| obj.apps_listed(Err("could not start a worker thread".into())));
+            let _ = qt_fail.queue(|mut obj| {
+                obj.as_mut().set_apps_busy(false);
+                obj.as_mut().set_apps_op(QString::default());
+                obj.as_mut().set_apps_status(QString::default());
+                obj.as_mut()
+                    .set_apps_error(q("Could not update apps: could not start a worker thread"));
+            });
         }
     }
 
@@ -860,6 +881,9 @@ impl qobject::Backend {
     /// one: only that restart's end (a failure, or a logout that did not
     /// happen) clears the schedule; a manual restart leaves it alone.
     fn start_restart(mut self: Pin<&mut Self>, scheduled: Option<i64>) {
+        if *self.restarting() {
+            return;
+        }
         if self.rust().fixtures.is_some() {
             if config::fixture_hold("restart") {
                 // screenshot hook: look like a restart in progress, for good
@@ -871,12 +895,14 @@ impl qobject::Backend {
                 .set_info_text(q("Developer fixtures: restart skipped."));
             return;
         }
+        self.as_mut().set_busy_text(q("Restarting…"));
         self.as_mut().set_restarting(true);
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         let qt_ok = qt.clone();
         let clear = move |mut obj: Pin<&mut qobject::Backend>| {
             obj.as_mut().set_restarting(false);
+            obj.as_mut().set_busy_text(QString::default());
             if let Some(t) = scheduled
                 && *obj.scheduled_at() == t
             {
@@ -891,6 +917,7 @@ impl qobject::Backend {
             );
             obj.as_mut().set_error("restart", q(&text));
             obj.as_mut().set_restarting(false);
+            obj.as_mut().set_busy_text(QString::default());
             clear(obj.as_mut());
             obj.restart_problem(q(&text));
         };
