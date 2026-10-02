@@ -80,12 +80,18 @@ sed -i 's|^members = .*|members = ["crates/atlas-core"]|' Cargo.toml
 %endif
 
 %build
+# NETWORK: cargo (and Corrosion, which runs cargo with --locked) fetch the
+# crates from crates.io during %%build. That works in podman and with
+# `rpmbuild` on a networked machine, but not in an offline mock/Koji build;
+# for that, vendor the crates into the source tarball first.
 export CARGO_HOME=%{_builddir}/cargo-home
+# Fedora's Rust flags (hardening, build-id, ...), also used by Corrosion's cargo.
+export RUSTFLAGS="%{build_rustflags}"
 cargo build --release -p atlas-core --bin atlas-system-helper
 %if %{with app}
-cmake -S apps/atlas-updater -B %{_vpath_builddir}/app -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build %{_vpath_builddir}/app
+%global _vpath_srcdir apps/atlas-updater
+%cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
+%cmake_build
 %endif
 
 %install
@@ -105,7 +111,15 @@ install -Dpm0644 $d/polkit-1/rules.d/50-atlas-system.rules \
 install -Dpm0644 $d/atlas/crash-reporting.toml %{buildroot}%{_datadir}/atlas/crash-reporting.toml
 install -Dpm0644 $d/dnf/protected.d/atlas.conf %{buildroot}%{_sysconfdir}/dnf/protected.d/atlas.conf
 %if %{with app}
-DESTDIR=%{buildroot} cmake --install %{_vpath_builddir}/app
+%cmake_install
+%endif
+
+%if %{with app}
+%check
+desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.updater.desktop
+desktop-file-validate %{buildroot}%{_sysconfdir}/xdg/autostart/net.eterneon.atlas.updater-tray.desktop
+appstream-util validate-relax --nonet \
+    %{buildroot}%{_datadir}/metainfo/net.eterneon.atlas.updater.metainfo.xml
 %endif
 
 %post -n atlas-core
@@ -133,12 +147,12 @@ DESTDIR=%{buildroot} cmake --install %{_vpath_builddir}/app
 %if %{with app}
 %files -n atlas-updater
 %license LICENSE
-/usr/bin/atlas-updater
-/usr/share/applications/net.eterneon.atlas.updater.desktop
-/etc/xdg/autostart/net.eterneon.atlas.updater-tray.desktop
-/usr/share/knotifications6/atlas-updater.notifyrc
-/usr/share/metainfo/net.eterneon.atlas.updater.metainfo.xml
-/usr/share/icons/hicolor/scalable/apps/net.eterneon.atlas.updater.svg
+%{_bindir}/atlas-updater
+%{_datadir}/applications/net.eterneon.atlas.updater.desktop
+%{_sysconfdir}/xdg/autostart/net.eterneon.atlas.updater-tray.desktop
+%{_datadir}/knotifications6/atlas-updater.notifyrc
+%{_datadir}/metainfo/net.eterneon.atlas.updater.metainfo.xml
+%{_datadir}/icons/hicolor/scalable/apps/net.eterneon.atlas.updater.svg
 %endif
 
 %changelog
