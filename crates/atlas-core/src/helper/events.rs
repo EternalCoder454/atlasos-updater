@@ -229,7 +229,7 @@ mod tests {
         append(&p, &Event::new("update-staged", None, None)).unwrap();
         let ev = read(&p);
         assert_eq!(ev.len(), 2);
-        assert_eq!(ev[0].error.as_deref(), Some("cannot read <path> from <ip>"));
+        assert_eq!(ev[0].error.as_deref(), Some("cannot read <path>"));
         assert!(!fs::read_to_string(&p).unwrap().contains("\"error\":null"));
         assert!(read(&d.path().join("none")).is_empty());
     }

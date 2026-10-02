@@ -265,6 +265,17 @@ impl Settings {
         }
         if !self.enabled {
             prune_sent();
+            // Off means off: reports still waiting were queued under the old
+            // opt-in and are not kept.
+            if let Some(d) = reports_dir() {
+                for e in fs::read_dir(d.join("pending"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
         }
         Ok(())
     }
@@ -380,7 +391,17 @@ fn reset_markers_in(dir: &Path) {
         now_micros.to_string().as_bytes(),
         true,
     );
-    let _ = write_private(&dir.join("events-last"), now_rfc3339().as_bytes(), true);
+    // Events already in the log with this very second's time are not new.
+    let now = now_rfc3339();
+    let same = crate::helper::events::read(Path::new(crate::helper::events::DEFAULT_PATH))
+        .iter()
+        .filter(|e| e.time == now)
+        .count();
+    let _ = write_private(
+        &dir.join("events-last"),
+        format!("{now} {same}").as_bytes(),
+        true,
+    );
 }
 
 // ---------------------------------------------------------------- scrubbing
@@ -394,11 +415,48 @@ pub struct Scrubber {
     homes: Vec<String>,
 }
 
+/// Names too common to hide: scrubbing them would mangle ordinary text
+/// (`/dev/null`, `atlas_core::...`, image names), and a home directory
+/// called after one is still handled by the `/home/<name>` rule.
+const COMMON_NAMES: &[&str] = &[
+    "atlas",
+    "user",
+    "users",
+    "test",
+    "admin",
+    "root",
+    "fedora",
+    "localhost",
+    "host",
+    "dev",
+    "pc",
+    "bin",
+    "usr",
+    "home",
+    "tmp",
+    "var",
+    "etc",
+    "local",
+    "localdomain",
+    "laptop",
+    "desktop",
+    "nobody",
+    "guest",
+    "default",
+    "core",
+    "updater",
+    "eterneon",
+    "linux",
+    "system",
+    "computer",
+];
+
 fn clean_list(items: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut v: Vec<String> = items
         .into_iter()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().count() >= 2)
+        .filter(|s| !COMMON_NAMES.iter().any(|c| c.eq_ignore_ascii_case(s)))
         .collect();
     v.sort_by_key(|s| std::cmp::Reverse(s.len()));
     v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
@@ -522,20 +580,18 @@ fn replace_ci(s: &str, needle: &str, with: &str) -> String {
         return s.to_string();
     }
     let (hay, pat) = (s.to_ascii_lowercase(), needle.to_ascii_lowercase());
-    let anywhere = needle.chars().count() >= 4;
     let mut out = String::with_capacity(s.len());
     let mut pos = 0;
     while let Some(i) = hay[pos..].find(&pat) {
         let at = pos + i;
         let end = at + pat.len();
-        let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
-        let touches = letter(s[..at].chars().next_back()) || letter(s[end..].chars().next());
+        // a whole token: no letter or digit touches it (`_` and punctuation
+        // are boundaries, so `user_zach` and `/home/zach` match but
+        // `zachary` and `xzach` do not)
+        let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        let whole = !alnum(s[..at].chars().next_back()) && !alnum(s[end..].chars().next());
         out.push_str(&s[pos..at]);
-        out.push_str(if anywhere || !touches {
-            with
-        } else {
-            &s[at..end]
-        });
+        out.push_str(if whole { with } else { &s[at..end] });
         pos = end;
     }
     out.push_str(&s[pos..]);
@@ -552,20 +608,18 @@ fn is_mac(t: &str) -> bool {
 }
 
 fn is_ipv4(t: &str) -> bool {
-    let parts: Vec<&str> = t.split('.').collect();
-    parts.len() == 4
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok())
+    t.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
+/// A real IPv6 address, not a Rust path like `c2::e1`: it must parse, hold a
+/// digit, and look like one (starts with `::`, has a 4-digit first group, or
+/// is long).
 fn is_ipv6(t: &str) -> bool {
-    let colons = t.matches(':').count();
-    colons >= 2
-        && t.len() >= 3
-        && t.chars()
-            .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
-        && (t.contains("::") || colons == 7)
+    t.parse::<std::net::Ipv6Addr>().is_ok()
+        && t.chars().any(|c| c.is_ascii_digit())
+        && (t.starts_with("::")
+            || t.split(':').next().is_some_and(|g| g.len() == 4)
+            || t.matches(':').count() >= 3)
 }
 
 fn all_hex(t: &str) -> bool {
@@ -665,31 +719,47 @@ const PRIVATE_PREFIXES: &[&str] = &[
     "~/",
 ];
 
-/// From the first private path prefix inside a word, replace the rest of the
-/// word with `<path>`.
-fn redact_paths(s: &str) -> String {
-    let is_delim = |c: char| c.is_whitespace() || "'\"`(),;[]{}".contains(c);
-    let mut out = String::with_capacity(s.len());
-    let mut token = String::new();
-    let flush = |token: &mut String, out: &mut String| {
-        match PRIVATE_PREFIXES.iter().filter_map(|p| token.find(p)).min() {
-            Some(i) => {
-                out.push_str(&token[..i]);
-                out.push_str("<path>");
-            }
-            None => out.push_str(token),
-        }
-        token.clear();
+/// A private prefix starting at byte `i` of `s`, if any. It must start a path
+/// (not sit inside a longer name: `/usr/tmp/x` is not `/tmp/`), and `/root`
+/// must not be the start of `/rootfs`.
+fn private_prefix_at(s: &str, i: usize) -> bool {
+    let rest = &s[i..];
+    let Some(p) = PRIVATE_PREFIXES.iter().find(|p| rest.starts_with(**p)) else {
+        return false;
     };
-    for c in s.chars() {
-        if is_delim(c) {
-            flush(&mut token, &mut out);
-            out.push(c);
-        } else {
-            token.push(c);
-        }
+    let before = s[..i].chars().next_back();
+    if before.is_some_and(|c| c.is_alphanumeric() || "_.-/".contains(c)) {
+        return false;
     }
-    flush(&mut token, &mut out);
+    if !p.ends_with('/') && p.starts_with('/') {
+        // `/root`, `/var/roothome`: the whole last component
+        return !rest[p.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || "_.-".contains(c));
+    }
+    true
+}
+
+/// From a private path prefix on, replace the rest of the path with `<path>`.
+/// A path may hold spaces (`/home/u/My Notes/tax.pdf`), so it ends only at the
+/// end of the line or at a quote or closing bracket.
+fn redact_paths(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if private_prefix_at(s, i) {
+            let end = s[i..]
+                .find(|c: char| "\n\r'\"`)]}".contains(c))
+                .map_or(s.len(), |e| i + e);
+            out.push_str("<path>");
+            i = end;
+            continue;
+        }
+        let c = s[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        i += c.len_utf8();
+    }
     out
 }
 
@@ -1001,9 +1071,24 @@ fn read_reports(dir: &Path) -> Vec<Report> {
     paths
         .into_iter()
         .filter_map(|p| {
-            let mut r: Report = serde_json::from_str(&fs::read_to_string(&p).ok()?).ok()?;
-            r.path = Some(p);
-            Some(r)
+            let text = fs::read_to_string(&p).ok()?;
+            match serde_json::from_str::<Report>(&text) {
+                Ok(mut r) => {
+                    r.path = Some(p);
+                    Some(r)
+                }
+                Err(_) => {
+                    // A report from before schema 2 (no event_id) can never
+                    // be shown or sent: remove it instead of skipping it forever.
+                    let old = serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .is_some_and(|v| v.get("event_id").is_none());
+                    if old {
+                        let _ = fs::remove_file(&p);
+                    }
+                    None
+                }
+            }
         })
         .collect()
 }
@@ -1036,8 +1121,30 @@ pub fn discard(report: &Report) -> io::Result<()> {
 
 /// Delete sent reports older than 90 days.
 fn prune_sent() {
+    if let Some(d) = state_dir() {
+        sweep_send_files(&d, SystemTime::now());
+    }
     if let Some(d) = reports_dir() {
         prune_older_than(&d.join("sent"), SENT_KEEP, SystemTime::now());
+    }
+}
+
+/// `send-*.json` is the body file of a curl call; one left behind (the app was
+/// killed mid-send) is removed once it is clearly not in use any more.
+fn sweep_send_files(dir: &Path, now: SystemTime) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("send-") && name.ends_with(".json")) {
+            continue;
+        }
+        let stale = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| {
+            now.duration_since(t)
+                .map_or(true, |a| a > Duration::from_secs(600))
+        });
+        if stale {
+            let _ = fs::remove_file(e.path());
+        }
     }
 }
 
@@ -1067,8 +1174,16 @@ fn move_to_sent(sent_dir: &Path, report: &Report, server_id: Option<String>) {
     let mut r = report.clone();
     r.sent_event_id = server_id;
     let _ = write_report(sent_dir, &r);
-    if let Some(p) = &report.path {
-        let _ = fs::remove_file(p);
+    if let Some(p) = &report.path
+        && let Err(e) = fs::remove_file(p)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        // The data is out already; a leftover pending file could be sent
+        // again, so say so (the caller still reports success).
+        eprintln!(
+            "atlas-core: sent report {} not removed from pending: {e}",
+            p.display()
+        );
     }
 }
 
@@ -1110,17 +1225,26 @@ thread_local! {
     static IN_HOOK: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Hash of the top frames of a trace (and the message when there are none).
-fn crash_key(trace: &str, message: &str) -> u64 {
+/// The same crash is the same message at the same place (the frames of a
+/// trace taken inside the hook are no help: they are hook code).
+fn crash_key(message: &str, at: Option<&str>) -> u64 {
     let mut h = DefaultHasher::new();
-    let frames = parse_frames(trace);
-    if frames.is_empty() {
-        message.hash(&mut h);
-    }
-    for f in frames.iter().rev().take(5) {
-        f["function"].as_str().unwrap_or("").hash(&mut h);
-    }
+    message.hash(&mut h);
+    at.hash(&mut h);
     h.finish()
+}
+
+/// Drop the frames of the hook itself (everything up to the panic runtime).
+fn skip_hook_frames(trace: &str) -> String {
+    let lines: Vec<&str> = trace.lines().collect();
+    let marker = lines
+        .iter()
+        .position(|l| l.contains("rust_begin_unwind"))
+        .or_else(|| lines.iter().position(|l| l.contains("core::panicking")));
+    match marker {
+        Some(i) => lines[i + 1..].join("\n"),
+        None => trace.to_string(),
+    }
 }
 
 /// Install the panic hook for `app`. Call once, early in `main`. The previous
@@ -1138,20 +1262,19 @@ pub fn install(app: AppInfo) {
         if IN_HOOK.replace(true) {
             return;
         }
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let message = match info.payload().downcast_ref::<&str>() {
-                Some(s) => (*s).to_string(),
-                None => info
-                    .payload()
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .unwrap_or_else(|| "Box<dyn Any>".to_string()),
-            };
-            let at = info
-                .location()
-                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-            let _ = save("panic", &message, at.as_deref());
-        }));
+        // No panic is possible in here: it would abort the process.
+        let message = match info.payload().downcast_ref::<&str>() {
+            Some(s) => (*s).to_string(),
+            None => info
+                .payload()
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "Box<dyn Any>".to_string()),
+        };
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+        let _ = save("panic", &message, at.as_deref());
         IN_HOOK.set(false);
     }));
 }
@@ -1167,8 +1290,7 @@ fn save(kind: &str, message: &str, at: Option<&str>) -> Option<PathBuf> {
         return None;
     }
     let app = APP.get()?;
-    let trace = filter_trace(&std::backtrace::Backtrace::force_capture().to_string());
-    let key = crash_key(&trace, message);
+    let key = crash_key(message, at);
     if !lock(&LIMITER).allow(Instant::now(), key) {
         return None;
     }
@@ -1176,6 +1298,9 @@ fn save(kind: &str, message: &str, at: Option<&str>) -> Option<PathBuf> {
         Some(a) => format!("{message} at {a}"),
         None => message.to_string(),
     };
+    let trace = skip_hook_frames(&filter_trace(
+        &std::backtrace::Backtrace::force_capture().to_string(),
+    ));
     let crash = Crash {
         report_type: kind,
         app_name: &app.id,
@@ -1350,12 +1475,16 @@ pub fn collect_coredumps(since_micros: Option<u64>) -> Vec<Report> {
         let Some((_, report)) = coredump_report(e, &scrubber, rpm_version) else {
             continue;
         };
-        newest = newest.max(ts);
-        if let Some(d) = reports_dir() {
-            let mut r = report;
-            r.path = write_report(&d.join("pending"), &r).ok();
-            out.push(r);
+        let Some(d) = reports_dir() else { break };
+        let mut r = report;
+        match write_report(&d.join("pending"), &r) {
+            Ok(path) => r.path = Some(path),
+            // Not written (disk full, ...): the marker stays before this
+            // entry, so the next run tries again.
+            Err(_) => break,
         }
+        newest = newest.max(ts);
+        out.push(r);
     }
     if newest > since {
         let _ = write_private(&marker, newest.to_string().as_bytes(), true);
@@ -1379,17 +1508,17 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
     };
     let stored = fs::read_to_string(&marker)
         .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-    let Some(since) = since.map(str::to_string).or(stored) else {
+        .map(|t| parse_event_marker(&t))
+        .filter(|m| !m.0.is_empty());
+    let Some(start) = since.map(|s| (s.to_string(), 0)).or(stored) else {
         reset_markers();
         return Vec::new();
     };
     let events = crate::helper::events::read(Path::new(crate::helper::events::DEFAULT_PATH));
     let scrubber = Scrubber::from_env();
-    let mut newest = since.clone();
+    let mut marker_now = start.clone();
     let mut out = Vec::new();
-    for e in events.iter().filter(|e| e.time > since) {
+    for e in pick_events(&events, &start, &now_rfc3339()) {
         let name = scrubber.scrub_message(&e.event);
         let version = e.version.as_deref().map(|v| scrubber.scrub_message(v));
         let mut msg = name.clone();
@@ -1407,22 +1536,72 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
             stacktrace: "",
         };
         let Ok(mut r) = build_report(&crash, &scrubber, Some(&e.time)) else {
-            continue;
+            break;
         };
         r.report_type = scrubber.scrub_message(&name);
         if r.atlasos_version.is_none() {
             r.atlasos_version = version;
         }
-        if let Some(d) = reports_dir() {
-            r.path = write_report(&d.join("pending"), &r).ok();
+        let Some(d) = reports_dir() else { break };
+        match write_report(&d.join("pending"), &r) {
+            Ok(path) => r.path = Some(path),
+            // Not written: the marker stays before this event.
+            Err(_) => break,
         }
-        if e.time > newest {
-            newest = e.time.clone();
-        }
+        marker_now = advance_event_marker(marker_now, &e.time);
         out.push(r);
     }
-    if newest != since {
-        let _ = write_private(&marker, newest.as_bytes(), true);
+    if marker_now != start {
+        let _ = write_private(
+            &marker,
+            format!("{} {}", marker_now.0, marker_now.1).as_bytes(),
+            true,
+        );
+    }
+    out
+}
+
+/// The events marker: the time of the last collected event and how many events
+/// with exactly that time were taken (second resolution; the helper may append
+/// another one in the same second later).
+type EventMarker = (String, usize);
+
+fn parse_event_marker(text: &str) -> EventMarker {
+    let mut it = text.split_whitespace();
+    let time = it.next().unwrap_or("").to_string();
+    let n = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    (time, n)
+}
+
+fn advance_event_marker(m: EventMarker, time: &str) -> EventMarker {
+    if m.0 == time {
+        (m.0, m.1 + 1)
+    } else {
+        (time.to_string(), 1)
+    }
+}
+
+/// Events (in file order) after the marker. Events dated after `now` (clock
+/// skew) wait until their time has come, so they cannot push the marker into
+/// the future and hide later ones.
+fn pick_events<'a>(
+    events: &'a [crate::helper::events::Event],
+    marker: &EventMarker,
+    now: &str,
+) -> Vec<&'a crate::helper::events::Event> {
+    let mut at_marker = 0;
+    let mut out = Vec::new();
+    for e in events {
+        if e.time.as_str() > now || e.time < marker.0 {
+            continue;
+        }
+        if e.time == marker.0 {
+            at_marker += 1;
+            if at_marker <= marker.1 {
+                continue;
+            }
+        }
+        out.push(e);
     }
     out
 }
@@ -1621,7 +1800,7 @@ mod tests {
             "/var/home/USER/x and /home/USER"
         );
         assert_eq!(s.scrub("user zach on atlas-box"), "user USER on HOST");
-        assert_eq!(s.scrub("zachary zach_x xzach"), "USERary USER_x xUSER");
+        assert_eq!(s.scrub("zachary zach_x xzach"), "zachary USER_x xzach");
         assert_eq!(s.scrub("a/b /usr/lib/x"), "a/b /usr/lib/x");
     }
 
@@ -1933,7 +2112,7 @@ mod tests {
         assert_eq!(s.scrub_message("path=/home/bob/x.txt"), "path=<path>");
         assert_eq!(
             s.scrub_message("open file:///home/bob/x.txt now"),
-            "open <path> now"
+            "open <path>"
         );
         assert_eq!(
             s.scrub_message("(/run/user/1000/doc/ab/secret.pdf)"),
@@ -1951,10 +2130,7 @@ mod tests {
             "USER and USER, host HOST"
         );
         assert_eq!(s.scrub("al said"), "USER said");
-        assert_eq!(
-            s.scrub("signal al_1 al2 value"),
-            "signal USER_1 USER2 value"
-        );
+        assert_eq!(s.scrub("signal al_1 al2 value"), "signal USER_1 al2 value");
         let s = sc();
         assert_eq!(s.scrub("ZACHARY smith wrote"), "USER wrote");
         assert_eq!(s.scrub("by Zachary Smith"), "by USER");
@@ -2133,10 +2309,139 @@ mod tests {
             .parse()
             .unwrap();
         assert!(m >= before);
+        let e = fs::read_to_string(dir.join("events-last")).unwrap();
+        let (time, count) = e.trim().split_once(' ').expect("time and count");
+        assert!(time.ends_with('Z'), "{e}");
+        assert!(count.parse::<u64>().is_ok(), "{e}");
+    }
+
+    // ---- round 4
+
+    #[test]
+    fn whole_tokens_only_and_common_names_are_left_alone() {
+        let s = Scrubber::new(
+            &["zach", "dev", "atlas"],
+            &["fedora", "pc", "atlas-box"],
+            &[],
+        );
+        assert_eq!(s.scrub("zachary and zach"), "zachary and USER");
+        assert_eq!(
+            s.scrub("/dev/null x86_64-pc-linux-gnu"),
+            "/dev/null x86_64-pc-linux-gnu"
+        );
+        assert_eq!(
+            s.scrub("atlas_core::bootc net.eterneon.atlas.updater quay.io/fedora/fedora-bootc"),
+            "atlas_core::bootc net.eterneon.atlas.updater quay.io/fedora/fedora-bootc"
+        );
+        assert_eq!(s.scrub("on atlas-box"), "on HOST");
+    }
+
+    #[test]
+    fn paths_with_spaces_and_root_boundaries() {
+        let s = sc();
+        assert_eq!(
+            s.scrub_message("open /home/bob/My Notes/tax.pdf now"),
+            "open <path>"
+        );
+        assert_eq!(
+            s.scrub_message("'/run/media/bob/USB DRIVE/x y' failed"),
+            "'<path>' failed"
+        );
+        assert_eq!(s.scrub_message("(/root/x)"), "(<path>)");
+        assert_eq!(s.scrub_message("/root"), "<path>");
+        assert_eq!(
+            s.scrub_message("/rootfs/x /rootless /usr/tmp/x /var/roothomes"),
+            "/rootfs/x /rootless /usr/tmp/x /var/roothomes"
+        );
+    }
+
+    #[test]
+    fn ip_detection_is_strict() {
+        let s = sc();
+        assert_eq!(
+            s.scrub("add::dad a::b c2::e1 dead::beef"),
+            "add::dad a::b c2::e1 dead::beef"
+        );
+        assert_eq!(s.scrub("fe80::1 2001:db8::1 ::1"), "<ip> <ip> <ip>");
+        assert_eq!(
+            s.scrub("1.2.3 1.2.3.400 01.2.3.4"),
+            "1.2.3 1.2.3.400 01.2.3.4"
+        );
+    }
+
+    #[test]
+    fn same_panic_is_one_key_even_with_unknown_frames() {
+        let a = crash_key("boom", Some("src/main.rs:1:1"));
+        assert_eq!(a, crash_key("boom", Some("src/main.rs:1:1")));
+        assert_ne!(a, crash_key("boom", Some("src/main.rs:2:1")));
+        assert_ne!(a, crash_key("bang", Some("src/main.rs:1:1")));
+        let t = "  0: save\n  1: hook\n  2: std::panicking::rust_begin_unwind\n  3: app::main\n";
+        assert_eq!(skip_hook_frames(t), "  3: app::main");
+        assert_eq!(skip_hook_frames("  0: a\n"), "  0: a\n");
+    }
+
+    fn ev(time: &str) -> crate::helper::events::Event {
+        crate::helper::events::Event {
+            event: "update-failed".into(),
+            version: None,
+            error: None,
+            time: time.into(),
+        }
+    }
+
+    #[test]
+    fn events_in_the_marker_second_are_not_lost_or_repeated() {
+        let t = "2026-10-02T10:00:00Z";
+        let now = "2026-10-02T11:00:00Z";
+        let mut log = vec![ev("2026-10-02T09:00:00Z"), ev(t)];
+        let m = ("2026-10-02T09:00:00Z".to_string(), 1);
+        let got = pick_events(&log, &m, now);
+        assert_eq!(got.len(), 1);
+        let m = advance_event_marker(m, &got[0].time);
+        assert_eq!(m, (t.to_string(), 1));
+        assert!(pick_events(&log, &m, now).is_empty());
+        // another event in the same second arrives later
+        log.push(ev(t));
+        let got = pick_events(&log, &m, now);
+        assert_eq!(got.len(), 1);
+        assert_eq!(advance_event_marker(m, &got[0].time), (t.to_string(), 2));
+        // a future-dated event waits
+        log.push(ev("2027-01-01T00:00:00Z"));
+        assert_eq!(pick_events(&log, &(t.to_string(), 2), now).len(), 0);
+        assert_eq!(
+            parse_event_marker("2026-10-02T10:00:00Z 3"),
+            (t.to_string(), 3)
+        );
+        assert_eq!(
+            parse_event_marker("2026-10-02T10:00:00Z"),
+            (t.to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn stale_send_files_are_swept_and_old_schema_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("send-abc.json"), "{}").unwrap();
+        fs::write(d.path().join("crash-id"), "x").unwrap();
+        sweep_send_files(d.path(), SystemTime::now());
         assert!(
-            fs::read_to_string(dir.join("events-last"))
-                .unwrap()
-                .ends_with('Z')
+            d.path().join("send-abc.json").exists(),
+            "fresh: maybe in use"
+        );
+        sweep_send_files(d.path(), SystemTime::now() + Duration::from_secs(3600));
+        assert!(!d.path().join("send-abc.json").exists());
+        assert!(d.path().join("crash-id").exists());
+
+        let pend = d.path().join("pending");
+        fs::create_dir_all(&pend).unwrap();
+        fs::write(pend.join("old.json"), r#"{"schema":1,"message":"x"}"#).unwrap();
+        fs::write(pend.join("broken.json"), "{ not json").unwrap();
+        write_report(&pend, &report("")).unwrap();
+        assert_eq!(read_reports(&pend).len(), 1);
+        assert!(!pend.join("old.json").exists());
+        assert!(
+            pend.join("broken.json").exists(),
+            "unknown damage is left alone"
         );
     }
 }
