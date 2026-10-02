@@ -80,7 +80,13 @@ QQC2.ApplicationWindow {
         QQC2.ToolTip.visible: compact && hovered
         QQC2.ToolTip.text: text
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-        onClicked: root.showPage(page)
+        onClicked: {
+            // A confirmation belongs to the section it came from.
+            if (page !== root.currentPage) {
+                root.backend.dismissInfo();
+            }
+            root.showPage(page);
+        }
     }
 
     RowLayout {

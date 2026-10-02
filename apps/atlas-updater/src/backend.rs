@@ -124,6 +124,9 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "dismissMessages"]
         fn dismiss_messages(self: Pin<&mut Backend>);
+        #[qinvokable]
+        #[cxx_name = "dismissInfo"]
+        fn dismiss_info(self: Pin<&mut Backend>);
 
         #[qinvokable]
         #[cxx_name = "loadNotes"]
@@ -497,6 +500,12 @@ impl qobject::Backend {
     pub fn dismiss_messages(mut self: Pin<&mut Self>) {
         self.as_mut().set_error("", QString::default());
         self.as_mut().set_info_text(QString::default());
+    }
+
+    /// Clears only the info message: a one-off confirmation ("Crash report
+    /// sent") that shouldn't follow the user to other sections. Errors stay.
+    pub fn dismiss_info(self: Pin<&mut Self>) {
+        self.set_info_text(QString::default());
     }
 
     /// `foreground` operations show progress and errors; the silent status
@@ -981,7 +990,8 @@ impl qobject::Backend {
             self.load_reports();
         } else {
             // Off means off: nothing stays queued on screen.
-            self.as_mut().reports_loaded(Vec::new(), false);
+            let has_server = *self.crash_has_server();
+            self.as_mut().reports_loaded(Vec::new(), has_server);
             self.as_mut().set_sent_json(q("[]"));
         }
     }
@@ -1004,7 +1014,10 @@ impl qobject::Backend {
                 (reports, has_server)
             })
             .unwrap_or_default();
-            let _ = qt.queue(move |obj| {
+            let _ = qt.queue(move |mut obj| {
+                // Whether a server is set up doesn't depend on the switch:
+                // Settings explains it either way.
+                obj.as_mut().set_crash_has_server(has_server);
                 // Switched off while we were reading: show nothing.
                 if *obj.crash_enabled() && obj.rust().reports_gen == gen_now {
                     obj.reports_loaded(reports, has_server);

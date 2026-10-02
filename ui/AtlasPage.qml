@@ -73,7 +73,7 @@ Item {
     // A plain ScrollView doesn't follow keyboard focus: tabbing to a control
     // below the fold would leave it off screen. Scroll just enough to show it.
     // Not for a click: scrolling under the pointer could drop the click.
-    function ensureVisible(item: Item) {
+    function ensureVisible(item) {
         const flick = scroll.contentItem as Flickable;
         if (!item || !flick || item.focusReason === Qt.MouseFocusReason)
             return;
