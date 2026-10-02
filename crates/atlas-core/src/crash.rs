@@ -137,8 +137,8 @@ impl Report {
     }
 
     /// The payload as pretty JSON, for the "Show report" view.
-    pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(&self.payload()).unwrap_or_default()
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&self.payload())
     }
 }
 
@@ -1673,7 +1673,7 @@ mod tests {
         let r = build_report(&c, &sc(), None).unwrap();
         let json = format!(
             "{}{}",
-            r.to_json_pretty(),
+            r.to_json_pretty().unwrap(),
             serde_json::to_string(&r).unwrap()
         );
         for needle in [
