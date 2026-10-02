@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use zbus::message::Header;
 use zbus::zvariant::Value;
 
-use super::{BootcRunner, Core, HelperError, Op};
+use super::{BootcRunner, Core, HelperError, Op, lock};
 use crate::helper_client::{BUS_NAME, OBJECT_PATH};
 
 /// Exit after this long with no calls.
@@ -34,39 +34,6 @@ trait Authority {
     ) -> zbus::Result<(bool, bool, HashMap<String, String>)>;
 }
 
-/// Logind, for the shutdown delay inhibitor.
-#[zbus::proxy(
-    interface = "org.freedesktop.login1.Manager",
-    default_service = "org.freedesktop.login1",
-    default_path = "/org/freedesktop/login1",
-    gen_blocking = false
-)]
-trait Login1Manager {
-    fn inhibit(
-        &self,
-        what: &str,
-        who: &str,
-        why: &str,
-        mode: &str,
-    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
-}
-
-/// Hold a "delay" shutdown inhibitor (best effort) until dropped, so a
-/// shutdown waits for a staging operation instead of killing it half way.
-async fn inhibit_shutdown(conn: &zbus::Connection) -> Option<zbus::zvariant::OwnedFd> {
-    Login1ManagerProxy::new(conn)
-        .await
-        .ok()?
-        .inhibit(
-            "shutdown",
-            "Atlas system helper",
-            "Staging an operating system change",
-            "delay",
-        )
-        .await
-        .ok()
-}
-
 #[derive(Default)]
 struct State {
     active: usize,
@@ -88,7 +55,7 @@ impl Activity {
     /// Register a call; `None` once the helper is shutting down. A call with
     /// `touch == false` (Status) does not postpone the idle exit.
     pub fn enter(self: &Arc<Self>, touch: bool) -> Option<ActivityGuard> {
-        let mut st = self.0.lock().unwrap();
+        let mut st = lock(&self.0);
         if st.closing {
             return None;
         }
@@ -103,18 +70,35 @@ impl Activity {
     /// ago, mark the helper as closing and return true. From then on
     /// [`enter`](Self::enter) refuses.
     pub fn close_if_idle(&self, timeout: Duration, started: Instant) -> bool {
-        let mut st = self.0.lock().unwrap();
+        let mut st = lock(&self.0);
         if st.active == 0 && st.last.unwrap_or(started).elapsed() >= timeout {
             st.closing = true;
         }
         st.closing
     }
+
+    /// Refuse new calls from now on (SIGTERM).
+    pub fn begin_close(&self) {
+        lock(&self.0).closing = true;
+    }
+
+    /// Wait until no call is in flight; false if `limit` ran out first.
+    pub async fn wait_drained(&self, limit: Duration) -> bool {
+        let end = Instant::now() + limit;
+        while lock(&self.0).active > 0 {
+            if Instant::now() >= end {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
 }
 
 impl Drop for ActivityGuard {
     fn drop(&mut self) {
-        let mut st = self.activity.0.lock().unwrap();
-        st.active -= 1;
+        let mut st = lock(&self.activity.0);
+        st.active = st.active.saturating_sub(1);
         if self.touch {
             st.last = Some(Instant::now());
         }
@@ -125,6 +109,8 @@ pub struct Service {
     core: Arc<Core>,
     activity: Arc<Activity>,
 }
+
+const SHUTTING_DOWN: &str = "the helper is shutting down, try again";
 
 impl Service {
     /// `events` is where update and rollback events go (`None` for none).
@@ -139,25 +125,31 @@ impl Service {
         }
     }
 
-    /// Run an already authorized operation on a worker thread.
-    pub async fn run(
-        &self,
-        op: Op,
-        inhibitor: Option<&zbus::Connection>,
-    ) -> Result<String, HelperError> {
-        let _active = self
-            .activity
-            .enter(op != Op::Status)
-            .ok_or_else(|| HelperError::Busy("the helper is shutting down, try again".into()))?;
+    /// Count the call; refused while shutting down.
+    fn begin(&self, op: &Op) -> Result<ActivityGuard, HelperError> {
+        self.activity
+            .enter(*op != Op::Status)
+            .ok_or_else(|| HelperError::ShuttingDown(SHUTTING_DOWN.into()))
+    }
+
+    /// Run an already authorized operation. The activity guard moves into the
+    /// worker, so the call counts until bootc has really finished, even if the
+    /// caller goes away.
+    async fn execute(&self, op: Op, guard: ActivityGuard) -> Result<String, HelperError> {
         op.validate()?;
-        let _inhibit = match inhibitor.filter(|_| op.changes_system()) {
-            Some(c) => inhibit_shutdown(c).await,
-            None => None,
-        };
         let core = self.core.clone();
-        tokio::task::spawn_blocking(move || core.execute(&op))
-            .await
-            .map_err(|e| HelperError::Failed(format!("worker failed: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            core.execute(&op)
+        })
+        .await
+        .map_err(|e| HelperError::Failed(format!("worker failed: {e}")))?
+    }
+
+    /// Run `op` without a polkit check (tests).
+    pub async fn run(&self, op: Op) -> Result<String, HelperError> {
+        let guard = self.begin(&op)?;
+        self.execute(op, guard).await
     }
 
     async fn handle(
@@ -167,17 +159,14 @@ impl Service {
         op: Op,
     ) -> Result<String, HelperError> {
         // count the call while polkit is asked, so we do not exit under it
-        let _active = self
-            .activity
-            .enter(op != Op::Status)
-            .ok_or_else(|| HelperError::Busy("the helper is shutting down, try again".into()))?;
+        let guard = self.begin(&op)?;
         op.validate()?;
         let sender = header
             .sender()
             .ok_or_else(|| HelperError::NotAuthorized("call has no sender".into()))?
             .to_string();
         authorize(conn, &sender, op.action_id()).await?;
-        self.run(op, Some(conn)).await
+        self.execute(op, guard).await
     }
 }
 
@@ -251,15 +240,18 @@ impl Service {
     }
 }
 
-/// Serve until idle for `idle_timeout`, then release the bus name and
-/// return, so D-Bus starts a fresh helper for the next call.
+/// How long a running bootc may finish after SIGTERM before we ask it to
+/// stop (the unit gives the helper 60 s in all).
+const TERM_GRACE: Duration = Duration::from_secs(40);
+
+/// Serve until idle for `idle_timeout` or SIGTERM. Either way: refuse new
+/// calls, release the bus name (so D-Bus starts a fresh helper for the next
+/// call), then wait for calls in flight and return.
 pub async fn serve(
     builder: zbus::connection::Builder<'static>,
-    runner: Arc<dyn BootcRunner>,
+    service: Service,
     idle_timeout: Duration,
-    events: Option<PathBuf>,
 ) -> zbus::Result<()> {
-    let service = Service::new(runner, events);
     let activity = service.activity.clone();
     let started = Instant::now();
     let conn = builder
@@ -267,14 +259,31 @@ pub async fn serve(
         .serve_at(OBJECT_PATH, service)?
         .build()
         .await?;
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let tick = (idle_timeout / 4).max(Duration::from_millis(50));
-    loop {
-        tokio::time::sleep(tick).await;
-        if activity.close_if_idle(idle_timeout, started) {
-            let _ = conn.release_name(BUS_NAME).await;
-            return Ok(());
+    let terminated = loop {
+        tokio::select! {
+            _ = term.recv() => break true,
+            _ = tokio::time::sleep(tick) => {
+                if activity.close_if_idle(idle_timeout, started) {
+                    break false;
+                }
+            }
         }
+    };
+    activity.begin_close();
+    let _ = conn.release_name(BUS_NAME).await;
+    let limit = if terminated {
+        TERM_GRACE
+    } else {
+        Duration::from_secs(3600)
+    };
+    if !activity.wait_drained(limit).await {
+        // still running after the grace period: ask bootc to stop
+        super::terminate_running();
+        activity.wait_drained(Duration::from_secs(10)).await;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -319,12 +328,87 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("events.jsonl");
         let s = Service::new(Arc::new(Fixed(BOOTED_WITH_UPDATE)), Some(p.clone()));
-        s.run(Op::Rollback, None).await.unwrap();
-        s.run(Op::Status, None).await.unwrap();
+        s.run(Op::Rollback).await.unwrap();
+        s.run(Op::Status).await.unwrap();
         let names: Vec<_> = events::read(&p).into_iter().map(|e| e.event).collect();
         assert_eq!(names, ["rollback-requested"]);
         // without an events path nothing is written
         let s = Service::new(Arc::new(Fixed(PLAIN)), None);
-        s.run(Op::Rollback, None).await.unwrap();
+        s.run(Op::Rollback).await.unwrap();
+    }
+
+    struct Gate {
+        started: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl BootcRunner for Gate {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            if args == ["upgrade"] {
+                lock(&self.started).send(()).unwrap();
+                lock(&self.release).recv().unwrap();
+            }
+            Ok(PLAIN.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn status_is_answered_while_an_upgrade_runs() {
+        let (st_tx, st_rx) = std::sync::mpsc::channel();
+        let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+        let s = Arc::new(Service::new(
+            Arc::new(Gate {
+                started: Mutex::new(st_tx),
+                release: Mutex::new(rel_rx),
+            }),
+            None,
+        ));
+        let s2 = s.clone();
+        let up = tokio::spawn(async move { s2.run(Op::Upgrade).await });
+        tokio::task::spawn_blocking(move || st_rx.recv().unwrap())
+            .await
+            .unwrap();
+        for _ in 0..5 {
+            assert!(
+                s.run(Op::Status).await.is_ok(),
+                "Status must not wait for or collide with Upgrade"
+            );
+        }
+        assert!(matches!(
+            s.run(Op::Rollback).await,
+            Err(HelperError::Busy(_))
+        ));
+        // the upgrade still counts as in flight, so the helper does not exit
+        assert!(!s.activity.close_if_idle(Duration::ZERO, Instant::now()));
+        rel_tx.send(()).unwrap();
+        up.await.unwrap().unwrap();
+        assert!(s.activity.wait_drained(Duration::from_secs(1)).await);
+        assert!(s.activity.close_if_idle(Duration::ZERO, Instant::now()));
+        assert!(matches!(
+            s.run(Op::Status).await,
+            Err(HelperError::ShuttingDown(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn guard_lives_until_the_worker_finishes_even_if_the_caller_is_dropped() {
+        let (st_tx, st_rx) = std::sync::mpsc::channel();
+        let (rel_tx, rel_rx) = std::sync::mpsc::channel();
+        let s = Arc::new(Service::new(
+            Arc::new(Gate {
+                started: Mutex::new(st_tx),
+                release: Mutex::new(rel_rx),
+            }),
+            None,
+        ));
+        let s2 = s.clone();
+        let up = tokio::spawn(async move { s2.run(Op::Upgrade).await });
+        tokio::task::spawn_blocking(move || st_rx.recv().unwrap())
+            .await
+            .unwrap();
+        up.abort(); // the handler future is dropped, bootc keeps running
+        let _ = up.await;
+        assert!(!s.activity.wait_drained(Duration::from_millis(200)).await);
+        rel_tx.send(()).unwrap();
+        assert!(s.activity.wait_drained(Duration::from_secs(5)).await);
     }
 }

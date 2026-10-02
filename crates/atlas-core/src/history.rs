@@ -34,13 +34,13 @@ pub fn read_default() -> io::Result<Vec<Entry>> {
 /// Read a history file, newest first. A missing file is an empty history;
 /// lines that do not parse are skipped.
 pub fn read(path: &Path) -> io::Result<Vec<Entry>> {
-    let text = match fs::read_to_string(path) {
+    let bytes = match fs::read(path) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut v: Vec<Entry> = text
-        .lines()
+    let mut v: Vec<Entry> = crate::fsutil::lossy_lines(&bytes)
+        .iter()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     v.reverse();
@@ -147,6 +147,18 @@ mod tests {
             fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o644
         );
+    }
+
+    #[test]
+    fn torn_utf8_line_spoils_only_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("h.jsonl");
+        let mut data = b"{\"digest\":\"sha256:a\",\"first_booted\":\"t\"}\n".to_vec();
+        data.extend_from_slice(b"{\"digest\":\"sha256:b\",\"image\":\"\xe2\x82");
+        fs::write(&p, data).unwrap();
+        assert_eq!(read(&p).unwrap().len(), 1);
+        assert!(append_if_new(&p, &entry("sha256:c")).unwrap());
+        assert_eq!(read(&p).unwrap().len(), 2);
     }
 
     #[test]

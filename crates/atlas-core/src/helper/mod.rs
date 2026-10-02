@@ -9,10 +9,11 @@ pub mod service;
 
 use std::cmp::Ordering as Cmp;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::bootc::{Channel, Status};
@@ -24,6 +25,7 @@ const STDERR_TAIL: usize = 4096;
 /// Most output kept from bootc (stdout and stderr each).
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
+const STATUS_CACHE: Duration = Duration::from_secs(2);
 const LONG_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Errors returned over D-Bus as `net.eterneon.atlas.Error.*`.
@@ -35,6 +37,8 @@ pub enum HelperError {
     InvalidArgument(String),
     NotAuthorized(String),
     Busy(String),
+    /// The helper is exiting; the client retries and D-Bus starts a new one.
+    ShuttingDown(String),
     Failed(String),
 }
 
@@ -57,25 +61,62 @@ impl BootcRunner for SystemBootc {
     }
 }
 
-/// Read `r` to the end, keeping at most `cap` bytes; the flag says if more
-/// came (the rest is drained so the child never blocks on a full pipe).
-fn read_capped(mut r: impl Read, cap: usize) -> (Vec<u8>, bool) {
-    let mut kept = Vec::new();
-    let mut over = false;
-    let mut buf = [0u8; 16 * 1024];
-    while let Ok(n) = r.read(&mut buf) {
+/// Lock, ignoring poisoning (a panicking thread must not wedge the helper).
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Process group of the bootc that is running now (0 if none).
+static RUNNING_PGID: AtomicU32 = AtomicU32::new(0);
+
+/// Send `signal` to a whole process group. There is no safe libc call for
+/// this, so it uses kill(1).
+fn kill_group(pgid: u32, signal: &str) {
+    let _ = Command::new("/usr/bin/kill")
+        .args([signal, "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Ask a running bootc (and its children) to stop; used at shutdown.
+pub fn terminate_running() {
+    let pgid = RUNNING_PGID.load(Ordering::Acquire);
+    if pgid != 0 {
+        kill_group(pgid, "-TERM");
+    }
+}
+
+#[derive(Default)]
+struct Captured {
+    data: Vec<u8>,
+    over: bool,
+}
+
+/// Read `r` into `buf`, keeping at most `cap` bytes; the rest is drained so
+/// the child never blocks on a full pipe. Sends on `done` at the end.
+fn read_capped(mut r: impl Read, cap: usize, buf: Arc<Mutex<Captured>>, done: mpsc::Sender<()>) {
+    let mut chunk = [0u8; 16 * 1024];
+    while let Ok(n) = r.read(&mut chunk) {
         if n == 0 {
             break;
         }
-        let room = cap.saturating_sub(kept.len());
-        kept.extend_from_slice(&buf[..n.min(room)]);
-        over |= n > room;
+        let mut b = lock(&buf);
+        let room = cap.saturating_sub(b.data.len());
+        b.data.extend_from_slice(&chunk[..n.min(room)]);
+        b.over |= n > room;
     }
-    (kept, over)
+    let _ = done.send(());
 }
 
-/// Run `program` with a cleared environment; kill it after `timeout`; fail if
-/// it prints more than `cap` bytes on stdout.
+/// How long to wait for the output pipes after the child has exited
+/// (grandchildren may still hold them).
+const PIPE_GRACE: Duration = Duration::from_secs(2);
+
+/// Run `program` in its own process group with a cleared environment; kill
+/// the group after `timeout`; fail if it prints more than `cap` bytes on
+/// stdout.
 fn run_limited(
     program: &Path,
     args: &[&str],
@@ -90,37 +131,80 @@ fn run_limited(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
+    let pgid = child.id();
+    RUNNING_PGID.store(pgid, Ordering::Release);
+    let result = supervise(&mut child, pgid, timeout, cap);
+    RUNNING_PGID.store(0, Ordering::Release);
+    result
+}
+
+fn supervise(
+    child: &mut std::process::Child,
+    pgid: u32,
+    timeout: Duration,
+    cap: usize,
+) -> Result<String, String> {
     let out = child.stdout.take().ok_or("no stdout")?;
     let err = child.stderr.take().ok_or("no stderr")?;
-    let out_t = std::thread::spawn(move || read_capped(out, cap));
-    let err_t = std::thread::spawn(move || read_capped(err, cap));
+    let (out_buf, err_buf) = (
+        Arc::new(Mutex::new(Captured::default())),
+        Arc::new(Mutex::new(Captured::default())),
+    );
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    {
+        let b = out_buf.clone();
+        std::thread::spawn(move || read_capped(out, cap, b, out_tx));
+        let b = err_buf.clone();
+        std::thread::spawn(move || read_capped(err, cap, b, err_tx));
+    }
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) if Instant::now() >= deadline => {
+                kill_group(pgid, "-KILL");
                 let _ = child.kill();
                 let _ = child.wait();
-                // readers end when the pipes close; do not wait for stragglers
                 return Err(format!(
                     "bootc did not finish within {} s and was stopped",
                     timeout.as_secs()
                 ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(format!("waiting for bootc failed: {e}")),
+            Err(e) => {
+                kill_group(pgid, "-KILL");
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting for bootc failed: {e}"));
+            }
         }
     };
-    let (stdout, over) = out_t.join().map_err(|_| "reader failed")?;
-    let (stderr, _) = err_t.join().map_err(|_| "reader failed")?;
+    // A grandchild may keep the pipes open; wait a bounded time, then stop
+    // it and use what we have.
+    let end = Instant::now() + PIPE_GRACE;
+    let mut pipes_closed = true;
+    for rx in [&out_rx, &err_rx] {
+        let left = end.saturating_duration_since(Instant::now());
+        pipes_closed &= rx.recv_timeout(left).is_ok();
+    }
+    if !pipes_closed {
+        kill_group(pgid, "-KILL");
+    }
+    let (stdout, over) = {
+        let b = lock(&out_buf);
+        (b.data.clone(), b.over)
+    };
     if status.success() {
         if over {
             return Err("bootc printed too much output".into());
         }
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
+        let stderr = lock(&err_buf).data.clone();
         Err(tail(&String::from_utf8_lossy(&stderr), STDERR_TAIL))
     }
 }
@@ -136,6 +220,13 @@ fn tail(s: &str, max: usize) -> String {
         start += 1;
     }
     s[start..].to_string()
+}
+
+/// What `boot_event` knows about the current boot.
+struct BootInfo {
+    version: Option<String>,
+    timestamp: Option<String>,
+    image: Option<String>,
 }
 
 /// Compare dotted numeric versions like `44.20261008`; `None` if either has a
@@ -197,6 +288,10 @@ pub struct Core {
     runner: Arc<dyn BootcRunner>,
     busy: AtomicBool,
     events: Option<PathBuf>,
+    /// The last successful `bootc status` and when it ran; the lock is held
+    /// while bootc runs, so at most one status process exists and callers
+    /// that waited share its result.
+    status_cache: Mutex<Option<(Instant, String)>>,
 }
 
 struct BusyGuard<'a>(&'a AtomicBool);
@@ -213,6 +308,7 @@ impl Core {
             runner,
             busy: AtomicBool::new(false),
             events: None,
+            status_cache: Mutex::new(None),
         }
     }
 
@@ -273,7 +369,7 @@ impl Core {
     pub fn execute(&self, op: &Op) -> Result<String, HelperError> {
         op.validate()?;
         if *op == Op::Status {
-            return self.status_json();
+            return self.cached_status();
         }
         if self
             .busy
@@ -289,6 +385,7 @@ impl Core {
             .and_then(|s| s.status.staged)
             .and_then(|b| b.digest().map(str::to_string));
         let result = self.run_op(op);
+        *lock(&self.status_cache) = None;
         self.record_outcome(op, before.as_deref(), &result);
         result
     }
@@ -334,6 +431,19 @@ impl Core {
         self.status_json()
     }
 
+    /// `bootc status --json`, at most one process at a time, shared for 2 s.
+    fn cached_status(&self) -> Result<String, HelperError> {
+        let mut cache = lock(&self.status_cache);
+        if let Some((at, json)) = cache.as_ref()
+            && at.elapsed() < STATUS_CACHE
+        {
+            return Ok(json.clone());
+        }
+        let json = self.status_json()?;
+        *cache = Some((Instant::now(), json.clone()));
+        Ok(json)
+    }
+
     fn bootc(&self, args: &[&str]) -> Result<String, HelperError> {
         self.runner.run(args).map_err(HelperError::Failed)
     }
@@ -355,46 +465,64 @@ impl Core {
             .map_err(|e| HelperError::Failed(format!("cannot write history: {e}")))?;
         if let (true, Some(prior)) = (wrote, prior) {
             let booted = status.status.booted.as_ref();
-            let version = booted.and_then(|b| b.version().map(str::to_string));
-            let image = booted
-                .and_then(|b| b.image.as_ref())
-                .map(|i| i.image.image.clone());
-            self.boot_event(&prior, version, image.as_deref());
+            self.boot_event(
+                &prior,
+                &BootInfo {
+                    version: booted.and_then(|b| b.version().map(str::to_string)),
+                    timestamp: booted.and_then(|b| b.timestamp().map(str::to_string)),
+                    image: booted
+                        .and_then(|b| b.image.as_ref())
+                        .map(|i| i.image.image.clone()),
+                },
+            );
         }
         Ok(wrote)
     }
 
     /// `update-applied`, `rollback-applied`, `automatic-rollback` or
     /// `channel-switch-applied`, from the previous and the current boot.
-    /// A different image name or tag is a channel switch, not an update. An
-    /// older version without a `rollback-requested` since the previous boot
-    /// is automatic (greenboot gave up and ostree went back). Versions that
-    /// are not dotted numbers record nothing.
-    fn boot_event(&self, prior: &history::Entry, now: Option<String>, image: Option<&str>) {
-        if image.is_some_and(|i| !prior.image.is_empty() && i != prior.image) {
-            self.event("channel-switch-applied", now, None);
-            return;
+    ///
+    /// The order of the two boots comes from the dotted version numbers, or
+    /// from the image build times when a version is not numeric. Newer: an
+    /// update, or a channel switch if a `channel-switched` event followed the
+    /// previous boot and the image name or tag changed. Older: a rollback if
+    /// `rollback-requested` followed the previous boot; else a switch to an
+    /// older channel build if `channel-switched` did and the image changed;
+    /// else automatic (greenboot gave up and ostree went back).
+    fn boot_event(&self, prior: &history::Entry, now: &BootInfo) {
+        let order = match (prior.version.as_deref(), now.version.as_deref()) {
+            (Some(old), Some(new)) => version_cmp(new, old),
+            _ => None,
         }
-        let (Some(old), Some(new)) = (prior.version.as_deref(), now.as_deref()) else {
-            return;
+        .or_else(
+            || match (prior.timestamp.as_deref(), now.timestamp.as_deref()) {
+                (Some(old), Some(new)) => Some(new.cmp(old)),
+                _ => None,
+            },
+        );
+        let Some(order) = order else { return };
+        let since = |name: &str| {
+            self.events.as_deref().is_some_and(|p| {
+                events::read(p)
+                    .iter()
+                    .any(|e| e.event == name && e.time >= prior.first_booted)
+            })
         };
-        match version_cmp(new, old) {
-            Some(Cmp::Greater) => self.event("update-applied", now.clone(), None),
-            Some(Cmp::Less) => {
-                let requested = self.events.as_deref().is_some_and(|p| {
-                    events::read(p)
-                        .iter()
-                        .any(|e| e.event == "rollback-requested" && e.time >= prior.first_booted)
-                });
-                let name = if requested {
-                    "rollback-applied"
-                } else {
-                    "automatic-rollback"
-                };
-                self.event(name, now.clone(), None);
-            }
-            _ => {}
-        }
+        let image_changed = now
+            .image
+            .as_deref()
+            .is_some_and(|i| !prior.image.is_empty() && i != prior.image);
+        let switched = image_changed && since("channel-switched");
+        let name = match order {
+            Cmp::Greater if switched => "channel-switch-applied",
+            Cmp::Greater => "update-applied",
+            Cmp::Less if since("rollback-requested") => "rollback-applied",
+            Cmp::Less if switched => "channel-switch-applied",
+            Cmp::Less => "automatic-rollback",
+            Cmp::Equal if switched => "channel-switch-applied",
+            Cmp::Equal => return,
+        };
+        self.event(name, now.version.clone(), None);
     }
 
     /// `record-event`: append one of the fixed [`events::CLI_EVENTS`].
@@ -780,19 +908,98 @@ mod tests {
         assert_eq!(version_cmp("44.x", "44.1"), None);
     }
 
+    fn boot_with(d: &tempfile::TempDir, p: &Path, image: &str, version: &str, digest: &str) {
+        let json = BOOTED_WITH_UPDATE
+            .replace("atlasos:stable", image)
+            .replace("44.20261001", version)
+            .replace(&"1".repeat(64), &digest.repeat(64));
+        with_ev(&Fake::new(&json), d).record_boot(p).unwrap();
+    }
+
+    fn ev(d: &tempfile::TempDir, name: &str) {
+        events::append(
+            &d.path().join("events.jsonl"),
+            &events::Event::new(name, None, None),
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn image_change_between_boots_is_a_channel_switch() {
+    fn channel_events_need_the_matching_request() {
+        // a normal switch to a newer testing build
         let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("history.jsonl");
-        let testing = BOOTED_WITH_UPDATE.replace("atlasos:stable", "atlasos:testing");
-        with_ev(&Fake::new(BOOTED_WITH_UPDATE), &d)
-            .record_boot(&p)
-            .unwrap();
-        let newer = testing
-            .replace("44.20261001", "44.20261003")
-            .replace(&"1".repeat(64), &"9".repeat(64));
-        with_ev(&Fake::new(&newer), &d).record_boot(&p).unwrap();
-        assert_eq!(names(&d), ["channel-switch-applied"]);
+        let p = d.path().join("h.jsonl");
+        boot_with(&d, &p, "atlasos:stable", "44.20261001", "a");
+        ev(&d, "channel-switched");
+        boot_with(&d, &p, "atlasos:testing", "44.20261003", "b");
+        assert_eq!(names(&d), ["channel-switched", "channel-switch-applied"]);
+
+        // a rollback across channels (rollback requested)
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("h.jsonl");
+        boot_with(&d, &p, "atlasos:testing", "44.20261003", "b");
+        ev(&d, "rollback-requested");
+        boot_with(&d, &p, "atlasos:stable", "44.20261001", "a");
+        assert_eq!(names(&d), ["rollback-requested", "rollback-applied"]);
+
+        // the switch failed, and later an older version boots by itself
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("h.jsonl");
+        boot_with(&d, &p, "atlasos:testing", "44.20261003", "b");
+        ev(&d, "channel-switch-failed");
+        boot_with(&d, &p, "atlasos:stable", "44.20261001", "a");
+        assert_eq!(names(&d), ["channel-switch-failed", "automatic-rollback"]);
+
+        // an image change newer, but nobody switched: an ordinary update
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("h.jsonl");
+        boot_with(&d, &p, "atlasos:stable", "44.20261001", "a");
+        boot_with(&d, &p, "atlasos:testing", "44.20261003", "b");
+        assert_eq!(names(&d), ["update-applied"]);
+    }
+
+    #[test]
+    fn non_numeric_versions_fall_back_to_build_time() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("h.jsonl");
+        boot_with(&d, &p, "atlasos:stable", "nightly", "a");
+        // same timestamp in the fixture: equal, no event
+        boot_with(&d, &p, "atlasos:stable", "nightly-2", "b");
+        assert!(names(&d).is_empty());
+        let json = BOOTED_WITH_UPDATE
+            .replace("44.20261001", "dev-build")
+            .replace("2026-10-01T04:12:09Z", "2026-11-01T00:00:00Z")
+            .replace(&"1".repeat(64), &"c".repeat(64));
+        with_ev(&Fake::new(&json), &d).record_boot(&p).unwrap();
+        assert_eq!(names(&d), ["update-applied"]);
+    }
+
+    #[test]
+    fn status_calls_share_one_bootc_process() {
+        struct Counting(Mutex<usize>);
+        impl BootcRunner for Counting {
+            fn run(&self, _a: &[&str]) -> Result<String, String> {
+                *self.0.lock().unwrap() += 1;
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(PLAIN.into())
+            }
+        }
+        let r = Arc::new(Counting(Mutex::new(0)));
+        let c = Arc::new(Core::new(r.clone()));
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || c.execute(&Op::Status).unwrap())
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert_eq!(*r.0.lock().unwrap(), 1);
+        // a changing operation drops the cache
+        c.execute(&Op::Rollback).unwrap();
+        c.execute(&Op::Status).unwrap();
+        assert_eq!(*r.0.lock().unwrap(), 4); // rollback + its status + a fresh status
     }
 
     /// The fixture with `signature` added to the booted ref (the third
@@ -833,11 +1040,45 @@ mod tests {
     }
 
     #[test]
-    fn runner_times_out_and_caps_output() {
-        let sh = Path::new("/bin/sh");
+    fn runner_times_out_kills_the_group_and_reaps() {
+        let d = tempfile::tempdir().unwrap();
+        let pidfile = d.path().join("pid");
+        let script = format!("echo $$ > {}; sleep 30 & sleep 30", pidfile.display());
         let t = Instant::now();
-        let e = run_limited(sh, &["-c", "sleep 30"], Duration::from_millis(300), 1000).unwrap_err();
+        let e = run_limited(
+            Path::new("/bin/sh"),
+            &["-c", &script],
+            Duration::from_millis(500),
+            1000,
+        )
+        .unwrap_err();
         assert!(e.contains("was stopped") && t.elapsed() < Duration::from_secs(10));
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        // reaped: no zombie left behind either
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert_eq!(RUNNING_PGID.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn grandchild_holding_the_pipe_does_not_hang_the_runner() {
+        let t = Instant::now();
+        let out = run_limited(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30 & echo done"],
+            Duration::from_secs(20),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(out, "done\n");
+        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn runner_caps_output_and_reports_stderr() {
+        let sh = Path::new("/bin/sh");
         let e = run_limited(
             sh,
             &["-c", "yes | head -c 3000000"],

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use atlas_core::helper::service::{IDLE_TIMEOUT, serve};
+use atlas_core::helper::service::{IDLE_TIMEOUT, Service, serve};
 use atlas_core::helper::{Core, SystemBootc, events};
 use atlas_core::history;
 
@@ -49,14 +49,8 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match serve(
-                builder,
-                Arc::new(SystemBootc),
-                IDLE_TIMEOUT,
-                Some(events::DEFAULT_PATH.into()),
-            )
-            .await
-            {
+            let service = Service::new(Arc::new(SystemBootc), Some(events::DEFAULT_PATH.into()));
+            match serve(builder, service, IDLE_TIMEOUT).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("atlas-system-helper: {e}");

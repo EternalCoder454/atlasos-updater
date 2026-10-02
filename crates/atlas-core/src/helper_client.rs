@@ -33,6 +33,8 @@ pub enum HelperErrorKind {
     InvalidArgument,
     NotAuthorized,
     Busy,
+    /// The helper was exiting; the client already retried once.
+    ShuttingDown,
     Failed,
 }
 
@@ -70,6 +72,7 @@ impl From<zbus::Error> for Error {
                 }
                 "net.eterneon.atlas.Error.NotAuthorized" => Some(HelperErrorKind::NotAuthorized),
                 "net.eterneon.atlas.Error.Busy" => Some(HelperErrorKind::Busy),
+                "net.eterneon.atlas.Error.ShuttingDown" => Some(HelperErrorKind::ShuttingDown),
                 "net.eterneon.atlas.Error.Failed" => Some(HelperErrorKind::Failed),
                 _ => None,
             };
@@ -105,29 +108,52 @@ impl HelperClient {
         })
     }
 
+    /// Run `f`; if the helper answers `ShuttingDown` (it was exiting), wait a
+    /// moment, reconnect the proxy (D-Bus starts a fresh helper) and retry once.
+    async fn call<F, Fut>(&self, f: F) -> Result<Status>
+    where
+        F: Fn(SystemHelper1Proxy<'static>) -> Fut,
+        Fut: std::future::Future<Output = zbus::Result<String>>,
+    {
+        match f(self.proxy.clone()).await.map_err(Error::from) {
+            Err(Error::Helper {
+                kind: HelperErrorKind::ShuttingDown,
+                ..
+            }) => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let conn = self.proxy.inner().connection().clone();
+                let proxy = SystemHelper1Proxy::new(&conn).await?;
+                parse(f(proxy).await?)
+            }
+            other => parse(other?),
+        }
+    }
+
     /// `bootc status --json`.
     pub async fn status(&self) -> Result<Status> {
-        parse(self.proxy.status().await?)
+        self.call(|p| async move { p.status().await }).await
     }
 
     /// `bootc upgrade --check`; a found update shows in
     /// `status.booted.cached_update`.
     pub async fn check_for_update(&self) -> Result<Status> {
-        parse(self.proxy.check_for_update().await?)
+        self.call(|p| async move { p.check_for_update().await })
+            .await
     }
 
     /// Download and stage the update (never reboots).
     pub async fn upgrade(&self) -> Result<Status> {
-        parse(self.proxy.upgrade().await?)
+        self.call(|p| async move { p.upgrade().await }).await
     }
 
     pub async fn rollback(&self) -> Result<Status> {
-        parse(self.proxy.rollback().await?)
+        self.call(|p| async move { p.rollback().await }).await
     }
 
     /// Switch the booted image's tag to `stable` or `testing`.
     pub async fn switch_channel(&self, channel: Channel) -> Result<Status> {
-        parse(self.proxy.switch_channel(channel.as_str()).await?)
+        self.call(|p| async move { p.switch_channel(channel.as_str()).await })
+            .await
     }
 }
 

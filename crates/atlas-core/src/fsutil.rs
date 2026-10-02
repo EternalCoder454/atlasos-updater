@@ -31,6 +31,16 @@ pub fn append_line(path: &Path, line: &str, mode: u32) -> io::Result<()> {
     f.sync_all()
 }
 
+/// The lines of `bytes`, split on `\n`, each decoded lossily, so one torn
+/// multibyte character spoils only its own line. Empty lines are dropped.
+pub fn lossy_lines(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

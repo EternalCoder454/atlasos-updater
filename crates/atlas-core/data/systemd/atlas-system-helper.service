@@ -10,3 +10,12 @@ ExecStart=/usr/libexec/atlas-system-helper
 # ProtectHome, NoNewPrivileges, ...). bootc needs mounts, /sysroot, /ostree,
 # /etc, the network and the container auth files, and sandbox options break it.
 # The helper exits by itself after 60 seconds without calls.
+#
+# Stopping: the helper handles SIGTERM itself. It refuses new calls, releases
+# its bus name and waits for a running bootc (up to 40 s), then asks bootc to
+# stop. ostree pulls into its repo transactionally and stages a deployment
+# atomically, so an interrupted bootc leaves the system as it was and the next
+# run resumes; no shutdown inhibitor is needed. KillMode=mixed sends SIGTERM to
+# the helper only and SIGKILL to leftovers when TimeoutStopSec runs out.
+KillMode=mixed
+TimeoutStopSec=60

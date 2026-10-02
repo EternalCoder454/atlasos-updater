@@ -71,6 +71,16 @@ Rules:
   (last 4 KB) as the message.
 - Calls take minutes (`Upgrade` downloads the image), so clients use no method
   timeout.
+- `Status` is read-only: it never takes the busy flag, one `bootc status` runs
+  at a time and its result is shared for 2 s.
+- While the helper exits (idle or SIGTERM) it releases its bus name first;
+  calls that still reach it get `net.eterneon.atlas.Error.ShuttingDown`, and
+  the client retries once. On SIGTERM a running bootc gets 40 s, then SIGTERM.
+  No shutdown inhibitor: ostree pulls transactionally and stages atomically,
+  so an interrupted bootc leaves the system unchanged (from ostree's design;
+  verify in the VM).
+- bootc runs in its own process group with a timeout (2 min status/check,
+  60 min upgrade/rollback/switch) and 4 MiB output caps.
 - D-Bus policy: anyone may call the interface (polkit decides). Only root may own the name.
 
 **History.** `atlas-system-helper record-boot` (CLI mode, run as root by
