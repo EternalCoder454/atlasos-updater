@@ -22,6 +22,14 @@ ColumnLayout {
     Layout.fillWidth: true
     spacing: Kirigami.Units.largeSpacing
 
+    // The headline is the page's state. Say it when it changes, so a screen
+    // reader hears the new state without a banner repeating it.
+    onHeadlineChanged: {
+        if (root.visible && root.headline.length > 0) {
+            Accessible.announce(root.headline);
+        }
+    }
+
     Item {
         id: badge
         readonly property real size: Math.round(Kirigami.Units.gridUnit * 5)

@@ -556,7 +556,12 @@ impl qobject::Backend {
                     let msg = match op {
                         Op::Check if v.staged.present || v.available.present => String::new(),
                         Op::Check => "You are up to date.".to_string(),
-                        Op::Upgrade | Op::Rollback => String::new(),
+                        Op::Upgrade if v.staged.present => String::new(),
+                        Op::Upgrade => "No new update was downloaded.".to_string(),
+                        Op::Rollback if v.rollback_queued => String::new(),
+                        Op::Rollback => {
+                            "Going back did not take effect. Nothing was changed.".to_string()
+                        }
                         Op::CancelRollback => "The rollback was cancelled.".to_string(),
                         Op::Switch(c) => format!("Switched to the {c} channel. Restart to finish."),
                         Op::Status => String::new(),
