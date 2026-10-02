@@ -467,6 +467,7 @@ impl Scrubber {
     /// `users` are user names and full names, `hosts` host names (their first
     /// label is added), `homes` literal home directories.
     pub fn new(users: &[&str], hosts: &[&str], homes: &[&str]) -> Self {
+        use unicode_normalization::UnicodeNormalization;
         let mut h: Vec<String> = hosts.iter().map(|s| s.to_string()).collect();
         h.extend(
             hosts
@@ -479,7 +480,8 @@ impl Scrubber {
             homes: clean_list(
                 homes
                     .iter()
-                    .map(|s| s.trim_end_matches('/').to_string())
+                    // NFC like the text they are matched against (`scrub`)
+                    .map(|s| s.trim_end_matches('/').nfc().collect::<String>())
                     .filter(|s| s.len() > 1),
             ),
         }
@@ -799,6 +801,18 @@ const KNOWN_REASONS: &[&str] = &[
     "Input/output error",
     "Device or resource busy",
     "Connection refused",
+    "Broken pipe",
+    "Text file busy",
+    "Connection reset by peer",
+    "Resource temporarily unavailable",
+    "Bad file descriptor",
+    "Interrupted system call",
+    "File name too long",
+    "Cannot allocate memory",
+    "Timer expired",
+    "Connection timed out",
+    "Network is unreachable",
+    "Address already in use",
 ];
 
 /// `os error 13` or `(os error 13)`, nothing else.
@@ -2523,6 +2537,14 @@ mod tests {
         let plain = Scrubber::new(&["zach"], &[], &[]);
         assert_eq!(plain.scrub("zache\u{301}"), "zaché"); // another word
         assert_eq!(s.scrub("İvan and İVAN"), "USER and USER");
+    }
+
+    #[test]
+    fn homes_are_matched_after_normalisation() {
+        // the home is given decomposed, the text arrives (or is made) NFC
+        let s = Scrubber::new(&[], &[], &["/srv/zoe\u{308}/files"]);
+        assert_eq!(s.scrub("in /srv/zo\u{eb}/files/a"), "in /home/USER/a");
+        assert_eq!(s.scrub("in /srv/zoe\u{308}/files/a"), "in /home/USER/a");
     }
 
     #[test]
