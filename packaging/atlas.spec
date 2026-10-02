@@ -20,7 +20,6 @@ BuildRequires:  systemd-rpm-macros
 %if %{with app}
 BuildRequires:  cmake
 BuildRequires:  ninja-build
-BuildRequires:  extra-cmake-modules
 BuildRequires:  corrosion
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
@@ -32,12 +31,14 @@ BuildRequires:  cmake(Qt6Qml)
 BuildRequires:  cmake(Qt6Quick)
 BuildRequires:  cmake(Qt6QuickControls2)
 BuildRequires:  cmake(Qt6Widgets)
-BuildRequires:  cmake(KF6CoreAddons)
-BuildRequires:  cmake(KF6I18n)
-BuildRequires:  cmake(KF6Kirigami)
+BuildRequires:  cmake(Qt6QmlTools)
+BuildRequires:  qt6-qtbase-devel
 BuildRequires:  cmake(KF6Notifications)
 BuildRequires:  cmake(KF6StatusNotifierItem)
-BuildRequires:  cmake(KF6Config)
+BuildRequires:  cmake(KF6DBusAddons)
+BuildRequires:  pkgconfig(gio-2.0)
+# QML modules qmlcachegen resolves at build time (not linked)
+BuildRequires:  kf6-kirigami-devel
 %endif
 
 %description
@@ -61,6 +62,9 @@ removal by dnf.
 %package -n atlas-updater
 Summary:        Atlas Updater for AtlasOS
 Requires:       atlas-core = %{version}-%{release}
+Requires:       kf6-kirigami
+Requires:       kf6-qqc2-desktop-style
+Requires:       qt6-qtdeclarative
 
 %description -n atlas-updater
 Atlas Updater shows, downloads and stages AtlasOS and Flatpak updates, lets you
