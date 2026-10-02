@@ -87,7 +87,7 @@ impl Schedule {
 
     fn set(&self, at: Option<i64>, warned: bool) {
         let (m, cv) = &*self.inner;
-        let mut s = m.lock().unwrap();
+        let mut s = m.lock().unwrap_or_else(|e| e.into_inner());
         s.restart_at = at;
         s.warned = warned;
         cv.notify_all();
@@ -95,7 +95,7 @@ impl Schedule {
 
     pub fn stop(&self) {
         let (m, cv) = &*self.inner;
-        m.lock().unwrap().quit = true;
+        m.lock().unwrap_or_else(|e| e.into_inner()).quit = true;
         cv.notify_all();
     }
 
@@ -103,7 +103,7 @@ impl Schedule {
     pub fn run(&self, mut fire: impl FnMut(Event)) {
         let (m, cv) = &*self.inner;
         let mut next_poll = Instant::now() + POLL_EVERY;
-        let mut guard = m.lock().unwrap();
+        let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if guard.quit {
                 return;
@@ -139,10 +139,10 @@ impl Schedule {
             if let Some(ev) = fired {
                 drop(guard);
                 fire(ev);
-                guard = m.lock().unwrap();
+                guard = m.lock().unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            guard = cv.wait_timeout(guard, wait).unwrap().0;
+            guard = cv.wait_timeout(guard, wait).unwrap_or_else(|e| e.into_inner()).0;
         }
     }
 }
