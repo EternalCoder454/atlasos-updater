@@ -4,6 +4,7 @@ use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Notes {
+    /// An HTML fragment from [`render`].
     Found(String),
     /// No release for this version (404, missing file, empty body).
     Missing,
@@ -63,314 +64,100 @@ pub fn is_safe_link(link: &str) -> bool {
     starts_https(&l) && !l.iter().any(|c| c.is_control())
 }
 
-/// Longest line we look at; the rest of a longer line is cut.
-const MAX_LINE: usize = 4000;
-/// Longest tag we recognize.
-const MAX_TAG: usize = 300;
-/// HTML Qt may render without loading anything or hiding the text.
-const PLAIN_TAGS: &[&str] = &[
-    "b",
-    "i",
-    "em",
-    "strong",
-    "code",
-    "pre",
-    "br",
-    "p",
-    "ul",
-    "ol",
-    "li",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "blockquote",
-    "kbd",
-    "sub",
-    "sup",
-    "s",
-    "del",
-    "hr",
-    "details",
-    "summary",
-    "tt",
-    "u",
-    "strike",
-];
-
-struct Out {
-    s: String,
-    /// Backslashes right before the end (an odd count escapes the next char).
-    bs: usize,
-    last: Option<char>,
-}
-
-impl Out {
-    fn push(&mut self, c: char) {
-        self.bs = if c == '\\' { self.bs + 1 } else { 0 };
-        self.last = Some(c);
-        self.s.push(c);
-    }
-}
-
-/// For each index, the next position at or after it holding `c` (`n` if none).
-fn next_of(chars: &[char], c: char) -> Vec<usize> {
-    let n = chars.len();
-    let mut v = vec![n; n + 1];
-    for i in (0..n).rev() {
-        v[i] = if chars[i] == c { i } else { v[i + 1] };
-    }
-    v
-}
-
-fn tag_is_plain(inner: &[char]) -> bool {
-    let inner = inner.strip_prefix(&['/']).unwrap_or(inner);
-    let name: String = inner
-        .iter()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let rest: String = inner[name.len()..].iter().collect();
-    PLAIN_TAGS.contains(&name.as_str()) && matches!(rest.trim(), "" | "/")
-}
-
-/// Index of the `[` of a link reference definition (`[label]: dest`) at the
-/// start of the line (after quote and list markers) whose destination is not
-/// https. Such a definition could point a later `[text]` at any URL.
-fn unsafe_definition(chars: &[char]) -> Option<usize> {
-    let n = chars.len();
-    let mut k = 0;
-    loop {
-        while k < n && chars[k] == ' ' {
-            k += 1;
-        }
-        match chars.get(k) {
-            Some('>') => k += 1,
-            Some('-' | '*' | '+') if chars.get(k + 1) == Some(&' ') => k += 2,
-            Some(d) if d.is_ascii_digit() => {
-                let mut j = k;
-                while j < n && chars[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if matches!(chars.get(j), Some('.' | ')')) && chars.get(j + 1) == Some(&' ') {
-                    k = j + 2;
-                } else {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    if chars.get(k) != Some(&'[') {
-        return None;
-    }
-    // the first `]` that is not escaped (`[a\]b]: dest`)
-    let close = (k + 1..n).find(|&i| chars[i] == ']' && chars[i - 1] != '\\')?;
-    if chars.get(close + 1) != Some(&':') {
-        return None;
-    }
-    let mut j = close + 2;
-    while j < n && chars[j] == ' ' {
-        j += 1;
-    }
-    let dest: Vec<char> = chars[j..]
-        .iter()
-        .take_while(|c| !c.is_whitespace())
-        .copied()
-        .collect();
-    (!starts_https(&dest)).then_some(k)
-}
-
-/// For each backtick run (maximal, so a longer run is never split) the start
-/// of the next run of exactly the same length, indexed by its start.
-fn code_closers(chars: &[char]) -> Vec<Option<(usize, usize)>> {
-    let n = chars.len();
-    let mut runs = Vec::new();
-    let mut i = 0;
-    while i < n {
-        if chars[i] == '`' {
-            let st = i;
-            while i < n && chars[i] == '`' {
-                i += 1;
-            }
-            runs.push((st, i - st));
-        } else {
-            i += 1;
-        }
-    }
-    let mut out = vec![None; n];
-    let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    for &(st, len) in runs.iter().rev() {
-        out[st] = seen.get(&len).map(|&c| (len, c));
-        seen.insert(len, st);
-    }
-    out
-}
-
-fn sanitize_line(line: &str) -> String {
-    let mut chars: Vec<char> = line.chars().take(MAX_LINE + 1).collect();
-    let cut = chars.len() > MAX_LINE;
-    chars.truncate(MAX_LINE);
-    let n = chars.len();
-    let next_gt = next_of(&chars, '>');
-    let next_paren = next_of(&chars, ')');
-    let escape_def = unsafe_definition(&chars);
-    let closers = code_closers(&chars);
-    let mut o = Out {
-        s: String::with_capacity(n),
-        bs: 0,
-        last: None,
-    };
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        if escape_def == Some(i) {
-            o.push('\\');
-        }
+fn escape(s: &str, out: &mut String) {
+    for c in s.chars() {
         match c {
-            // No `![` ever survives, so no Markdown image can be formed
-            // (however the brackets are nested or split over lines).
-            // (An escaped bracket is literal text.)
-            '[' if o.last == Some('!') => {
-                o.push('\\');
-                o.push('[');
-                i += 1;
-                continue;
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Containers nested deeper than this are shown as plain text blocks.
+const MAX_DEPTH: usize = 24;
+
+/// Release notes are untrusted. This parses the Markdown and writes the HTML
+/// itself from an allow-list, so nothing the author wrote can reach the output
+/// as markup: every text is escaped, raw HTML is shown as text, an image is
+/// shown as its alt text, and a link keeps its target only when it is https.
+/// No attributes other than a link's `href`; the view adds the styling.
+pub fn render(md: &str) -> String {
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+    let mut out = String::with_capacity(md.len() + md.len() / 2);
+    // For every open container: the closing text to write for it.
+    let mut stack: Vec<&'static str> = Vec::new();
+    // Open links: whether each one was written as <a>.
+    let mut links: Vec<bool> = Vec::new();
+    let mut open =
+        |out: &mut String, stack: &mut Vec<&'static str>, o: &'static str, c: &'static str| {
+            if stack.len() < MAX_DEPTH {
+                out.push_str(o);
+                stack.push(c);
+            } else {
+                stack.push("");
             }
-            // A code span is literal in Markdown, so it passes through as is
-            // (`Vec<String>`). Only a span that really closes on this line; an
-            // escaped or unclosed run is plain text and is handled as such.
-            '`' if o.bs.is_multiple_of(2) && (i == 0 || chars[i - 1] != '`') => {
-                if let Some((len, close)) = closers[i] {
-                    for &ch in &chars[i..close + len] {
-                        o.push(ch);
-                    }
-                    i = close + len;
-                } else {
-                    while i < n && chars[i] == '`' {
-                        o.push('`');
-                        i += 1;
-                    }
-                }
-                continue;
-            }
-            '`' => {
-                // an escaped run: all of it is text (never an opener here)
-                while i < n && chars[i] == '`' {
-                    o.push('`');
-                    i += 1;
-                }
-                continue;
-            }
-            // A link whose target is not https loses its target.
-            ']' if chars.get(i + 1) == Some(&'(') => {
-                let mut j = i + 2;
-                while j < n && chars[j] == ' ' {
-                    j += 1;
-                }
-                if chars.get(j) == Some(&'<') {
-                    j += 1;
-                }
-                if !starts_https(&chars[j.min(n)..]) {
-                    o.push(']');
-                    if next_paren[i + 2] < n {
-                        i = next_paren[i + 2] + 1;
-                        // `](x)(http://...)` must not join into a new target
-                        if chars.get(i) == Some(&'(') {
-                            o.push(' ');
-                        }
-                    } else {
-                        o.push(' ');
-                        i += 1;
-                    }
-                    continue;
-                }
-            }
-            '<' if o.bs.is_multiple_of(2) => {
-                let gt = next_gt[i];
-                if gt < n && gt - i <= MAX_TAG {
-                    let inner = &chars[i + 1..gt];
-                    let comment = inner.len() >= 5
-                        && inner.starts_with(&['!', '-', '-'])
-                        && inner.ends_with(&['-', '-']);
-                    if comment {
-                        i = gt + 1;
-                        continue;
-                    }
-                    let autolink = starts_https(inner)
-                        && !inner.iter().any(|c| c.is_whitespace() || *c == '<');
-                    if autolink || tag_is_plain(inner) {
-                        // the whole tag at once: a backtick inside an autolink
-                        // is not the start of a code span
-                        for &ch in &chars[i..=gt] {
-                            o.push(ch);
-                        }
-                        i = gt + 1;
-                        continue;
+        };
+    let opts = Options::ENABLE_STRIKETHROUGH;
+    for ev in Parser::new_ext(md, opts) {
+        match ev {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => open(&mut out, &mut stack, "<p>", "</p>\n"),
+                Tag::Heading { level, .. } => match level {
+                    HeadingLevel::H1 => open(&mut out, &mut stack, "<h3>", "</h3>\n"),
+                    HeadingLevel::H2 => open(&mut out, &mut stack, "<h4>", "</h4>\n"),
+                    _ => open(&mut out, &mut stack, "<h5>", "</h5>\n"),
+                },
+                Tag::BlockQuote(_) => open(&mut out, &mut stack, "<blockquote>", "</blockquote>\n"),
+                Tag::CodeBlock(_) => open(&mut out, &mut stack, "<pre>", "</pre>\n"),
+                Tag::List(None) => open(&mut out, &mut stack, "<ul>\n", "</ul>\n"),
+                Tag::List(Some(_)) => open(&mut out, &mut stack, "<ol>\n", "</ol>\n"),
+                Tag::Item => open(&mut out, &mut stack, "<li>", "</li>\n"),
+                Tag::Emphasis => open(&mut out, &mut stack, "<em>", "</em>"),
+                Tag::Strong => open(&mut out, &mut stack, "<strong>", "</strong>"),
+                Tag::Strikethrough => open(&mut out, &mut stack, "<s>", "</s>"),
+                Tag::Link { dest_url, .. } => {
+                    let ok = is_safe_link(&dest_url) && stack.len() < MAX_DEPTH;
+                    links.push(ok);
+                    if ok {
+                        out.push_str("<a href=\"");
+                        escape(dest_url.trim(), &mut out);
+                        out.push_str("\">");
                     }
                 }
-                // Not a tag we trust: show it as text.
-                o.push('\\');
+                // an image is its alt text (the events inside); raw HTML
+                // blocks get no wrapper, their text is escaped below
+                _ => stack.push(""),
+            },
+            Event::End(end) => match end {
+                TagEnd::Link => {
+                    if links.pop() == Some(true) {
+                        out.push_str("</a>");
+                    }
+                }
+                _ => {
+                    if let Some(c) = stack.pop() {
+                        out.push_str(c);
+                    }
+                }
+            },
+            Event::Code(t) => {
+                out.push_str("<code>");
+                escape(&t, &mut out);
+                out.push_str("</code>");
             }
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => escape(&t, &mut out),
+            Event::SoftBreak => out.push('\n'),
+            Event::HardBreak => out.push_str("<br>\n"),
+            Event::Rule => out.push_str("<hr>\n"),
+            Event::FootnoteReference(l) => escape(&l, &mut out),
             _ => {}
         }
-        o.push(c);
-        i += 1;
     }
-    if cut {
-        o.s.push('…');
-    }
-    o.s
-}
-
-/// A fence line: up to 3 spaces, then 3 or more backticks (none in the rest
-/// of the line) or tildes. Returns the fence character and its length.
-fn fence_of(line: &str) -> Option<(char, usize)> {
-    let t = line.trim_start_matches(' ');
-    if line.len() - t.len() > 3 {
-        return None;
-    }
-    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let len = t.chars().take_while(|&x| x == c).count();
-    let rest = &t[len..];
-    (len >= 3 && !(c == '`' && rest.contains('`'))).then_some((c, len))
-}
-
-/// Release notes are untrusted text. Nothing in the result can make Qt load
-/// a resource: no Markdown image survives, no HTML except plain formatting
-/// tags, and links keep only `https://` targets. Code spans and fenced code
-/// blocks are literal text and pass through. Linear time, no recursion.
-pub fn sanitize(md: &str) -> String {
-    // MD4C ends a line at \r too
-    let md = md.replace("\r\n", "\n").replace('\r', "\n");
-    let mut out = Vec::new();
-    // the fence that is open, and whether the previous line was blank (a
-    // fence only counts after a blank line, so it is never inside an HTML
-    // block or a paragraph that Markdown may read differently)
-    let mut open: Option<(char, usize)> = None;
-    let mut prev_blank = true;
-    for line in md.lines() {
-        let blank = line.trim().is_empty();
-        match (open, fence_of(line)) {
-            (Some((c, len)), f) => {
-                let closes = f.is_some_and(|(fc, fl)| fc == c && fl >= len)
-                    && line.trim().chars().all(|x| x == c);
-                if closes {
-                    open = None;
-                }
-                out.push(line.to_string());
-            }
-            (None, Some(f)) if prev_blank => {
-                open = Some(f);
-                out.push(line.to_string());
-            }
-            _ => out.push(sanitize_line(line)),
-        }
-        prev_blank = blank;
-    }
-    out.join("\n")
+    out
 }
 
 /// Pulls `.body` out of a GitHub release JSON document.
@@ -380,8 +167,8 @@ pub fn parse_body(json: &str) -> Notes {
         .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_string))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    match body {
-        Some(b) => Notes::Found(sanitize(&b)),
+    match body.map(|b| render(&b)).filter(|h| !h.trim().is_empty()) {
+        Some(h) => Notes::Found(h),
         None => Notes::Missing,
     }
 }
@@ -455,105 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn images_never_survive() {
-        for md in [
-            "Hi ![pixel](http://t.example/p.png) there",
-            "![x][r]\n\n[r]: http://t.example/p.png",
-            "![alt\nmore](http://t.example/p.png)",
-            "![a`[`](http://t.example/p.png)",
-            "!![[a](http://t.example/p.png)",
-            "![![a](b)](c)",
-        ] {
-            let out = sanitize(md);
-            assert!(!out.contains("!["), "{md:?} -> {out:?}");
-            assert!(
-                !out.contains("](http://") && !out.contains("\n[r]:"),
-                "{md:?} -> {out:?}"
-            );
-        }
-        assert_eq!(
-            sanitize("Hi ![pixel](http://t.example/p.png) there"),
-            "Hi !\\[pixel] there"
-        );
-    }
-
-    #[test]
-    fn unsafe_link_targets_are_dropped_and_https_kept() {
-        assert_eq!(
-            sanitize(
-                "[good](https://example.org/a) [bad](file:///etc/passwd) [worse](javascript:x)"
-            ),
-            "[good](https://example.org/a) [bad] [worse]"
-        );
-        assert_eq!(sanitize("[a\nb](javascript:x)"), "[a\nb]");
-        assert_eq!(
-            sanitize("[open](  <HTTPS://e.org>)"),
-            "[open](  <HTTPS://e.org>)"
-        );
-        assert_eq!(sanitize("[x](nope"), "[x] (nope");
-    }
-
-    #[test]
-    fn html_is_neutralized_without_eating_text() {
-        assert_eq!(
-            sanitize("<img src=\"http://t/p\"> ok"),
-            "\\<img src=\"http://t/p\"> ok"
-        );
-        assert_eq!(sanitize("a <b>bold</b> <br/>"), "a <b>bold</b> <br/>");
-        assert_eq!(
-            sanitize("Vec<String> and width <height later -> x"),
-            "Vec\\<String> and width \\<height later -> x"
-        );
-        assert_eq!(sanitize("x <!-- hidden --> y"), "x  y");
-        assert_eq!(
-            sanitize("<https://example.org> <javascript:x>"),
-            "<https://example.org> \\<javascript:x>"
-        );
-        // already escaped by the author: no second backslash
-        assert_eq!(sanitize("\\<img src=x>"), "\\<img src=x>");
-        assert_eq!(
-            sanitize("<a href=\"http://x\">t</a>"),
-            "\\<a href=\"http://x\">t\\</a>"
-        );
-    }
-
-    #[test]
-    fn reference_definitions() {
-        assert_eq!(sanitize("[Security]: fixed X"), "\\[Security]: fixed X");
-        assert_eq!(
-            sanitize("> [r]: http://t.example/p"),
-            "> \\[r]: http://t.example/p"
-        );
-        assert_eq!(
-            sanitize("- 1. [r]:\nhttp://t.example"),
-            "- 1. [r]:\nhttp://t.example".replacen("[r]", "\\[r]", 1)
-        );
-        assert_eq!(
-            sanitize("[r]: https://ok.example/x"),
-            "[r]: https://ok.example/x"
-        );
-    }
-
-    #[test]
-    fn hostile_input_is_linear_and_does_not_panic() {
-        let t = std::time::Instant::now();
-        for md in [
-            "[".repeat(2_000_000),
-            "![".repeat(1_000_000),
-            "<a ".repeat(600_000),
-            "](".repeat(1_000_000),
-            "[[[[]]]](x)".repeat(100_000),
-            "é".repeat(2_000_000),
-        ] {
-            let _ = sanitize(&md);
-        }
-        assert!(t.elapsed() < std::time::Duration::from_secs(10));
-        let long = format!("{}\nnext", "a".repeat(10_000));
-        let out = sanitize(&long);
-        assert!(out.ends_with("…\nnext"));
-    }
-
-    #[test]
     fn safe_link_check() {
         assert!(is_safe_link("https://x.example/a") && is_safe_link(" HTTPS://x.example "));
         assert!(
@@ -565,12 +253,227 @@ mod tests {
         assert!(!is_safe_link(""));
     }
 
+    /// Every `<` in `out` must start one of the tags the renderer writes, and
+    /// every link must be https; no image, ever.
+    fn assert_safe(out: &str, input: &str) {
+        const OK: &[&str] = &[
+            "p",
+            "h3",
+            "h4",
+            "h5",
+            "blockquote",
+            "pre",
+            "ul",
+            "ol",
+            "li",
+            "em",
+            "strong",
+            "s",
+            "code",
+            "br",
+            "hr",
+            "a",
+        ];
+        assert!(
+            !out.to_ascii_lowercase().contains("<img"),
+            "{input:?} -> {out:?}"
+        );
+        let mut rest = out;
+        while let Some(i) = rest.find('<') {
+            let tail = &rest[i + 1..];
+            let end = tail
+                .find('>')
+                .unwrap_or_else(|| panic!("{input:?} -> {out:?}"));
+            let tag = &tail[..end];
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            assert!(
+                OK.contains(&name.as_str()),
+                "tag {tag:?}: {input:?} -> {out:?}"
+            );
+            if name == "a" && !tag.starts_with('/') {
+                assert!(
+                    tag.starts_with("a href=\"https://")
+                        && tag.ends_with('"')
+                        && !tag[8..tag.len() - 1].contains('"'),
+                    "{tag:?}: {input:?} -> {out:?}"
+                );
+            } else {
+                assert!(
+                    !tag.contains(' ') && !tag.contains('"'),
+                    "{tag:?}: {input:?} -> {out:?}"
+                );
+            }
+            rest = &tail[end + 1..];
+        }
+        assert!(!out.contains("href=\"http:") && !out.contains("href=\"file:"));
+    }
+
+    const BYPASSES: &[&str] = &[
+        "`a\nx` ![i](http://e/i.png) `y",
+        "- a\n\n  ```\n  x\n- b ![i](http://e/i.png)",
+        "<pre>\n\n```\n<img src=\"http://e/i.png\">\n```\n",
+        "<p>\n<img src=\"http://e/i.png\">",
+        "[a]<!---->(file:///etc/passwd)",
+        "[a\nb]: http://evil\n\n[a b]",
+        "[a](x)(http://evil.example/p)",
+        "![i](http://e/i.png)",
+        "![![a](b)](c)",
+        "<img src=\"http://e/i.png\">",
+        "<IMG SRC=http://e/i.png>",
+        "<https://a`b> ![i](http://e/i.png) `",
+        "\\`x ![i](http://e/i.png) `",
+        "x\r[r]: http://e/p\r\r[r]",
+        "[a\\]b]: http://x\n\n[a\\]b]",
+        "Fixed![#12](https://x.y/1)",
+        "[x](javascript:alert(1)) [y](file:///etc/passwd) [z](HTTP://e)",
+        "<a href=\"http://e\">x</a> <script>alert(1)</script>",
+        "> ![i](http://e/i.png)\n> - ![j](http://e/j.png)",
+        "[a][r]\n\n[r]: http://e/p \"t\"",
+        "<div>\n\n![i](http://e/i.png)\n\n</div>",
+        "~~~\n```\n![i](http://e/i.png)\n~~~\n![j](http://e/j.png)",
+        "[a](<http://e/p>) [b](<https://ok.example/p>)",
+        "<!-- ![i](http://e/i.png) --> ![j](http://e/j.png)",
+        "[![i](http://e/i.png)](https://ok.example)",
+    ];
+
+    #[test]
+    fn bypass_inputs_stay_safe() {
+        for md in BYPASSES {
+            assert_safe(&render(md), md);
+        }
+        // the specific ones: an image is its alt text, a bad link its text
+        assert_eq!(
+            render("![alt text](http://e/i.png)").trim(),
+            "<p>alt text</p>"
+        );
+        assert_eq!(render("[a](http://e/p)").trim(), "<p>a</p>");
+        assert!(render("[a](https://e/p?a=1&b=2)").contains("href=\"https://e/p?a=1&amp;b=2\""));
+        // raw HTML is shown as text
+        let o = render("<b onclick=x>hi</b>");
+        assert!(
+            o.contains("&lt;b onclick=x&gt;") && !o.contains("<b"),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn formatting_survives() {
+        let o = render(
+            "# T\n\n**b** *i* ~~s~~ `c`\n\n- one\n- two\n\n1. x\n\n> q\n\n---\n\n```\nlet v: Vec<String>;\n```\n\n[ok](https://e.example/a) a  \nb",
+        );
+        for want in [
+            "<h3>T</h3>",
+            "<strong>b</strong>",
+            "<em>i</em>",
+            "<s>s</s>",
+            "<code>c</code>",
+            "<ul>",
+            "<li>one</li>",
+            "<ol>",
+            "<blockquote>",
+            "<hr>",
+            "<pre>let v: Vec&lt;String&gt;;\n</pre>",
+            "<a href=\"https://e.example/a\">ok</a>",
+            "<br>",
+        ] {
+            assert!(o.contains(want), "{want} not in {o}");
+        }
+    }
+
+    #[test]
+    fn random_mixes_stay_safe() {
+        let frags: Vec<&str> = BYPASSES
+            .iter()
+            .copied()
+            .chain([
+                "`",
+                "``",
+                "```",
+                "~~~",
+                "\n",
+                "\n\n",
+                "\r",
+                "  ",
+                "- ",
+                "> ",
+                "1. ",
+                "<",
+                ">",
+                "![",
+                "](",
+                ")",
+                "[",
+                "]",
+                "]:",
+                "(",
+                "<!--",
+                "-->",
+                "<pre>",
+                "<p>",
+                "http://e/i.png",
+                "https://ok.example",
+                "\\",
+                "&",
+                "\"",
+                "'",
+                "<https://a>",
+                "<b>",
+                "*",
+                "_",
+                "#",
+                "| a | b |\n|---|---|\n| ![i](http://e/i.png) | x |",
+            ])
+            .collect();
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..4000 {
+            let n = 1 + (next() % 12) as usize;
+            let md: String = (0..n)
+                .map(|_| frags[(next() % frags.len() as u64) as usize])
+                .collect();
+            assert_safe(&render(&md), &md);
+        }
+    }
+
+    #[test]
+    fn hostile_input_is_fast_and_does_not_panic() {
+        let t = std::time::Instant::now();
+        for md in [
+            "[".repeat(200_000),
+            "> ".repeat(100_000),
+            "- ".repeat(100_000),
+            "`a".repeat(100_000),
+            "<a ".repeat(100_000),
+            "![a](".repeat(50_000),
+            "*a ".repeat(100_000),
+        ] {
+            assert_safe(&render(&md), "(large)");
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
     #[test]
     fn body() {
-        assert_eq!(
-            parse_body("{\"tag_name\":\"44.1\",\"body\":\"## Changes\\n- a\\n\"}"),
-            Notes::Found("## Changes\n- a".into())
-        );
+        match parse_body("{\"tag_name\":\"44.1\",\"body\":\"## Changes\\n- a\\n\"}") {
+            Notes::Found(h) => assert!(
+                h.contains("<h4>Changes</h4>") && h.contains("<li>a</li>"),
+                "{h}"
+            ),
+            n => panic!("{n:?}"),
+        }
         assert_eq!(parse_body(r#"{"body":null}"#), Notes::Missing);
         assert_eq!(parse_body(r#"{"message":"Not Found"}"#), Notes::Missing);
         assert_eq!(parse_body("nonsense"), Notes::Missing);
@@ -582,42 +485,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("44.2.json"), r#"{"body":"hello"}"#).unwrap();
         let t = format!("file://{}/{{version}}.json", dir.display());
-        assert_eq!(fetch(&t, "44.2").unwrap(), Notes::Found("hello".into()));
+        assert_eq!(
+            fetch(&t, "44.2").unwrap(),
+            Notes::Found("<p>hello</p>\n".into())
+        );
         assert_eq!(fetch(&t, "44.3").unwrap(), Notes::Missing);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn round5_sanitizer_cases() {
-        // a dropped target cannot be joined with a following one
-        let o = sanitize("[a](x)(http://evil.example/p)");
-        assert!(!o.contains("](http://"), "{o}");
-        // code spans and fences are literal text
-        assert_eq!(sanitize("use `Vec<String>` here"), "use `Vec<String>` here");
-        assert_eq!(
-            sanitize("text\n\n```\nlet v: Vec<String>;\n![x](http://e/i.png)\n```\nafter <b>"),
-            "text\n\n```\nlet v: Vec<String>;\n![x](http://e/i.png)\n```\nafter <b>"
-        );
-        // ... but not a fence glued to a paragraph, nor an unclosed span
-        assert!(!sanitize("para\n```\n![x](http://e/i.png)").contains("![x]"));
-        let o = sanitize("`unclosed ![x](http://e/i.png)");
-        assert!(!o.contains("![x]"), "{o}");
-        // a backtick inside an autolink does not open a span
-        let o = sanitize("<https://a`b> ![i](http://e/i.png) `");
-        assert!(!o.contains("![i]"), "{o}");
-        // an escaped backtick does not open one either
-        let o = sanitize("\\`x ![i](http://e/i.png) `");
-        assert!(!o.contains("![i]"), "{o}");
-        // a bare CR ends a line
-        let o = sanitize("x\r[r]: http://e/p");
-        assert!(o.contains("\n\\[r]:"), "{o:?}");
-        // an escaped bracket in a definition label
-        let o = sanitize("[a\\]b]: http://x");
-        assert!(o.starts_with("\\["), "{o}");
-        // `!` before a bracket stays visible
-        assert_eq!(
-            sanitize("Fixed![#12](https://x.y/1)"),
-            "Fixed!\\[#12](https://x.y/1)"
-        );
     }
 }

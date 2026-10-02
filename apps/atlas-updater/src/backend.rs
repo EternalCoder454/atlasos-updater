@@ -36,7 +36,8 @@ pub mod qobject {
         /// The available image is the one the user went back from.
         #[qproperty(bool, available_is_rollback, cxx_name = "availableIsRollback")]
         #[qproperty(QString, notes_state, cxx_name = "notesState")]
-        #[qproperty(QString, notes_text, cxx_name = "notesText")]
+        /// The release notes as an HTML fragment (empty when there are none).
+        #[qproperty(QString, notes_html, cxx_name = "notesHtml")]
         #[qproperty(QString, notes_version, cxx_name = "notesVersion")]
         /// Plain-language reason when `notesState` is "error".
         #[qproperty(QString, notes_error, cxx_name = "notesError")]
@@ -229,7 +230,7 @@ pub struct BackendRust {
     rollback_target: QString,
     available_is_rollback: bool,
     notes_state: QString,
-    notes_text: QString,
+    notes_html: QString,
     notes_version: QString,
     notes_error: QString,
     apps_json: QString,
@@ -571,7 +572,7 @@ impl qobject::Backend {
         self.as_mut().rust_mut().window_open = false;
         // Tray mode keeps no notes in memory and makes no requests.
         self.as_mut().set_notes_state(q("none"));
-        self.as_mut().set_notes_text(QString::default());
+        self.as_mut().set_notes_html(QString::default());
         self.as_mut().set_notes_version(QString::default());
         self.as_mut().set_notes_error(QString::default());
     }
@@ -594,7 +595,7 @@ impl qobject::Backend {
         };
         if target.is_empty() {
             self.as_mut().set_notes_state(q("none"));
-            self.as_mut().set_notes_text(QString::default());
+            self.as_mut().set_notes_html(QString::default());
             self.as_mut().set_notes_version(QString::default());
             return;
         }
@@ -617,7 +618,7 @@ impl qobject::Backend {
         }
         self.as_mut().set_notes_version(q(&target));
         self.as_mut().set_notes_state(q("loading"));
-        self.as_mut().set_notes_text(QString::default());
+        self.as_mut().set_notes_html(QString::default());
         self.as_mut().set_notes_error(QString::default());
         let template = self.rust().config.release_notes_url.clone();
         let fixtures = self.rust().fixtures.clone();
@@ -639,7 +640,7 @@ impl qobject::Backend {
                 }
                 match res {
                     Ok(Notes::Found(text)) => {
-                        obj.as_mut().set_notes_text(q(&text));
+                        obj.as_mut().set_notes_html(q(&text));
                         obj.as_mut().set_notes_state(q("ready"));
                     }
                     Ok(Notes::Missing) => obj.as_mut().set_notes_state(q("missing")),
