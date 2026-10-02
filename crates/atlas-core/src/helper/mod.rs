@@ -340,6 +340,15 @@ struct StatusCache {
 /// Most callers that wait for one running `bootc status`.
 const MAX_STATUS_WAITERS: usize = 8;
 
+struct RefreshGuard<'a>(&'a StatusCache);
+
+impl Drop for RefreshGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).refreshing = false;
+        self.0.done.notify_all();
+    }
+}
+
 struct BusyGuard<'a>(&'a AtomicBool);
 
 impl Drop for BusyGuard<'_> {
@@ -433,7 +442,8 @@ impl Core {
         let _guard = BusyGuard(&self.busy);
         self.invalidate_status();
         let before = (self.events.is_some() && *op == Op::Upgrade)
-            .then(|| Status::from_json(&self.cached_status().ok()?).ok())
+            // a direct read: the shared one may refuse under a status flood
+            .then(|| Status::from_json(&self.status_json().ok()?).ok())
             .flatten()
             .and_then(|s| s.status.staged)
             .and_then(|b| b.digest().map(str::to_string));
@@ -528,9 +538,11 @@ impl Core {
         st.refreshing = true;
         let generation = st.generation;
         drop(st);
+        // Clears `refreshing` and wakes the waiters even if bootc's runner
+        // panics: nobody may wait for a refresh that no longer runs.
+        let _refresh = RefreshGuard(cache);
         let res = self.status_json();
         let mut st = lock(&cache.state);
-        st.refreshing = false;
         if st.generation == generation {
             let stored = match &res {
                 Ok(j) => Ok(j.clone()),
@@ -539,7 +551,6 @@ impl Core {
             };
             st.entry = Some((Instant::now(), stored));
         }
-        cache.done.notify_all();
         res
     }
 
@@ -1144,6 +1155,28 @@ mod tests {
         c.execute(&Op::Rollback).unwrap();
         c.execute(&Op::Status).unwrap();
         assert_eq!(*r.0.lock().unwrap(), 5); // queued check + rollback + its status + a fresh status
+    }
+
+    #[test]
+    fn a_panicking_status_does_not_wedge_later_callers() {
+        struct Panicky(Mutex<bool>);
+        impl BootcRunner for Panicky {
+            fn run(&self, _a: &[&str]) -> Result<String, String> {
+                let mut first = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                if std::mem::replace(&mut *first, false) {
+                    panic!("runner bug");
+                }
+                Ok(PLAIN.into())
+            }
+        }
+        let c = Arc::new(Core::new(Arc::new(Panicky(Mutex::new(true)))));
+        let c2 = c.clone();
+        assert!(
+            std::thread::spawn(move || c2.execute(&Op::Status))
+                .join()
+                .is_err()
+        );
+        assert_eq!(c.execute(&Op::Status).unwrap(), PLAIN);
     }
 
     #[test]
