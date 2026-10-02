@@ -243,6 +243,7 @@ pub fn render(md: &str) -> String {
                         // Text that names another site than the link goes to:
                         // show where it really goes.
                         if text_host(&text)
+                            // (parse_https already rejects a host with a trailing dot)
                             .is_some_and(|t| t != strip_www(host.trim_end_matches('.')))
                         {
                             out.push_str(" (");
@@ -310,6 +311,7 @@ pub fn render_plain(md: &str) -> String {
             }
             Event::End(TagEnd::Link) => {
                 if let Some((Some(host), text)) = links.pop()
+                    // (parse_https already rejects a host with a trailing dot)
                     && text_host(&text).is_some_and(|t| t != strip_www(host.trim_end_matches('.')))
                 {
                     out.push_str(" (");
@@ -628,6 +630,12 @@ mod tests {
             render("[bank.com](http://evil.example)").trim(),
             "<p>bank.com</p>"
         );
+    }
+
+    #[test]
+    fn text_host_drops_trailing_dots() {
+        assert_eq!(text_host("bank.com.").as_deref(), Some("bank.com"));
+        assert_eq!(text_host("www.bank.com..").as_deref(), Some("bank.com"));
     }
 
     #[test]

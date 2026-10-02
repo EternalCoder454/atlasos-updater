@@ -1,5 +1,9 @@
 //! Restart through Plasma, so apps get to save first.
 
+/// The error for a request Plasma did not answer in time. The request may
+/// still go through later, so callers must not treat it as a failure to report.
+pub const NO_ANSWER: &str = "Plasma hasn't confirmed the restart yet. If a logout prompt is showing, answer it; otherwise restart from the system menu.";
+
 /// `org.kde.Shutdown /Shutdown logoutAndReboot` on the session bus.
 /// Blocking; call from a worker thread.
 pub fn logout_and_reboot() -> Result<(), String> {
@@ -24,8 +28,8 @@ pub fn logout_and_reboot() -> Result<(), String> {
         Ok(())
     };
     rt.block_on(tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(60),
         call,
     ))
-    .unwrap_or_else(|_| Err("Plasma did not answer the restart request".to_string()))
+    .unwrap_or_else(|_| Err(NO_ANSWER.to_string()))
 }

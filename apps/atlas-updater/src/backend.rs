@@ -912,6 +912,12 @@ impl qobject::Backend {
         let fail = move |mut obj: Pin<&mut qobject::Backend>, e: String| {
             // Nobody may be looking at a window (scheduled restart in the
             // tray): tell the user with a notification as well.
+            if e == restart::NO_ANSWER {
+                // Plasma may still act on the request: say so, no notification.
+                obj.as_mut().set_error("restart", q(&e));
+                clear(obj);
+                return;
+            }
             let text = format!(
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
