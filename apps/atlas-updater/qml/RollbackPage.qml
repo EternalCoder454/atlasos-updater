@@ -49,14 +49,23 @@ AtlasPage {
         return date.length > 0 ? qsTr("%1  (%2)").arg(v).arg(Dates.longDate(date)) : v;
     }
 
+    // A restart is under way (whatever started it).
+    StatusHero {
+        Layout.topMargin: Kirigami.Units.gridUnit
+        visible: page.backend.restarting === true
+        busy: true
+        iconName: "view-refresh"
+        headline: qsTr("Restarting…")
+        subtitle: qsTr("Saving your session…")
+    }
+
     // Already queued: restart, or change your mind.
     StatusHero {
         Layout.topMargin: Kirigami.Units.gridUnit
-        visible: page.queued
-        iconName: page.backend.restarting ? "view-refresh" : "edit-undo"
-        busy: page.backend.restarting === true
-        headline: page.backend.restarting ? qsTr("Restarting…") : qsTr("Ready to go back to %1").arg(page.target)
-        subtitle: page.backend.restarting ? qsTr("Saving your session…") : qsTr("The next restart starts that version. Your files and settings stay as they are.")
+        visible: page.queued && page.backend.restarting !== true
+        iconName: "edit-undo"
+        headline: qsTr("Ready to go back to %1").arg(page.target)
+        subtitle: qsTr("The next restart starts that version. Your files and settings stay as they are.")
 
         PrimaryButton {
             text: qsTr("Restart now")
@@ -72,7 +81,7 @@ AtlasPage {
 
     StatusHero {
         Layout.topMargin: Kirigami.Units.gridUnit
-        visible: page.backend.hasRollback && !page.queued
+        visible: page.backend.hasRollback && !page.queued && page.backend.restarting !== true
         iconName: "edit-undo"
         headline: qsTr("Something not working after an update?")
         subtitle: qsTr("You can go back to the version you used before. Nothing is deleted: you can update again later.")

@@ -12,6 +12,12 @@ function longDate(iso) {
     return d.toLocaleDateString(Qt.locale(), Qt.locale().dateFormat(0)) // 0 = Locale.LongFormat;
 }
 
+// Unix seconds -> "Thursday, 1 January 2099 at 03:00", in the user's locale.
+function atTime(secs) {
+    var d = new Date(secs * 1000);
+    return qsTr("%1 at %2").arg(longDate(d.toISOString())).arg(d.toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)));
+}
+
 function shortDateTime(secs) {
     return new Date(secs * 1000).toLocaleString(Qt.locale(), Qt.locale().dateTimeFormat(1)) // 1 = Locale.ShortFormat;
 }

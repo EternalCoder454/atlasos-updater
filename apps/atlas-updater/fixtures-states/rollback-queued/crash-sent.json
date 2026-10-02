@@ -3,7 +3,7 @@
   "schema": 1,
   "event_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
   "report_type": "coredump",
-  "time": "2026-09-28T18:00:00Z",
+  "time": "2026-10-01T18:00:00Z",
   "crash_id": "f00dfeedcafe0123",
   "atlasos_version": "44.20261001",
   "channel": "stable",
@@ -19,7 +19,7 @@
   "uptime_secs": 11520,
   "cpu_model": "Example CPU",
   "ram_total_kb": 8000000,
-  "mem_used_kb": 11000000,
+  "mem_used_kb": 5200000,
   "sent_event_id": "9f8e7d6c"
  }
 ]

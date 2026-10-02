@@ -19,6 +19,6 @@
   "uptime_secs": 11520,
   "cpu_model": "Example CPU",
   "ram_total_kb": 8000000,
-  "mem_used_kb": 11000000
+  "mem_used_kb": 5200000
  }
 ]

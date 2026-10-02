@@ -19,8 +19,8 @@
      "transport": "registry"
     },
     "architecture": "amd64",
-    "version": "44.20261008",
-    "timestamp": "2026-10-08T04:10:41Z",
+    "version": "44.20261002",
+    "timestamp": "2026-10-02T04:10:41Z",
     "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
    },
    "cachedUpdate": null,
@@ -50,8 +50,8 @@
      "transport": "registry"
     },
     "architecture": "amd64",
-    "version": "44.20261008",
-    "timestamp": "2026-10-08T04:10:41Z",
+    "version": "44.20261002",
+    "timestamp": "2026-10-02T04:10:41Z",
     "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
    },
    "incompatible": false,

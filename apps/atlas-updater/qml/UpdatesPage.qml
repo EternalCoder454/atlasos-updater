@@ -25,9 +25,9 @@ AtlasPage {
     // reports) stay in the banner at the top.
     readonly property bool heroError: ["check", "download", "restart", "rollback", "cancelRollback", "switch", "status", "timer"].indexOf(page.backend.errorOp) >= 0
     readonly property bool retryable: ["check", "status", "download"].indexOf(page.backend.errorOp) >= 0
-    // A failed download is not retried over a queued rollback.
-    readonly property bool canRetry: page.hasError && page.retryable && !(page.backend.errorOp === "download" && page.rollbackQueued)
-    readonly property bool hasError: page.backend.errorText.length > 0 && page.heroError && (!page.backend.loaded || !page.backend.busy)
+    // A failed download is not retried while a restart waits (it could replace a queued rollback).
+    readonly property bool canRetry: page.hasError && page.retryable && !(page.backend.errorOp === "download" && page.restartReady)
+    readonly property bool hasError: page.backend.errorText.length > 0 && page.heroError && page.backend.restarting !== true && (!page.backend.loaded || !page.backend.busy)
     // busyOp is only meaningful together with busy.
     readonly property string busyOp: page.backend.busy ? page.backend.busyOp : ""
     readonly property bool downloading: page.busyOp === "download"
@@ -164,6 +164,7 @@ AtlasPage {
 
     // ---- the system ----
     StatusHero {
+        id: hero
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         busy: page.checking || page.downloading || page.working
@@ -230,9 +231,10 @@ AtlasPage {
                 return qsTr("Saving your session…");
             }
             if (page.checking || page.downloading || page.working) {
-                return page.backend.busyText;
+                // Never repeat the headline.
+                return page.backend.busyText === hero.headline ? qsTr("This takes a moment.") : page.backend.busyText;
             }
-            var when = page.backend.scheduledAt > 0 ? " " + qsTr("Restart scheduled for %1.").arg(Dates.shortDateTime(page.backend.scheduledAt)) : "";
+            var when = page.backend.scheduledAt > 0 ? " " + qsTr("Restart scheduled for %1.").arg(Dates.atTime(page.backend.scheduledAt)) : "";
             if (page.rollbackQueued) {
                 return qsTr("The previous version starts after the restart.") + when;
             }
@@ -259,12 +261,12 @@ AtlasPage {
         }
         SecondaryButton {
             text: qsTr("Restart later…")
-            visible: page.restartReady && page.backend.scheduledAt === 0
+            visible: page.restartReady && !page.working && page.backend.scheduledAt === 0
             onClicked: scheduleDialog.open()
         }
         SecondaryButton {
             text: qsTr("Cancel scheduled restart")
-            visible: page.backend.scheduledAt > 0
+            visible: page.backend.scheduledAt > 0 && !page.working
             onClicked: page.backend.cancelRestart()
         }
         PrimaryButton {
@@ -298,7 +300,7 @@ AtlasPage {
         }
         SecondaryButton {
             text: qsTr("Check for updates")
-            visible: !page.hasError && !page.restartReady
+            visible: !page.hasError && !page.restartReady && !page.checking && !page.downloading && !page.working
             enabled: !page.backend.busy
             onClicked: page.backend.checkForUpdate()
         }
