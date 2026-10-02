@@ -19,8 +19,16 @@ T.AbstractButton {
     scale: control.down && control.enabled ? 0.97 : 1
 
     Accessible.name: control.text
-    Keys.onReturnPressed: if (enabled) control.clicked()
-    Keys.onEnterPressed: if (enabled) control.clicked()
+    Keys.onReturnPressed: event => {
+        if (enabled && !event.isAutoRepeat) {
+            control.clicked();
+        }
+    }
+    Keys.onEnterPressed: event => {
+        if (enabled && !event.isAutoRepeat) {
+            control.clicked();
+        }
+    }
 
     Behavior on scale {
         NumberAnimation {

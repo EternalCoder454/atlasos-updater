@@ -46,6 +46,8 @@ FocusScope {
     activeFocusOnTab: root.clickable
     opacity: !root.clickable && root.chevron ? 0.5 : 1
 
+    // A switch row is exposed through its switch only, so the name is not read twice.
+    Accessible.ignored: root.showSwitch
     Accessible.role: root.radio ? Accessible.RadioButton : (root.clickable ? Accessible.Button : Accessible.ListItem)
     Accessible.name: root.title
     Accessible.description: root.subtitle.length > 0 && root.value.length > 0 ? root.subtitle + ", " + root.value : root.subtitle + root.value
@@ -54,11 +56,50 @@ FocusScope {
     Accessible.focusable: root.clickable
     Accessible.onPressAction: if (root.clickable) root.clicked()
 
-    Keys.onReturnPressed: if (root.clickable) root.clicked()
-    Keys.onEnterPressed: if (root.clickable) root.clicked()
-    Keys.onSpacePressed: if (root.clickable) root.clicked()
+    Keys.onPressed: event => {
+        root.byMouse = false;
+        event.accepted = false;
+    }
+    Keys.onReturnPressed: event => root.activate(event)
+    Keys.onEnterPressed: event => root.activate(event)
+    Keys.onSpacePressed: event => root.activate(event)
     Keys.onDownPressed: event => root.step(true, event)
     Keys.onUpPressed: event => root.step(false, event)
+
+    // True after a click: the focus ring is for keyboard focus only.
+    property bool byMouse: false
+    onActiveFocusChanged: {
+        if (!root.activeFocus) {
+            root.byMouse = false;
+        } else if (!root.byMouse) {
+            root.ensureVisible();
+        }
+    }
+
+    function activate(event) {
+        if (root.clickable && !event.isAutoRepeat) {
+            root.clicked();
+        }
+        event.accepted = root.clickable;
+    }
+
+    // Scroll the page so a row reached with Tab is on screen.
+    function ensureVisible() {
+        var f = root.parent;
+        while (f && !(f.contentY !== undefined && f.contentHeight !== undefined && f.flickableDirection !== undefined)) {
+            f = f.parent;
+        }
+        if (!f) {
+            return;
+        }
+        var p = root.mapToItem(f.contentItem, 0, 0);
+        var m = Kirigami.Units.smallSpacing;
+        if (p.y < f.contentY) {
+            f.contentY = Math.max(0, p.y - m);
+        } else if (p.y + root.height > f.contentY + f.height) {
+            f.contentY = p.y + root.height - f.height + m;
+        }
+    }
 
     function step(forward, event) {
         if (!root.radio) {
@@ -69,6 +110,8 @@ FocusScope {
         if (n && n.radio === true) {
             n.forceActiveFocus();
             n.clicked();
+        } else {
+            event.accepted = false;
         }
     }
 
@@ -101,7 +144,7 @@ FocusScope {
         color: "transparent"
         border.width: 2
         border.color: Qt.alpha(Kirigami.Theme.highlightColor, 0.6)
-        visible: root.activeFocus && root.clickable
+        visible: root.activeFocus && root.clickable && !root.byMouse
     }
 
     HoverHandler {
@@ -113,6 +156,7 @@ FocusScope {
         id: tap
         enabled: root.clickable
         onTapped: {
+            root.byMouse = true;
             root.forceActiveFocus();
             root.clicked();
         }
@@ -182,6 +226,7 @@ FocusScope {
             visible: root.showSwitch
             checked: root.switchChecked
             Accessible.name: root.title
+            Accessible.description: root.subtitle
             onToggled: {
                 root.switchToggled(checked);
                 // The switch shows what the system says, not what was clicked:

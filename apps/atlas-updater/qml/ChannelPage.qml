@@ -18,6 +18,7 @@ AtlasPage {
         target: page.backend
         function onChannelChanged() {
             page.choice = page.backend.channel;
+            confirm.close();
         }
     }
 

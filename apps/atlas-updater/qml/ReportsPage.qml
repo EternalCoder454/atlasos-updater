@@ -147,8 +147,10 @@ AtlasPage {
                     visible: card.modelData.githubUrl.length > 0 && page.backend.isSafeLink(card.modelData.githubUrl)
                     enabled: !page.backend.busy
                     onClicked: {
-                        Qt.openUrlExternally(card.modelData.githubUrl);
-                        page.backend.discardReport(card.modelData.eventId);
+                        // Discard only if a browser really opened.
+                        if (Qt.openUrlExternally(card.modelData.githubUrl)) {
+                            page.backend.discardReport(card.modelData.eventId);
+                        }
                     }
                 }
             }

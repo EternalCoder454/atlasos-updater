@@ -16,9 +16,16 @@ AtlasPage {
         id: confirm
         title: qsTr("Go back to %1?").arg(page.backend.rollbackVersion)
         text: qsTr("The next restart starts the previous version. Your files and settings stay as they are.")
-        acceptText: qsTr("Go back")
+        acceptText: qsTr("Go back to %1").arg(page.backend.rollbackVersion)
         focusReject: true
         onAccepted: page.backend.rollback()
+    }
+
+    Connections {
+        target: page.backend
+        function onRollbackQueuedChanged() {
+            confirm.close();
+        }
     }
 
     Cards {
@@ -87,7 +94,7 @@ AtlasPage {
         visible: page.backend.hasRollback
         SectionRow {
             title: qsTr("Current")
-            value: page.backend.currentVersion
+            value: page.version(page.backend.currentVersion, page.backend.currentDate)
         }
         SectionRow {
             title: qsTr("Previous")

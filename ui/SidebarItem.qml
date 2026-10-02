@@ -20,8 +20,16 @@ T.AbstractButton {
     Accessible.name: control.text
     Accessible.checkable: true
     Accessible.checked: control.selected
-    Keys.onReturnPressed: control.clicked()
-    Keys.onEnterPressed: control.clicked()
+    Keys.onReturnPressed: event => {
+        if (!event.isAutoRepeat) {
+            control.clicked();
+        }
+    }
+    Keys.onEnterPressed: event => {
+        if (!event.isAutoRepeat) {
+            control.clicked();
+        }
+    }
 
     background: Rectangle {
         radius: 8

@@ -92,6 +92,7 @@ AtlasPage {
             spacing: Kirigami.Units.largeSpacing
             QQC2.ComboBox {
                 id: dayBox
+                onActivated: scheduleDialog.problem = ""
                 model: [qsTr("Today"), qsTr("Tomorrow")]
                 Accessible.name: qsTr("Day")
             }
@@ -100,6 +101,7 @@ AtlasPage {
                 from: 0
                 to: 23
                 editable: true
+                onValueChanged: scheduleDialog.problem = ""
                 Accessible.name: qsTr("Hour")
                 textFromValue: v => (v < 10 ? "0" : "") + v
             }
@@ -112,6 +114,7 @@ AtlasPage {
                 to: 59
                 stepSize: 5
                 editable: true
+                onValueChanged: scheduleDialog.problem = ""
                 Accessible.name: qsTr("Minute")
                 textFromValue: v => (v < 10 ? "0" : "") + v
             }
@@ -129,7 +132,7 @@ AtlasPage {
         visible: page.backend.reportsCount > 0
         SectionRow {
             iconName: "data-warning"
-            title: qsTr("%n crash report(s) waiting", "", page.backend.reportsCount)
+            title: page.backend.reportsCount === 1 ? qsTr("1 crash report waiting") : qsTr("%n crash reports waiting", "", page.backend.reportsCount)
             subtitle: qsTr("Review them. Nothing is sent unless you say so.")
             chevron: true
             onClicked: page.openReports()
@@ -217,7 +220,7 @@ AtlasPage {
         }
 
         PrimaryButton {
-            text: qsTr("Restart to update")
+            text: page.rollbackQueued ? qsTr("Restart now") : qsTr("Restart to update")
             visible: page.restartReady && !page.hasError
             enabled: !page.backend.busy
             onClicked: page.backend.restartNow()
@@ -234,13 +237,13 @@ AtlasPage {
         }
         PrimaryButton {
             text: qsTr("Download update")
-            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && !page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
         SecondaryButton {
             text: qsTr("Download anyway")
-            visible: page.backend.updateAvailable && !page.backend.hasStaged && page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
@@ -284,6 +287,7 @@ AtlasPage {
             subtitle: page.backend.notesError.length > 0 ? page.backend.notesError : qsTr("Check your internet connection.")
             SecondaryButton {
                 text: qsTr("Try again")
+                Accessible.name: qsTr("Try again, release notes")
                 onClicked: page.backend.loadNotes()
             }
         }
@@ -366,7 +370,7 @@ AtlasPage {
         }
         SectionRow {
             visible: page.apps.length > 0
-            title: qsTr("%n app(s) can be updated", "", page.apps.length)
+            title: page.apps.length === 1 ? qsTr("1 app can be updated") : qsTr("%n apps can be updated", "", page.apps.length)
             SecondaryButton {
                 text: qsTr("Update apps")
                 enabled: !page.backend.appsBusy

@@ -21,6 +21,7 @@ ColumnLayout {
         property color tint
         property string iconName
         property bool dismissable: true
+        property string dismissName: qsTr("Dismiss")
         Layout.fillWidth: true
         visible: message.length > 0
         Accessible.role: Accessible.AlertMessage
@@ -49,6 +50,7 @@ ColumnLayout {
             SecondaryButton {
                 visible: banner.dismissable
                 text: qsTr("Dismiss")
+                Accessible.name: banner.dismissName
                 onClicked: root.backend.dismissMessages()
             }
         }
@@ -64,11 +66,13 @@ ColumnLayout {
         message: root.showError ? root.backend.errorText : ""
         tint: Kirigami.Theme.negativeTextColor
         iconName: "dialog-error"
+        dismissName: qsTr("Dismiss error")
     }
     Banner {
         message: root.backend.infoText
         tint: Kirigami.Theme.highlightColor
         iconName: "dialog-information"
+        dismissName: qsTr("Dismiss message")
     }
     RowLayout {
         Layout.fillWidth: true
