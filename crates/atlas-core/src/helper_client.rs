@@ -12,6 +12,12 @@ pub const BUS_NAME: &str = "net.eterneon.atlas.SystemHelper";
 pub const OBJECT_PATH: &str = "/net/eterneon/atlas/SystemHelper";
 pub const INTERFACE: &str = "net.eterneon.atlas.SystemHelper1";
 
+/// What the helper says when asked to queue a rollback that is already queued.
+pub const ROLLBACK_ALREADY_QUEUED: &str =
+    "A rollback is already queued. Restart to go back, or cancel it first.";
+/// What the helper says when asked to cancel a rollback that is not queued.
+pub const NO_ROLLBACK_QUEUED: &str = "No rollback is queued.";
+
 /// Raw proxy: every method returns the `bootc status --json` text.
 #[zbus::proxy(
     interface = "net.eterneon.atlas.SystemHelper1",
@@ -24,6 +30,7 @@ pub trait SystemHelper1 {
     fn check_for_update(&self) -> zbus::Result<String>;
     fn upgrade(&self) -> zbus::Result<String>;
     fn rollback(&self) -> zbus::Result<String>;
+    fn cancel_rollback(&self) -> zbus::Result<String>;
     fn switch_channel(&self, channel: &str) -> zbus::Result<String>;
 }
 
@@ -146,8 +153,16 @@ impl HelperClient {
         self.call(|p| async move { p.upgrade().await }).await
     }
 
+    /// Queue a rollback to the previous deployment. Refused when one is
+    /// already queued (`bootc rollback` would cancel it).
     pub async fn rollback(&self) -> Result<Status> {
         self.call(|p| async move { p.rollback().await }).await
+    }
+
+    /// Cancel a queued rollback; refused when none is queued.
+    pub async fn cancel_rollback(&self) -> Result<Status> {
+        self.call(|p| async move { p.cancel_rollback().await })
+            .await
     }
 
     /// Switch the booted image's tag to `stable` or `testing`.

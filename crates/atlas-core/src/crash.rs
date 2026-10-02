@@ -2175,7 +2175,10 @@ mod tests {
             "USER and USER, host HOST"
         );
         assert_eq!(s.scrub("al said"), "USER said");
-        assert_eq!(s.scrub("signal al_1 al2 value"), "signal USER_1 USER2 value");
+        assert_eq!(
+            s.scrub("signal al_1 al2 value"),
+            "signal USER_1 USER2 value"
+        );
         let s = sc();
         assert_eq!(s.scrub("ZACHARY smith wrote"), "USER wrote");
         assert_eq!(s.scrub("by Zachary Smith"), "by USER");

@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::bootc::{Channel, Status};
+use crate::helper_client::{NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED};
 use crate::history;
 
 /// bootc is always run by absolute path.
@@ -280,6 +281,8 @@ pub enum Op {
     CheckForUpdate,
     Upgrade,
     Rollback,
+    /// Undo a queued rollback (runs `bootc rollback` again).
+    CancelRollback,
     SwitchChannel(String),
 }
 
@@ -290,7 +293,7 @@ impl Op {
             Op::Status => "net.eterneon.atlas.system.status",
             Op::CheckForUpdate => "net.eterneon.atlas.system.check",
             Op::Upgrade => "net.eterneon.atlas.system.upgrade",
-            Op::Rollback => "net.eterneon.atlas.system.rollback",
+            Op::Rollback | Op::CancelRollback => "net.eterneon.atlas.system.rollback",
             Op::SwitchChannel(_) => "net.eterneon.atlas.system.switch-channel",
         }
     }
@@ -378,6 +381,7 @@ impl Core {
         let (ok, fail) = match op {
             Op::Upgrade => ("update-staged", "update-failed"),
             Op::Rollback => ("rollback-requested", "rollback-failed"),
+            Op::CancelRollback => ("rollback-cancelled", "rollback-failed"),
             Op::SwitchChannel(_) => ("channel-switched", "channel-switch-failed"),
             _ => return,
         };
@@ -396,11 +400,14 @@ impl Core {
                         }
                     }
                     Op::Rollback => self.event(ok, version, None),
+                    Op::CancelRollback => self.event(ok, None, None),
                     _ => self.event(ok, None, None),
                 }
             }
-            // A bootc stopped at shutdown is not a failed update.
-            Err(HelperError::Failed(m)) if m == INTERRUPTED => {}
+            // A bootc stopped at shutdown is not a failed update, and a
+            // refusal that ran nothing is not a failed rollback.
+            Err(HelperError::Failed(m))
+                if m == INTERRUPTED || m == ROLLBACK_ALREADY_QUEUED || m == NO_ROLLBACK_QUEUED => {}
             Err(HelperError::Failed(m)) => self.event(fail, None, Some(m)),
             Err(_) => {}
         }
@@ -446,7 +453,18 @@ impl Core {
                 // stages only: never --apply
                 self.bootc(&["upgrade"])?;
             }
+            // `bootc rollback` toggles: with one queued, a second call cancels
+            // it. So the two operations check the state first.
             Op::Rollback => {
+                if self.status()?.status.rollback_queued {
+                    return Err(HelperError::Failed(ROLLBACK_ALREADY_QUEUED.into()));
+                }
+                self.bootc(&["rollback"])?;
+            }
+            Op::CancelRollback => {
+                if !self.status()?.status.rollback_queued {
+                    return Err(HelperError::Failed(NO_ROLLBACK_QUEUED.into()));
+                }
                 self.bootc(&["rollback"])?;
             }
             Op::SwitchChannel(channel) => {
@@ -589,6 +607,17 @@ impl Core {
                     .any(|e| e.event == name && e.time >= prior.first_booted)
             })
         };
+        // a rollback that was requested and not cancelled afterwards
+        let rollback_queued = self.events.as_deref().is_some_and(|p| {
+            events::read(p)
+                .iter()
+                .filter(|e| e.time >= prior.first_booted)
+                .fold(false, |q, e| match e.event.as_str() {
+                    "rollback-requested" => true,
+                    "rollback-cancelled" => false,
+                    _ => q,
+                })
+        });
         let image_changed = now
             .image
             .as_deref()
@@ -597,7 +626,7 @@ impl Core {
         let name = match order {
             Cmp::Greater if switched => "channel-switch-applied",
             Cmp::Greater => "update-applied",
-            Cmp::Less if since("rollback-requested") => "rollback-applied",
+            Cmp::Less if rollback_queued => "rollback-applied",
             Cmp::Less if switched => "channel-switch-applied",
             Cmp::Less => "automatic-rollback",
             Cmp::Equal if switched => "channel-switch-applied",
@@ -685,6 +714,7 @@ mod tests {
             vec!["status", "--json"],
             vec!["upgrade"],
             vec!["status", "--json"],
+            vec!["status", "--json"], // the rollback-queued check
             vec!["rollback"],
             vec!["status", "--json"],
         ];
@@ -946,6 +976,39 @@ mod tests {
         assert_eq!(names(&d), ["health-check-failed", "health-check-passed"]);
     }
 
+    fn queued() -> String {
+        let mut v: serde_json::Value = serde_json::from_str(PLAIN).unwrap();
+        v["status"]["rollbackQueued"] = true.into();
+        v.to_string()
+    }
+
+    #[test]
+    fn a_second_rollback_is_refused_and_cancel_undoes_the_first() {
+        // queued already: Rollback must not run bootc (it would cancel it)
+        let d = tempfile::tempdir().unwrap();
+        let f = Fake::new(&queued());
+        let c = with_ev(&f, &d);
+        assert!(matches!(
+            c.execute(&Op::Rollback),
+            Err(HelperError::Failed(m)) if m == ROLLBACK_ALREADY_QUEUED
+        ));
+        assert!(!f.calls().iter().any(|a| a == &["rollback"]));
+        assert!(names(&d).is_empty(), "a refusal is not a failure event");
+        // CancelRollback runs it once and records the cancel
+        c.execute(&Op::CancelRollback).unwrap();
+        assert_eq!(f.calls().iter().filter(|a| *a == &["rollback"]).count(), 1);
+        assert_eq!(names(&d), ["rollback-cancelled"]);
+        // nothing queued: nothing to cancel, and bootc is not run
+        let f = Fake::new(PLAIN);
+        let c = with_ev(&f, &d);
+        assert!(matches!(
+            c.execute(&Op::CancelRollback),
+            Err(HelperError::Failed(m)) if m == NO_ROLLBACK_QUEUED
+        ));
+        assert!(!f.calls().iter().any(|a| a == &["rollback"]));
+        assert_eq!(Op::CancelRollback.action_id(), Op::Rollback.action_id());
+    }
+
     #[test]
     fn tail_cuts_on_char_boundary() {
         assert_eq!(tail("abc\n", 10), "abc");
@@ -1080,7 +1143,7 @@ mod tests {
         // a changing operation drops the cache
         c.execute(&Op::Rollback).unwrap();
         c.execute(&Op::Status).unwrap();
-        assert_eq!(*r.0.lock().unwrap(), 4); // rollback + its status + a fresh status
+        assert_eq!(*r.0.lock().unwrap(), 5); // queued check + rollback + its status + a fresh status
     }
 
     #[test]

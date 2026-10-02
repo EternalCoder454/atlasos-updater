@@ -230,6 +230,14 @@ impl Service {
         self.handle(&header, conn, Op::Rollback).await
     }
 
+    async fn cancel_rollback(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> Result<String, HelperError> {
+        self.handle(&header, conn, Op::CancelRollback).await
+    }
+
     async fn switch_channel(
         &self,
         channel: String,
