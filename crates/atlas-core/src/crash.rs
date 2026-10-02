@@ -572,9 +572,9 @@ fn scrub_homes(s: &str) -> String {
     out
 }
 
-/// Case-insensitive replace. Names of 4 or more characters match anywhere;
-/// shorter ones only where no letter touches them (so `_`, digits and
-/// punctuation count as boundaries, but `ann` stays inside `channel`).
+/// Case-insensitive replace of a whole name: it matches where no letter
+/// touches it (digits, `_` and punctuation do not count, so `zach1` and
+/// `backup-zach2024` are scrubbed but `zachary` and `channel` stay).
 fn replace_ci(s: &str, needle: &str, with: &str) -> String {
     if needle.is_empty() {
         return s.to_string();
@@ -585,11 +585,8 @@ fn replace_ci(s: &str, needle: &str, with: &str) -> String {
     while let Some(i) = hay[pos..].find(&pat) {
         let at = pos + i;
         let end = at + pat.len();
-        // a whole token: no letter or digit touches it (`_` and punctuation
-        // are boundaries, so `user_zach` and `/home/zach` match but
-        // `zachary` and `xzach` do not)
-        let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-        let whole = !alnum(s[..at].chars().next_back()) && !alnum(s[end..].chars().next());
+        let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
+        let whole = !letter(s[..at].chars().next_back()) && !letter(s[end..].chars().next());
         out.push_str(&s[pos..at]);
         out.push_str(if whole { with } else { &s[at..end] });
         pos = end;
@@ -719,16 +716,27 @@ const PRIVATE_PREFIXES: &[&str] = &[
     "~/",
 ];
 
-/// A private prefix starting at byte `i` of `s`, if any. It must start a path
+/// Prefixes that name a private place wherever they appear in a token
+/// (`/sysroot/ostree/deploy/default/var/home/zach/...`).
+const ANYWHERE: &[&str] = &[
+    "/home/",
+    "/var/home/",
+    "/run/media/",
+    "/run/user/",
+    "/var/roothome",
+];
+
+/// A private prefix starting at byte `i` of `s`, if any. Most must start a path
 /// (not sit inside a longer name: `/usr/tmp/x` is not `/tmp/`), and `/root`
-/// must not be the start of `/rootfs`.
+/// must not be the start of `/rootfs`; [`ANYWHERE`] ones match anywhere.
 fn private_prefix_at(s: &str, i: usize) -> bool {
     let rest = &s[i..];
     let Some(p) = PRIVATE_PREFIXES.iter().find(|p| rest.starts_with(**p)) else {
         return false;
     };
+    let anywhere = ANYWHERE.contains(p);
     let before = s[..i].chars().next_back();
-    if before.is_some_and(|c| c.is_alphanumeric() || "_.-/".contains(c)) {
+    if !anywhere && before.is_some_and(|c| c.is_alphanumeric() || "_.-/".contains(c)) {
         return false;
     }
     if !p.ends_with('/') && p.starts_with('/') {
@@ -741,19 +749,49 @@ fn private_prefix_at(s: &str, i: usize) -> bool {
     true
 }
 
-/// From a private path prefix on, replace the rest of the path with `<path>`.
-/// A path may hold spaces (`/home/u/My Notes/tax.pdf`), so it ends only at the
-/// end of the line or at a quote or closing bracket.
+/// Where the path starting at byte `i` ends. Privacy first: file names may
+/// hold spaces, quotes and brackets, so a path runs to the end of the line.
+/// It stops earlier only (a) at the closer of the quote or bracket that
+/// opened it, or (b) at `: ` or a trailing ` (...)` when nothing after that
+/// point has a `/`, so an error reason after the path is kept.
+fn path_end(s: &str, i: usize) -> usize {
+    let line_end = s[i..].find(['\n', '\r']).map_or(s.len(), |e| i + e);
+    let line = &s[i..line_end];
+    let closer = match s[..i].chars().next_back() {
+        Some('(') => Some(')'),
+        Some('[') => Some(']'),
+        Some('{') => Some('}'),
+        Some('<') => Some('>'),
+        Some(c @ ('\'' | '"' | '`')) => Some(c),
+        _ => None,
+    };
+    if let Some(c) = closer
+        && let Some(e) = line.find(c)
+    {
+        return i + e;
+    }
+    for (k, _) in line.match_indices(": ") {
+        if !line[k..].contains('/') {
+            return i + k;
+        }
+    }
+    for (k, _) in line.match_indices(" (") {
+        if line.ends_with(')') && !line[k..].contains('/') {
+            return i + k;
+        }
+    }
+    line_end
+}
+
+/// From a private path prefix on, replace the path with `<path>` (see
+/// [`path_end`]).
 fn redact_paths(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
         if private_prefix_at(s, i) {
-            let end = s[i..]
-                .find(|c: char| "\n\r'\"`)]}".contains(c))
-                .map_or(s.len(), |e| i + e);
             out.push_str("<path>");
-            i = end;
+            i = path_end(s, i);
             continue;
         }
         let c = s[i..].chars().next().unwrap_or(' ');
@@ -1536,7 +1574,9 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
             stacktrace: "",
         };
         let Ok(mut r) = build_report(&crash, &scrubber, Some(&e.time)) else {
-            break;
+            // can never be built (a damaged line): skip it for good
+            marker_now = advance_event_marker(marker_now, &e.time);
+            continue;
         };
         r.report_type = scrubber.scrub_message(&name);
         if r.atlasos_version.is_none() {
@@ -1545,7 +1585,12 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
         let Some(d) = reports_dir() else { break };
         match write_report(&d.join("pending"), &r) {
             Ok(path) => r.path = Some(path),
-            // Not written: the marker stays before this event.
+            // A line that can never be written (bad time): skip it for good.
+            Err(e2) if e2.kind() == io::ErrorKind::InvalidInput => {
+                marker_now = advance_event_marker(marker_now, &e.time);
+                continue;
+            }
+            // Not written (disk full ...): the marker stays before this event.
             Err(_) => break,
         }
         marker_now = advance_event_marker(marker_now, &e.time);
@@ -2130,7 +2175,7 @@ mod tests {
             "USER and USER, host HOST"
         );
         assert_eq!(s.scrub("al said"), "USER said");
-        assert_eq!(s.scrub("signal al_1 al2 value"), "signal USER_1 al2 value");
+        assert_eq!(s.scrub("signal al_1 al2 value"), "signal USER_1 USER2 value");
         let s = sc();
         assert_eq!(s.scrub("ZACHARY smith wrote"), "USER wrote");
         assert_eq!(s.scrub("by Zachary Smith"), "by USER");
@@ -2334,6 +2379,44 @@ mod tests {
             "atlas_core::bootc net.eterneon.atlas.updater quay.io/fedora/fedora-bootc"
         );
         assert_eq!(s.scrub("on atlas-box"), "on HOST");
+    }
+
+    #[test]
+    fn names_are_matched_unless_a_letter_touches_them() {
+        let s = Scrubber::new(&["zach"], &[], &[]);
+        assert_eq!(
+            s.scrub("zach1 backup-zach2024.tar zachary"),
+            "USER1 backup-USER2024.tar zachary"
+        );
+    }
+
+    #[test]
+    fn private_prefixes_match_inside_a_longer_path() {
+        let s = sc();
+        assert_eq!(
+            s.scrub_message("/sysroot/ostree/deploy/default/var/home/bob/Documents/tax.pdf"),
+            "/sysroot/ostree/deploy/default<path>"
+        );
+        assert_eq!(s.scrub_message("../home/u/x"), "..<path>");
+    }
+
+    #[test]
+    fn names_with_spaces_quotes_and_brackets_do_not_leak() {
+        let s = sc();
+        assert_eq!(
+            s.scrub_message("/home/bob/Downloads/invoice (final) tax.pdf"),
+            "<path>"
+        );
+        assert_eq!(s.scrub_message("/home/bob/Bob's Notes/plan.txt"), "<path>");
+        assert_eq!(s.scrub_message("/home/bob/[work]/secret.docx"), "<path>");
+        assert_eq!(
+            s.scrub_message("failed to read /home/bob/x: Permission denied"),
+            "failed to read <path>: Permission denied"
+        );
+        assert_eq!(
+            s.scrub_message("cannot open /home/bob/x (os error 13)"),
+            "cannot open <path> (os error 13)"
+        );
     }
 
     #[test]
