@@ -551,20 +551,12 @@ impl qobject::Backend {
                 self.as_mut().apply_status(&st);
                 if foreground {
                     let v = self.rust().view.clone();
+                    // No banner where the Updates page's hero already
+                    // shows the new state; it would say the same thing twice.
                     let msg = match op {
-                        Op::Check if v.staged.present => {
-                            "An update is downloaded and waiting for a restart.".to_string()
-                        }
-                        Op::Check if v.available.present => {
-                            format!("Version {} is available.", v.available.version)
-                        }
+                        Op::Check if v.staged.present || v.available.present => String::new(),
                         Op::Check => "You are up to date.".to_string(),
-                        Op::Upgrade => {
-                            "The update is downloaded. Restart to finish installing it.".to_string()
-                        }
-                        Op::Rollback => {
-                            "Done. Restart to go back to the previous version.".to_string()
-                        }
+                        Op::Upgrade | Op::Rollback => String::new(),
                         Op::CancelRollback => "The rollback was cancelled.".to_string(),
                         Op::Switch(c) => format!("Switched to the {c} channel. Restart to finish."),
                         Op::Status => String::new(),
