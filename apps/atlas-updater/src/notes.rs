@@ -49,19 +49,87 @@ impl FetchError {
     }
 }
 
-fn starts_https(s: &[char]) -> bool {
-    s.len() > 8
-        && s[..8]
-            .iter()
-            .zip("https://".chars())
-            .all(|(a, b)| a.eq_ignore_ascii_case(&b))
+/// Characters that never belong in a link: controls, any Unicode whitespace
+/// (U+00A0, U+2028 ...) and the invisible format characters (zero-width,
+/// bidi controls U+202A-202E and U+2066-2069, BOM, tags).
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || c.is_whitespace()
+        || matches!(c,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
+/// The longest link we accept, in characters.
+const MAX_LINK: usize = 4096;
+
+/// A safe https link: the trimmed URL and its lower-case host. The host must be
+/// real (letters, digits, `-` and non-empty dot-separated labels, an optional
+/// numeric port), and the authority holds no `@` (user info hides the real
+/// host) and no `\` (browsers read it as `/`).
+fn parse_https(link: &str) -> Option<(&str, String)> {
+    let t = link.trim_matches(|c: char| c.is_ascii_whitespace());
+    if t.chars().count() > MAX_LINK || t.chars().any(is_hidden) {
+        return None;
+    }
+    let scheme = t.get(..8)?;
+    if !scheme.eq_ignore_ascii_case("https://") {
+        return None;
+    }
+    let rest = &t[8..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    if authority.contains(['@', '\\']) {
+        return None;
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if port.is_some_and(|p| p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let host_ok = !host.is_empty()
+        && host
+            .split('.')
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    host_ok.then(|| (t, host.to_ascii_lowercase()))
 }
 
 /// Only `https://` links are safe to open from release notes. Never panics
 /// (it runs on the GUI thread).
 pub fn is_safe_link(link: &str) -> bool {
-    let l: Vec<char> = link.trim().chars().take(4096).collect();
-    starts_https(&l) && !l.iter().any(|c| c.is_control())
+    parse_https(link).is_some()
+}
+
+/// The host a link's text claims, when the text looks like a URL or a domain
+/// (`https://bank.com/login`, `www.bank.com`, `bank.com`).
+fn text_host(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let t = ["https://", "http://", "ftp://"]
+        .iter()
+        .find_map(|p| {
+            t.get(..p.len())
+                .filter(|h| h.eq_ignore_ascii_case(p))
+                .map(|_| &t[p.len()..])
+        })
+        .unwrap_or(t);
+    let auth = &t[..t.find(['/', '?', '#']).unwrap_or(t.len())];
+    let auth = auth.rsplit('@').next().unwrap_or(auth);
+    let host = auth.split(':').next().unwrap_or(auth).to_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let last = labels.last()?;
+    (labels.len() >= 2
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_alphanumeric() || c == '-'))
+        && last.chars().count() >= 2
+        && last.chars().all(char::is_alphabetic))
+    .then_some(host)
 }
 
 fn escape(s: &str, out: &mut String) {
@@ -90,8 +158,9 @@ pub fn render(md: &str) -> String {
     let mut out = String::with_capacity(md.len() + md.len() / 2);
     // For every open container: the closing text to write for it.
     let mut stack: Vec<&'static str> = Vec::new();
-    // Open links: whether each one was written as <a>.
-    let mut links: Vec<bool> = Vec::new();
+    // Open links: the host of each one written as <a> (None: written as text)
+    // and the text shown for it so far.
+    let mut links: Vec<(Option<String>, String)> = Vec::new();
     let open =
         |out: &mut String, stack: &mut Vec<&'static str>, o: &'static str, c: &'static str| {
             if stack.len() < MAX_DEPTH {
@@ -119,23 +188,30 @@ pub fn render(md: &str) -> String {
                 Tag::Emphasis => open(&mut out, &mut stack, "<em>", "</em>"),
                 Tag::Strong => open(&mut out, &mut stack, "<strong>", "</strong>"),
                 Tag::Strikethrough => open(&mut out, &mut stack, "<s>", "</s>"),
-                Tag::Link { dest_url, .. } => {
-                    let ok = is_safe_link(&dest_url) && stack.len() < MAX_DEPTH;
-                    links.push(ok);
-                    if ok {
+                Tag::Link { dest_url, .. } => match parse_https(&dest_url) {
+                    Some((url, host)) if stack.len() < MAX_DEPTH => {
+                        links.push((Some(host), String::new()));
                         out.push_str("<a href=\"");
-                        escape(dest_url.trim(), &mut out);
+                        escape(url, &mut out);
                         out.push_str("\">");
                     }
-                }
+                    _ => links.push((None, String::new())),
+                },
                 // an image is its alt text (the events inside); raw HTML
                 // blocks get no wrapper, their text is escaped below
                 _ => stack.push(""),
             },
             Event::End(end) => match end {
                 TagEnd::Link => {
-                    if links.pop() == Some(true) {
+                    if let Some((Some(host), text)) = links.pop() {
                         out.push_str("</a>");
+                        // Text that names another site than the link goes to:
+                        // show where it really goes.
+                        if text_host(&text).is_some_and(|t| t != host) {
+                            out.push_str(" (");
+                            escape(&host, &mut out);
+                            out.push(')');
+                        }
                     }
                 }
                 _ => {
@@ -145,11 +221,19 @@ pub fn render(md: &str) -> String {
                 }
             },
             Event::Code(t) => {
+                if let Some(l) = links.last_mut() {
+                    l.1.push_str(&t);
+                }
                 out.push_str("<code>");
                 escape(&t, &mut out);
                 out.push_str("</code>");
             }
-            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => escape(&t, &mut out),
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                if let Some(l) = links.last_mut() {
+                    l.1.push_str(&t);
+                }
+                escape(&t, &mut out)
+            }
             Event::SoftBreak => out.push('\n'),
             Event::HardBreak => out.push_str("<br>\n"),
             Event::Rule => out.push_str("<hr>\n"),
@@ -339,6 +423,67 @@ mod tests {
         "<!-- ![i](http://e/i.png) --> ![j](http://e/j.png)",
         "[![i](http://e/i.png)](https://ok.example)",
     ];
+
+    #[test]
+    fn link_hosts_are_checked() {
+        for bad in [
+            "https:///evil",
+            "https://.",
+            "https://bank.com@evil.example/",
+            "https://user:pw@host/",
+            "https://x\\@evil",
+            "https://good.example\\.evil.example/",
+            "https://host:/x",
+            "https://host:80a/",
+            "https://a..b/",
+            "https://exa mple.com/",
+            "https://example.com/\u{a0}x",
+            "https://example.com/\u{2028}x",
+            "https://example.com/\u{202e}gpj.exe",
+            "https://example.com/\u{2066}x",
+            "https://example.com/\u{200b}x",
+            "https://[::1]/",
+            "https://exämple.com/",
+        ] {
+            assert!(!is_safe_link(bad), "{bad:?}");
+        }
+        let long = format!("https://example.com/{}\u{7f}", "a".repeat(5000));
+        assert!(!is_safe_link(&long));
+        let long_ok = format!("https://example.com/{}", "a".repeat(5000));
+        assert!(!is_safe_link(&long_ok), "over 4096 characters");
+        for good in [
+            "https://example.com",
+            "https://sub.example.com:8443/a/b?c=d#e",
+            "HTTPS://Example.COM/x@y",
+            "https://example.com/a\\b",
+            "https://1.2.3.4/",
+        ] {
+            assert!(is_safe_link(good), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_text_that_names_another_site_shows_the_real_host() {
+        let o = render("[https://bank.com/login](https://evil.example/x)");
+        assert!(o.contains("</a> (evil.example)"), "{o}");
+        let o = render("[www.bank.com](https://evil.example/)");
+        assert!(o.contains("(evil.example)"), "{o}");
+        // the same site, or ordinary words: nothing added
+        for md in [
+            "[https://example.com/docs](https://example.com/other)",
+            "[example.com](https://EXAMPLE.com/x)",
+            "[the docs](https://example.com/)",
+            "[v1.2](https://example.com/)",
+            "[a b.com c](https://example.com/)",
+        ] {
+            assert!(!render(md).contains("</a> ("), "{md}");
+        }
+        // text of a link that is not a link stays plain, no host added
+        assert_eq!(
+            render("[bank.com](http://evil.example)").trim(),
+            "<p>bank.com</p>"
+        );
+    }
 
     #[test]
     fn bypass_inputs_stay_safe() {
