@@ -770,21 +770,21 @@ fn private_prefix_at(s: &str, i: usize) -> bool {
     true
 }
 
-/// Error reasons that may follow a redacted path (`: Permission denied`).
+/// The libc texts of the errors that may follow a redacted path.
 const KNOWN_REASONS: &[&str] = &[
-    "No such file",
+    "No such file or directory",
     "Permission denied",
     "Is a directory",
     "Not a directory",
     "File exists",
     "Read-only file system",
-    "No space left",
+    "No space left on device",
     "Operation not permitted",
     "Directory not empty",
     "Invalid argument",
     "Too many open files",
     "Input/output error",
-    "Resource busy",
+    "Device or resource busy",
     "Connection refused",
 ];
 
@@ -798,23 +798,16 @@ fn is_os_error(t: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Whether `rest` (what follows `: ` after a path) is only a known reason,
-/// with the text that Rust and libc put after it.
+/// Whether `rest` (what follows `: ` after a path) is exactly one of the
+/// [`KNOWN_REASONS`], optionally followed by ` (os error N)`, or just an
+/// `os error N`. Anything more could be file-name text.
 fn is_known_reason(rest: &str) -> bool {
-    if is_os_error(rest) {
-        return true;
-    }
-    KNOWN_REASONS.iter().any(|p| {
-        rest.strip_prefix(p).is_some_and(|more| {
-            // the rest of the libc text ("No such file or directory"), a
-            // lowercase word run, then optionally ` (os error N)`
-            let (words, os) = match more.rfind(" (") {
-                Some(k) => (&more[..k], Some(&more[k + 1..])),
-                None => (more, None),
-            };
-            words.chars().all(|c| c.is_ascii_lowercase() || c == ' ') && os.is_none_or(is_os_error)
+    is_os_error(rest)
+        || KNOWN_REASONS.iter().any(|p| {
+            rest.strip_prefix(p).is_some_and(|more| {
+                more.is_empty() || more.strip_prefix(' ').is_some_and(is_os_error)
+            })
         })
-    })
 }
 
 /// Where the path starting at byte `i` ends. Privacy first: file names may
