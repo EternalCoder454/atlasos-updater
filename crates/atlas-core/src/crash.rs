@@ -576,20 +576,41 @@ fn scrub_homes(s: &str) -> String {
 /// touches it (digits, `_` and punctuation do not count, so `zach1` and
 /// `backup-zach2024` are scrubbed but `zachary` and `channel` stay).
 fn replace_ci(s: &str, needle: &str, with: &str) -> String {
-    if needle.is_empty() {
+    // One char at a time, so byte offsets always refer to `s` (a lowercase
+    // form can be longer than the original, so the strings are never
+    // lowercased whole). A char whose lowercase is not a single char is
+    // compared as it is.
+    fn fold(c: char) -> char {
+        let mut l = c.to_lowercase();
+        match (l.next(), l.next()) {
+            (Some(x), None) => x,
+            _ => c,
+        }
+    }
+    let pat: Vec<char> = needle.chars().map(fold).collect();
+    if pat.is_empty() {
         return s.to_string();
     }
-    let (hay, pat) = (s.to_ascii_lowercase(), needle.to_ascii_lowercase());
+    let hay: Vec<(usize, char)> = s.char_indices().map(|(i, c)| (i, fold(c))).collect();
+    let byte_at = |p: usize| hay.get(p).map_or(s.len(), |h| h.0);
     let mut out = String::with_capacity(s.len());
-    let mut pos = 0;
-    while let Some(i) = hay[pos..].find(&pat) {
-        let at = pos + i;
-        let end = at + pat.len();
-        let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
-        let whole = !letter(s[..at].chars().next_back()) && !letter(s[end..].chars().next());
-        out.push_str(&s[pos..at]);
-        out.push_str(if whole { with } else { &s[at..end] });
-        pos = end;
+    let (mut pos, mut p) = (0, 0);
+    while p + pat.len() <= hay.len() {
+        if hay[p..p + pat.len()]
+            .iter()
+            .map(|h| h.1)
+            .eq(pat.iter().copied())
+        {
+            let (at, end) = (byte_at(p), byte_at(p + pat.len()));
+            let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
+            let whole = !letter(s[..at].chars().next_back()) && !letter(s[end..].chars().next());
+            out.push_str(&s[pos..at]);
+            out.push_str(if whole { with } else { &s[at..end] });
+            pos = end;
+            p += pat.len();
+        } else {
+            p += 1;
+        }
     }
     out.push_str(&s[pos..]);
     out
@@ -1557,10 +1578,25 @@ pub fn collect_coredumps(since_micros: Option<u64>) -> Vec<Report> {
         newest = newest.max(ts);
         out.push(r);
     }
+    // Switched off during the run (the opt-out deletes pending files, and may
+    // have run before our last write): take back what this call wrote.
+    if !Settings::load().enabled {
+        discard_written(&out);
+        return Vec::new();
+    }
     if newest > since {
         let _ = write_private(&marker, newest.to_string().as_bytes(), true);
     }
     out
+}
+
+/// Delete the pending files of reports a collector just wrote.
+fn discard_written(reports: &[Report]) {
+    for r in reports {
+        if let Some(p) = &r.path {
+            let _ = fs::remove_file(p);
+        }
+    }
 }
 
 // --------------------------------------------------------------- events
@@ -1661,6 +1697,10 @@ fn collect_events_in(
         }
         marker_now = advance_event_marker(marker_now, &e.time);
         out.push(r);
+    }
+    if !enabled() {
+        discard_written(&out);
+        return Some(Vec::new());
     }
     if marker_now != start {
         let _ = write_private(
@@ -2464,6 +2504,15 @@ mod tests {
     }
 
     #[test]
+    fn non_ascii_names_match_in_any_case() {
+        let s = Scrubber::new(&["Zoë", "İvan"], &[], &[]);
+        assert_eq!(s.scrub("ZOË and zoë, Ünal"), "USER and USER, Ünal");
+        assert_eq!(s.scrub("Zoëlle"), "Zoëlle");
+        // a char whose lowercase is longer (İ) must not shift later offsets
+        assert_eq!(s.scrub("İ x ZOË"), "İ x USER");
+    }
+
+    #[test]
     fn private_prefixes_match_inside_a_longer_path() {
         let s = sc();
         assert_eq!(
@@ -2628,6 +2677,17 @@ mod tests {
             fs::read_to_string(&marker).unwrap(),
             "2026-10-02T09:00:00Z 0"
         );
+        // switched off after a write: that report is taken back too
+        fs::write(&marker, "2026-10-02T09:00:00Z 0").unwrap();
+        let before = fs::read_dir(&pending).unwrap().count();
+        let calls = std::cell::Cell::new(0);
+        let flips = || {
+            calls.set(calls.get() + 1);
+            calls.get() <= 1 // on for the first write, off from then on
+        };
+        let none = collect_events_in(&log, &marker, &pending, &sc, now, None, &flips).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(fs::read_dir(&pending).unwrap().count(), before);
         // no marker and no `since`: the caller starts one
         assert!(
             collect_events_in(&log, &d.path().join("none"), &pending, &sc, now, None, &on)
