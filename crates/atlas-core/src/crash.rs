@@ -749,34 +749,63 @@ fn private_prefix_at(s: &str, i: usize) -> bool {
     true
 }
 
+/// Error reasons that may follow a redacted path (`: Permission denied`).
+const KNOWN_REASONS: &[&str] = &[
+    "No such file",
+    "Permission denied",
+    "Is a directory",
+    "Not a directory",
+    "File exists",
+    "Read-only file system",
+    "No space left",
+    "Operation not permitted",
+    "Directory not empty",
+    "Invalid argument",
+    "Too many open files",
+    "Input/output error",
+    "Resource busy",
+    "Connection refused",
+];
+
+/// `os error 13` or `(os error 13)`, nothing else.
+fn is_os_error(t: &str) -> bool {
+    let t = t
+        .strip_prefix('(')
+        .and_then(|t| t.strip_suffix(')'))
+        .unwrap_or(t);
+    t.strip_prefix("os error ")
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether `rest` (what follows `: ` after a path) is only a known reason,
+/// with the text that Rust and libc put after it.
+fn is_known_reason(rest: &str) -> bool {
+    if is_os_error(rest) {
+        return true;
+    }
+    KNOWN_REASONS.iter().any(|p| {
+        rest.strip_prefix(p).is_some_and(|more| {
+            // the rest of the libc text ("No such file or directory"), a
+            // lowercase word run, then optionally ` (os error N)`
+            let (words, os) = match more.rfind(" (") {
+                Some(k) => (&more[..k], Some(&more[k + 1..])),
+                None => (more, None),
+            };
+            words.chars().all(|c| c.is_ascii_lowercase() || c == ' ') && os.is_none_or(is_os_error)
+        })
+    })
+}
+
 /// Where the path starting at byte `i` ends. Privacy first: file names may
-/// hold spaces, quotes and brackets, so a path runs to the end of the line.
-/// It stops earlier only (a) at the closer of the quote or bracket that
-/// opened it, or (b) at `: ` or a trailing ` (...)` when nothing after that
-/// point has a `/`, so an error reason after the path is kept.
+/// hold spaces, quotes, brackets and colons, so a path runs to the end of the
+/// line. The one exception is a `: ` followed by nothing but a known error
+/// reason (see [`KNOWN_REASONS`]), so "failed to read <path>: Permission
+/// denied" keeps its reason.
 fn path_end(s: &str, i: usize) -> usize {
     let line_end = s[i..].find(['\n', '\r']).map_or(s.len(), |e| i + e);
     let line = &s[i..line_end];
-    let closer = match s[..i].chars().next_back() {
-        Some('(') => Some(')'),
-        Some('[') => Some(']'),
-        Some('{') => Some('}'),
-        Some('<') => Some('>'),
-        Some(c @ ('\'' | '"' | '`')) => Some(c),
-        _ => None,
-    };
-    if let Some(c) = closer
-        && let Some(e) = line.find(c)
-    {
-        return i + e;
-    }
     for (k, _) in line.match_indices(": ") {
-        if !line[k..].contains('/') {
-            return i + k;
-        }
-    }
-    for (k, _) in line.match_indices(" (") {
-        if line.ends_with(')') && !line[k..].contains('/') {
+        if is_known_reason(&line[k + 2..]) {
             return i + k;
         }
     }
@@ -1919,7 +1948,7 @@ mod tests {
         let m = sc().scrub_message(
             "No such file: '/home/zach/Documents/tax.pdf' (os error 2) /run/media/zach/USB/a",
         );
-        assert_eq!(m, "No such file: '<path>' (os error 2) <path>");
+        assert_eq!(m, "No such file: '<path>");
         assert_eq!(
             sc().scrub_message("see /usr/lib/foo.so"),
             "see /usr/lib/foo.so"
@@ -2202,7 +2231,7 @@ mod tests {
         );
         assert_eq!(
             s.scrub_message("(/run/user/1000/doc/ab/secret.pdf)"),
-            "(<path>)"
+            "(<path>"
         );
         assert_eq!(s.scrub_message("in ~/Documents/a"), "in <path>");
         assert_eq!(s.scrub_message("/usr/lib/x.so"), "/usr/lib/x.so");
@@ -2458,9 +2487,30 @@ mod tests {
             "failed to read <path>: Permission denied"
         );
         assert_eq!(
-            s.scrub_message("cannot open /home/bob/x (os error 13)"),
-            "cannot open <path> (os error 13)"
+            s.scrub_message("cannot open /home/bob/x: No such file or directory (os error 2)"),
+            "cannot open <path>: No such file or directory (os error 2)"
         );
+        assert_eq!(
+            s.scrub_message("cannot open /home/bob/x: os error 13"),
+            "cannot open <path>: os error 13"
+        );
+        // the reviewer's leak cases: everything to the end of the line goes
+        for (input, want) in [
+            (
+                "cannot open '/home/bob/Bob's Notes/plan.txt'",
+                "cannot open '<path>",
+            ),
+            ("(/home/bob/a (1)/x.txt)", "(<path>"),
+            ("/home/bob/Report: Q3 layoffs.docx", "<path>"),
+            ("/home/bob/Taxes (2023)", "<path>"),
+            // a reason that is not only a known one is not kept
+            (
+                "read /home/bob/x: Permission denied for Bob's file",
+                "read <path>",
+            ),
+        ] {
+            assert_eq!(s.scrub_message(input), want, "{input}");
+        }
     }
 
     #[test]
@@ -2472,9 +2522,9 @@ mod tests {
         );
         assert_eq!(
             s.scrub_message("'/run/media/bob/USB DRIVE/x y' failed"),
-            "'<path>' failed"
+            "'<path>"
         );
-        assert_eq!(s.scrub_message("(/root/x)"), "(<path>)");
+        assert_eq!(s.scrub_message("(/root/x)"), "(<path>");
         assert_eq!(s.scrub_message("/root"), "<path>");
         assert_eq!(
             s.scrub_message("/rootfs/x /rootless /usr/tmp/x /var/roothomes"),
