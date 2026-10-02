@@ -2,7 +2,8 @@
 # Build without the app (atlas-core only):  rpmbuild --without app ...
 %bcond app 1
 
-# Rust binaries are stripped by the release profile; there is no debuginfo.
+# No debuginfo subpackage: the Rust flags below keep symbols (debuginfo=2,
+# strip=none) and the binaries are shipped as built.
 %global debug_package %{nil}
 
 Name:           atlas
@@ -15,6 +16,8 @@ Source0:        atlas-%{version}.tar.gz
 
 BuildRequires:  cargo
 BuildRequires:  rust
+# %%build_rustflags
+BuildRequires:  rust-srpm-macros
 BuildRequires:  gcc
 BuildRequires:  systemd-rpm-macros
 %if %{with app}
@@ -87,8 +90,10 @@ sed -i 's|^members = .*|members = ["crates/atlas-core"]|' Cargo.toml
 export CARGO_HOME=%{_builddir}/cargo-home
 # Fedora's Rust flags (hardening, build-id, ...), also used by Corrosion's cargo.
 export RUSTFLAGS="%{build_rustflags}"
+export CARGO_PROFILE_RELEASE_STRIP=none
 cargo build --release -p atlas-core --bin atlas-system-helper
 %if %{with app}
+# (checked with rpmspec --eval: %%cmake honours _vpath_srcdir, not __cmake_source_dir)
 %global _vpath_srcdir apps/atlas-updater
 %cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
 %cmake_build
