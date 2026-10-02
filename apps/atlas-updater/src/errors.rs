@@ -28,6 +28,20 @@ pub fn friendly(e: &Error) -> OpError {
             HelperErrorKind::InvalidArgument => OpError::Message(
                 "The system helper turned the request down. This is a bug in Atlas Updater.".into(),
             ),
+            // bootc did it, only the follow-up read failed: not a failure
+            HelperErrorKind::Failed
+                if message.starts_with(atlas_core::helper_client::STATE_UNREAD) =>
+            {
+                OpError::Message(format!(
+                    "{} Restart to finish going back, or check again in a moment.",
+                    atlas_core::helper_client::STATE_UNREAD
+                ))
+            }
+            HelperErrorKind::Failed
+                if message.starts_with(atlas_core::helper_client::STATE_UNREAD_CANCEL) =>
+            {
+                OpError::Message(atlas_core::helper_client::STATE_UNREAD_CANCEL.into())
+            }
             // the helper's own plain refusals (nothing was run)
             HelperErrorKind::Failed
                 if message == atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED

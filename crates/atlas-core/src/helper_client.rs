@@ -15,6 +15,12 @@ pub const INTERFACE: &str = "net.eterneon.atlas.SystemHelper1";
 /// What the helper says when asked to queue a rollback that is already queued.
 pub const ROLLBACK_ALREADY_QUEUED: &str =
     "A rollback is already queued. Restart to go back, or cancel it first.";
+/// Start of the error when bootc queued the rollback but the new state could
+/// not be read afterwards: going back is set up, nothing failed.
+pub const STATE_UNREAD: &str = "Going back is set up, but AtlasOS couldn't read the new state.";
+/// The same for cancelling a queued rollback.
+pub const STATE_UNREAD_CANCEL: &str =
+    "The rollback was cancelled, but AtlasOS couldn't read the new state.";
 /// What the helper says when asked to cancel a rollback that is not queued.
 pub const NO_ROLLBACK_QUEUED: &str = "No rollback is queued.";
 

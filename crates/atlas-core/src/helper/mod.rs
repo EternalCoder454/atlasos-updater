@@ -19,7 +19,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::bootc::{Channel, Status};
-use crate::helper_client::{NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED};
+use crate::helper_client::{
+    NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED, STATE_UNREAD, STATE_UNREAD_CANCEL,
+};
 use crate::history;
 
 /// bootc is always run by absolute path.
@@ -527,7 +529,19 @@ impl Core {
             })
             .flatten();
         self.event(ok, version, None);
-        res
+        // bootc did it; only reading the new state failed. Say so: the caller
+        // must not take this for a failed rollback.
+        res.map_err(|e| match e {
+            HelperError::Failed(m) => HelperError::Failed(format!(
+                "{} {m}",
+                if cancel {
+                    STATE_UNREAD_CANCEL
+                } else {
+                    STATE_UNREAD
+                }
+            )),
+            e => e,
+        })
     }
 
     /// Forget the cached status (an operation started or ended). Never waits
@@ -1058,7 +1072,11 @@ mod tests {
             calls: Mutex::new(0),
             fail_status_from: 2,
         }));
-        assert!(c.execute(&Op::Rollback).is_err());
+        let e = c.execute(&Op::Rollback).unwrap_err();
+        assert!(
+            matches!(&e, HelperError::Failed(m) if m.starts_with(STATE_UNREAD)),
+            "{e:?}"
+        );
         assert_eq!(names(&d), ["rollback-requested"]);
     }
 
