@@ -142,7 +142,10 @@ impl Schedule {
                 guard = m.lock().unwrap_or_else(|e| e.into_inner());
                 continue;
             }
-            guard = cv.wait_timeout(guard, wait).unwrap_or_else(|e| e.into_inner()).0;
+            guard = cv
+                .wait_timeout(guard, wait)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 }
