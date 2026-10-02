@@ -42,12 +42,12 @@ Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
 
     auto *menu = m_tray->contextMenu();
     menu->addAction(QIcon::fromTheme(kAppIcon), tr("Open Atlas Updater"), this, [this] { openWindow(); });
-    menu->addAction(QIcon::fromTheme(QStringLiteral("view-refresh")), tr("Check for updates"), this, [this] {
+    menu->addAction(QIcon::fromTheme(QStringLiteral("view-refresh")), tr("Check for Updates"), this, [this] {
         QMetaObject::invokeMethod(m_backend, "checkForUpdate");
         openWindow();
     });
-    m_restartAction = menu->addAction(QIcon::fromTheme(QStringLiteral("system-reboot")), tr("Restart to update"), this, [this] { restartNow(); });
-    m_cancelAction = menu->addAction(QIcon::fromTheme(QStringLiteral("dialog-cancel")), tr("Cancel scheduled restart"), this, [this] { cancelRestart(); });
+    m_restartAction = menu->addAction(QIcon::fromTheme(QStringLiteral("system-reboot")), tr("Restart to Update"), this, [this] { restartNow(); });
+    m_cancelAction = menu->addAction(QIcon::fromTheme(QStringLiteral("dialog-cancel")), tr("Cancel Scheduled Restart"), this, [this] { cancelRestart(); });
     connect(m_tray, &KStatusNotifierItem::activateRequested, this, [this] { openWindow(); });
 
     connect(m_backend, SIGNAL(hasStagedChanged()), this, SLOT(updateTray()));
@@ -220,7 +220,7 @@ void Shell::onUpdateStaged(const QString &version)
     n->setTitle(tr("Update ready"));
     n->setText(tr("AtlasOS %1 is downloaded. Restart to finish installing it.").arg(version.toHtmlEscaped()));
     n->setIconName(kAppIcon);
-    auto *restart = n->addAction(tr("Restart to update"));
+    auto *restart = n->addAction(tr("Restart to Update"));
     connect(restart, &KNotificationAction::activated, this, [this] { restartNow(); });
     auto *open = n->addDefaultAction(tr("Open Atlas Updater"));
     connect(open, &KNotificationAction::activated, this, [this] { openWindow(); });
@@ -234,7 +234,7 @@ void Shell::onRestartSoon()
     // The real time left: a saved time found at login can be much closer.
     const qint64 left = m_backend->property("scheduledAt").toLongLong() - QDateTime::currentSecsSinceEpoch();
     const int minutes = qMax<qint64>(1, (left + 59) / 60);
-    n->setTitle(tr("Restarting in %n minute(s)", "", minutes));
+    n->setTitle(minutes == 1 ? tr("Restarting in 1 minute") : tr("Restarting in %n minutes", "", minutes));
     n->setText(tr("Your computer will restart soon to finish updating. Save your work."));
     n->setIconName(kAppIcon);
     // The only warning before an automatic restart: it stays until the user
@@ -242,9 +242,9 @@ void Shell::onRestartSoon()
     n->setFlags(KNotification::Persistent);
     n->setUrgency(KNotification::CriticalUrgency);
     m_restartSoon = n;
-    auto *now = n->addAction(tr("Restart now"));
+    auto *now = n->addAction(tr("Restart Now"));
     connect(now, &KNotificationAction::activated, this, [this] { restartNow(); });
-    auto *cancel = n->addAction(tr("Cancel restart"));
+    auto *cancel = n->addAction(tr("Cancel Restart"));
     connect(cancel, &KNotificationAction::activated, this, [this] { cancelRestart(); });
     n->sendEvent();
 }

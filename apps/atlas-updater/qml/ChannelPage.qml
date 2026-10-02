@@ -24,9 +24,9 @@ AtlasPage {
 
     ConfirmDialog {
         id: confirm
-        title: qsTr("Switch to the %1 channel?").arg(page.choice === "testing" ? qsTr("Testing") : qsTr("Stable"))
+        title: qsTr("Switch to the %1 Channel?").arg(page.choice === "testing" ? qsTr("Testing") : qsTr("Stable"))
         text: qsTr("The new channel's latest version downloads and waits for a restart. Your files and settings stay as they are.")
-        acceptText: qsTr("Switch channel")
+        acceptText: qsTr("Switch Channel")
         focusReject: true
         onAccepted: page.backend.switchChannel(page.choice)
     }
@@ -72,19 +72,19 @@ AtlasPage {
         readonly property bool switched: page.backend.restartNeeded && page.choice !== "" && page.choice === page.backend.channel
 
         SecondaryButton {
-            text: page.backend.rollbackQueued ? qsTr("Restart now") : qsTr("Restart to update")
+            text: page.backend.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update")
             visible: page.backend.restartNeeded && !parent.switched
             enabled: !page.backend.busy
             onClicked: page.backend.restartNow()
         }
         PrimaryButton {
-            text: page.backend.rollbackQueued ? qsTr("Restart now") : qsTr("Restart to update")
+            text: page.backend.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update")
             visible: parent.switched
             enabled: !page.backend.busy
             onClicked: page.backend.restartNow()
         }
         PrimaryButton {
-            text: qsTr("Switch channel")
+            text: qsTr("Switch Channel")
             visible: !parent.switched
             enabled: !page.backend.busy && page.choice !== "" && page.choice !== page.backend.channel
             onClicked: confirm.open()

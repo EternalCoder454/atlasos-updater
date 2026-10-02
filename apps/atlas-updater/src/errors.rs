@@ -70,7 +70,7 @@ pub fn friendly(e: &Error) -> OpError {
 /// looks the same, so the text covers both. Shown as an error, never silently.
 pub fn denied_text(action: &str) -> String {
     format!(
-        "You aren't allowed to {action} from this session, or the password prompt was cancelled. Nothing was changed."
+        "You aren't allowed to {action} from this session, or the password prompt was canceled. Nothing was changed."
     )
 }
 

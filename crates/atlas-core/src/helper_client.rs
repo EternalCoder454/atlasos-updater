@@ -20,7 +20,7 @@ pub const ROLLBACK_ALREADY_QUEUED: &str =
 pub const STATE_UNREAD: &str = "Going back is set up, but AtlasOS couldn't read the new state.";
 /// The same for cancelling a queued rollback.
 pub const STATE_UNREAD_CANCEL: &str =
-    "The rollback was cancelled, but AtlasOS couldn't read the new state.";
+    "The rollback was canceled, but AtlasOS couldn't read the new state.";
 /// What the helper says when asked to cancel a rollback that is not queued.
 pub const NO_ROLLBACK_QUEUED: &str = "No rollback is queued.";
 

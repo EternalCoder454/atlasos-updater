@@ -127,7 +127,7 @@ QQC2.ApplicationWindow {
                 }
                 NavItem {
                     page: "rollback"
-                    text: qsTr("Go back")
+                    text: qsTr("Go Back")
                     icon.name: "edit-undo"
                 }
                 NavItem {
@@ -150,7 +150,7 @@ QQC2.ApplicationWindow {
                 }
                 NavItem {
                     page: "reports"
-                    text: qsTr("Crash reports")
+                    text: qsTr("Crash Reports")
                     // Warning colours only while reports wait for a decision.
                     icon.name: root.backend.reportsCount > 0 ? "data-warning" : "tools-report-bug"
                     tintIcon: root.backend.reportsCount === 0

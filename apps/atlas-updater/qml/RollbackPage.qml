@@ -10,13 +10,13 @@ AtlasPage {
 
     required property var backend
 
-    title: qsTr("Go back")
+    title: qsTr("Go Back")
 
     ConfirmDialog {
         id: confirm
-        title: qsTr("Go back to %1?").arg(page.backend.rollbackVersion)
+        title: qsTr("Go Back to %1?").arg(page.backend.rollbackVersion)
         text: page.rollbackIsBad ? qsTr("This version didn't pass its startup checks on this computer and was undone, so it will probably fail again. Your files and settings stay as they are.") : qsTr("The next restart starts the previous version. Your files and settings stay as they are.")
-        acceptText: qsTr("Go back to %1").arg(page.backend.rollbackVersion)
+        acceptText: qsTr("Go Back to %1").arg(page.backend.rollbackVersion)
         focusReject: true
         onAccepted: page.backend.rollback()
     }
@@ -70,12 +70,12 @@ AtlasPage {
         subtitle: qsTr("The next restart starts that version. Your files and settings stay as they are.")
 
         PrimaryButton {
-            text: qsTr("Restart now")
+            text: qsTr("Restart Now")
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
-            text: qsTr("Don't go back")
+            text: qsTr("Don't Go Back")
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.cancelRollback()
         }
@@ -90,20 +90,20 @@ AtlasPage {
         subtitle: page.rollbackIsBad ? qsTr("Version %1 failed its startup checks on this computer and was undone, so going back to it will probably fail again.").arg(page.backend.rollbackVersion) : qsTr("You can go back to the version you used before. Nothing is deleted: you can update again later.")
 
         PrimaryButton {
-            text: page.backend.rollbackDate.length > 0 ? qsTr("Go back to %1 (%2)").arg(page.backend.rollbackVersion).arg(Dates.shortDate(page.backend.rollbackDate)) : qsTr("Go back to %1").arg(page.backend.rollbackVersion)
+            text: page.backend.rollbackDate.length > 0 ? qsTr("Go Back to %1 (%2)").arg(page.backend.rollbackVersion).arg(Dates.shortDate(page.backend.rollbackDate)) : qsTr("Go Back to %1").arg(page.backend.rollbackVersion)
             visible: !page.rollbackIsBad
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: confirm.open()
         }
         // Not the obvious next step: the confirmation says why.
         SecondaryButton {
-            text: qsTr("Go back anyway")
+            text: qsTr("Go Back Anyway")
             visible: page.rollbackIsBad
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: confirm.open()
         }
         SecondaryButton {
-            text: qsTr("Restart to update")
+            text: qsTr("Restart to Update")
             visible: page.backend.restartNeeded
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.restartNow()

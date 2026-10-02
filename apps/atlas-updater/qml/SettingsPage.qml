@@ -18,7 +18,7 @@ AtlasPage {
 
     ConfirmDialog {
         id: collected
-        title: qsTr("What's collected")
+        title: qsTr("What's Collected")
         acceptText: qsTr("Close")
         showReject: false
 
@@ -45,7 +45,7 @@ AtlasPage {
     }
 
     Section {
-        title: qsTr("Crash reports")
+        title: qsTr("Crash Reports")
         footer: page.backend.crashHasServer ? qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. Nothing is sent without asking you first.") : qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. No crash report server is set up on this system, so reports can't be sent yet.")
 
         SectionRow {
@@ -56,19 +56,19 @@ AtlasPage {
             onSwitchToggled: checked => page.backend.enableCrashReports(checked)
         }
         SectionRow {
-            title: qsTr("What's collected")
+            title: qsTr("What's Collected")
             chevron: true
             onClicked: collected.open()
         }
         SectionRow {
             visible: page.backend.reportsCount > 0
-            title: qsTr("Review reports")
+            title: qsTr("Review Reports")
             value: page.backend.reportsCount
             chevron: true
             onClicked: page.openReports()
         }
         SectionRow {
-            title: qsTr("Sent reports")
+            title: qsTr("Sent Reports")
             chevron: true
             onClicked: page.openSent()
         }

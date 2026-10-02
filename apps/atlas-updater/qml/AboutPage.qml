@@ -45,7 +45,7 @@ AtlasPage {
         title: qsTr("About")
         footer: qsTr("Atlas Updater collects nothing. Crash reports are off unless you turn them on. Each report is shown to you before it's sent.")
         SectionRow {
-            title: qsTr("Licence")
+            title: qsTr("License")
             value: qsTr("MIT")
         }
         SectionRow {
@@ -53,7 +53,7 @@ AtlasPage {
             value: qsTr("Eterneon")
         }
         SectionRow {
-            title: qsTr("Project page")
+            title: qsTr("Project Page")
             chevron: true
             onClicked: {
                 var url = "https://github.com/EternalCoder454/AtlasOS";

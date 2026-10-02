@@ -121,7 +121,7 @@ pub fn update_all(progress: impl FnMut(Progress)) -> Result<()>;  // one transac
   (bootc/ostree creates `/run/ostree/staged-deployment` when an update is
   staged), plus a fallback `Status()` call every 6 h. When something new is
   staged, it sends a KNotification (event `updateStaged` in
-  `atlas-updater.notifyrc`) with a "Restart to update" action, and the tray
+  `atlas-updater.notifyrc`) with a "Restart to Update" action, and the tray
   icon goes to NeedsAttention.
 - The background download and staging is the OS's job
   (`atlasos-update-stage.timer` in the AtlasOS image runs `bootc upgrade`).
@@ -131,7 +131,7 @@ Screens:
 - **Updates**:
   - Current, staged and rollback versions, each with its date (from
     `status.booted/staged/rollback.image.{version,timestamp}`).
-  - A "Check for updates" button (`CheckForUpdate`), and "Download update"
+  - A "Check for Updates" button (`CheckForUpdate`), and "Download Update"
     (`Upgrade`) when an update is found but not staged. bootc records the
     result as the `cachedUpdate` of the entry whose commit the image's ostree
     ref points to (the image pulled last; after a rollback, the rollback
@@ -142,7 +142,7 @@ Screens:
     (written by the AtlasOS image's greenboot red.d script when an image
     fails its boot health checks for the last time and is rolled back) is
     shown as a warning, "Version X didn't start properly", with "Download
-    anyway" behind a confirmation instead of "Download update". The
+    Anyway" behind a confirmation instead of "Download Update". The
     background stager skips it too. The file is read next to the ref heads,
     without root.
   - Release notes of the new version as Markdown, from
@@ -151,14 +151,14 @@ Screens:
     using the `.body` field). The URL can be overridden in
     `/etc/atlas-updater/updater.toml`. If no release exists: "No release
     notes for this version".
-  - Flatpak app updates on the same screen, with an "Update apps" button.
-  - "Restart to update", and "Restart later…" (pick a time today or
+  - Flatpak app updates on the same screen, with an "Update Apps" button.
+  - "Restart to Update", and "Restart Later…" (pick a time today or
     tomorrow; the tray process restarts then, with a notification 5 minutes
     before; the setting persists in `~/.config/atlas-updaterrc`; can be
     cancelled).
   - Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
     session bus, so apps can save first.
-- **Go back**: "Go back to <rollback version> (<date>)" → `Rollback()`, then
+- **Go Back**: "Go Back to <rollback version> (<date>)" → `Rollback()`, then
   offers the restart. When the rollback image is in `bad-image-digests`, the
   page and the confirmation say it failed its startup checks here.
 - **Channel**: stable or testing (from the booted ref's tag) →
@@ -240,5 +240,5 @@ default; when off nothing is collected or written):
 - **Consent.** Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/`.
   The app shows `Report::payload()` (the exact Sentry event JSON that `send()`
   posts to `{dsn host}/api/{project}/store/`) and only then calls `send()`,
-  which moves the report to `sent/` (kept 90 days). "Don't send" calls
+  which moves the report to `sent/` (kept 90 days). "Don't Send" calls
   `discard()`. "Report on GitHub" opens `github_issue_url()`.

@@ -78,9 +78,9 @@ AtlasPage {
 
     ConfirmDialog {
         id: badDialog
-        title: qsTr("Download %1 anyway?").arg(page.backend.availableVersion)
+        title: qsTr("Download %1 Anyway?").arg(page.backend.availableVersion)
         text: qsTr("This version didn't pass its startup checks on this computer, and AtlasOS went back to the version before it. It will probably fail again.")
-        acceptText: qsTr("Download anyway")
+        acceptText: qsTr("Download Anyway")
         focusReject: true
         // The state can change under an open dialog (a background read).
         onAccepted: {
@@ -97,9 +97,9 @@ AtlasPage {
 
     ConfirmDialog {
         id: scheduleDialog
-        title: qsTr("Restart later")
+        title: qsTr("Restart Later")
         text: qsTr("Atlas Updater restarts your computer at this time. You get a notification 5 minutes before, and apps get to save their work first.")
-        acceptText: qsTr("Schedule restart")
+        acceptText: qsTr("Schedule Restart")
         closeOnAccept: false
         property string problem: ""
         onAccepted: {
@@ -295,41 +295,41 @@ AtlasPage {
         }
 
         PrimaryButton {
-            text: page.rollbackQueued ? qsTr("Restart now") : qsTr("Restart to update")
+            text: page.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update")
             visible: page.restartReady
             enabled: !page.backend.busy && !page.working
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
-            text: qsTr("Restart later…")
+            text: qsTr("Restart Later…")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0
             onClicked: scheduleDialog.open()
         }
         SecondaryButton {
-            text: qsTr("Cancel scheduled restart")
+            text: qsTr("Cancel Scheduled Restart")
             visible: page.backend.scheduledAt > 0 && !page.working
             onClicked: page.backend.cancelRestart()
         }
         PrimaryButton {
-            text: qsTr("Download update")
+            text: qsTr("Download Update")
             visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && !page.availableIsRollback && !page.availableIsBad && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
         SecondaryButton {
-            text: qsTr("Download anyway")
+            text: qsTr("Download Anyway")
             visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && (page.availableIsRollback || page.availableIsBad) && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.availableIsBad ? badDialog.open() : page.backend.downloadUpdate()
         }
         // One primary pill at most: with a restart waiting, Try again is secondary.
         PrimaryButton {
-            text: qsTr("Try again")
+            text: qsTr("Try Again")
             visible: page.canRetry && !page.restartReady
             onClicked: page.retry()
         }
         SecondaryButton {
-            text: qsTr("Try again")
+            text: qsTr("Try Again")
             visible: page.canRetry && page.restartReady
             onClicked: page.retry()
         }
@@ -340,7 +340,7 @@ AtlasPage {
             onClicked: page.backend.dismissMessages()
         }
         SecondaryButton {
-            text: qsTr("Check for updates")
+            text: qsTr("Check for Updates")
             visible: !page.hasError && !page.restartReady && !page.checking && !page.downloading && !page.working
             enabled: !page.backend.busy
             onClicked: page.backend.checkForUpdate()
@@ -349,7 +349,7 @@ AtlasPage {
 
     // ---- release notes ----
     Section {
-        title: qsTr("What's new in %1").arg(page.backend.notesVersion)
+        title: qsTr("What's New in %1").arg(page.backend.notesVersion)
         visible: page.backend.notesState !== "none" && page.backend.notesState !== ""
 
         SectionRow {
@@ -365,7 +365,7 @@ AtlasPage {
             title: qsTr("Could not load the release notes")
             subtitle: page.backend.notesError.length > 0 ? page.backend.notesError : qsTr("Check your internet connection.")
             SecondaryButton {
-                text: qsTr("Try again")
+                text: qsTr("Try Again")
                 Accessible.name: qsTr("Try again, release notes")
                 onClicked: page.backend.loadNotes()
             }
@@ -409,7 +409,7 @@ AtlasPage {
 
     // ---- flatpak apps ----
     Section {
-        title: qsTr("App updates")
+        title: qsTr("App Updates")
         Layout.bottomMargin: Kirigami.Units.largeSpacing
 
         SectionRow {
@@ -443,8 +443,8 @@ AtlasPage {
             }
         }
         SectionRow {
-            title: qsTr("Check for app updates")
-            Accessible.name: qsTr("Check for app updates")
+            title: qsTr("Check for App Updates")
+            Accessible.name: qsTr("Check for App Updates")
             clickable: !page.backend.appsBusy
             chevron: true
             onClicked: page.backend.checkApps()
@@ -453,7 +453,7 @@ AtlasPage {
             visible: page.apps.length > 0
             title: page.apps.length === 1 ? qsTr("1 app can be updated") : qsTr("%n apps can be updated", "", page.apps.length)
             SecondaryButton {
-                text: qsTr("Update apps")
+                text: qsTr("Update Apps")
                 enabled: !page.backend.appsBusy
                 onClicked: page.backend.updateApps()
             }

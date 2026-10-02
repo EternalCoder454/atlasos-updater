@@ -5,21 +5,21 @@ Name=Atlas Updater
 DesktopEntry=net.eterneon.atlas.updater
 
 [Event/updateStaged]
-Name=Update ready
+Name=Update Ready
 Comment=An AtlasOS update has been downloaded and is waiting for a restart
 Action=Popup
 
 [Event/restartSoon]
-Name=Restart coming up
+Name=Restart Coming Up
 Comment=A scheduled restart to finish updating is about to happen
 Action=Popup
 
 [Event/crashReport]
-Name=Crash report ready
+Name=Crash Report Ready
 Comment=A crash report is waiting for your review. Nothing is sent without your say-so
 Action=Popup
 
 [Event/restartFailed]
-Name=Restart did not happen
+Name=Restart Did Not Happen
 Comment=A scheduled restart could not be done or was missed
 Action=Popup

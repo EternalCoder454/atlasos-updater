@@ -577,7 +577,7 @@ impl qobject::Backend {
                         Op::Rollback => {
                             "Going back did not take effect. Nothing was changed.".to_string()
                         }
-                        Op::CancelRollback => "The rollback was cancelled.".to_string(),
+                        Op::CancelRollback => "The rollback was canceled.".to_string(),
                         Op::Switch(c) => format!("Switched to the {c} channel. Restart to finish."),
                         Op::Status => String::new(),
                     };

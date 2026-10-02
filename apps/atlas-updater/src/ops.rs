@@ -37,7 +37,7 @@ impl Op {
             Op::Check => "Checking for updates…",
             Op::Upgrade => "Downloading the update…",
             Op::Rollback => "Going back to the previous version…",
-            Op::CancelRollback => "Cancelling the rollback…",
+            Op::CancelRollback => "Canceling the rollback…",
             Op::Switch(_) => "Switching channel…",
         }
     }

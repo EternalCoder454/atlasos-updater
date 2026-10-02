@@ -14,7 +14,7 @@ AtlasPage {
 
     signal openSent
 
-    title: qsTr("Crash reports")
+    title: qsTr("Crash Reports")
 
     readonly property var reports: page.backend.reportsJson.length > 0 ? JSON.parse(page.backend.reportsJson) : []
 
@@ -79,7 +79,7 @@ AtlasPage {
             }
 
             Section {
-                title: qsTr("Stack trace")
+                title: qsTr("Stack Trace")
                 visible: card.modelData.stacktrace.length > 0
                 Item {
                     Layout.fillWidth: true
@@ -94,7 +94,7 @@ AtlasPage {
                             wrapMode: TextEdit.NoWrap
                             background: null
                             padding: Kirigami.Units.smallSpacing
-                            Accessible.name: qsTr("Stack trace")
+                            Accessible.name: qsTr("Stack Trace")
                         }
                     }
                 }
@@ -102,7 +102,7 @@ AtlasPage {
 
             Section {
                 SectionRow {
-                    title: card.showPayload ? qsTr("Hide exact data") : qsTr("Show exact data")
+                    title: card.showPayload ? qsTr("Hide Exact Data") : qsTr("Show Exact Data")
                     subtitle: qsTr("Exactly what would be sent")
                     chevron: true
                     disclosure: true
@@ -138,12 +138,12 @@ AtlasPage {
                     onClicked: page.backend.sendReport(card.modelData.eventId)
                 }
                 SecondaryButton {
-                    text: qsTr("Don't send")
+                    text: qsTr("Don't Send")
                     enabled: !page.backend.busy
                     onClicked: page.backend.discardReport(card.modelData.eventId)
                 }
                 TextButton {
-                    text: qsTr("Report on GitHub instead")
+                    text: qsTr("Report on GitHub Instead")
                     visible: card.modelData.githubUrl.length > 0 && page.backend.isSafeLink(card.modelData.githubUrl)
                     enabled: !page.backend.busy
                     onClicked: {
@@ -160,7 +160,7 @@ AtlasPage {
     Section {
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         SectionRow {
-            title: qsTr("Sent reports")
+            title: qsTr("Sent Reports")
             chevron: true
             onClicked: page.openSent()
         }

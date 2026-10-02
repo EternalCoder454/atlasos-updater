@@ -12,7 +12,7 @@ AtlasPage {
 
     required property var backend
 
-    title: qsTr("Sent reports")
+    title: qsTr("Sent Reports")
 
     readonly property var sent: page.backend.sentJson.length > 0 ? JSON.parse(page.backend.sentJson) : []
 
@@ -21,7 +21,7 @@ AtlasPage {
     ConfirmDialog {
         id: payloadDialog
         property string payload: ""
-        title: qsTr("What was sent")
+        title: qsTr("What Was Sent")
         acceptText: qsTr("Close")
         showReject: false
         width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 0, Kirigami.Units.gridUnit * 36)
