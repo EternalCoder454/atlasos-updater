@@ -13,12 +13,18 @@ pub mod qobject {
         #[qobject]
         #[qproperty(bool, busy, cxx_name = "busy")]
         #[qproperty(QString, busy_text, cxx_name = "busyText")]
-        /// The operation running now ("check", "download", "restart", "schedule",
-        /// "rollback", "cancelRollback", "switch", "checkApps", "updateApps",
-        /// "sendReport", "discardReport"), or "" when idle.
+        /// The system operation that set `busy` ("check", "download",
+        /// "rollback", "cancelRollback", "switch", "status" or "sendReport"),
+        /// or "" when none runs. Only that operation clears it.
         #[qproperty(QString, busy_op, cxx_name = "busyOp")]
-        /// The operation whose failure set `errorText` (the same names, plus
-        /// "crashSetting", "status" and "timer"); "" when `errorText` is empty.
+        /// The app operation behind `appsBusy` ("checkApps" or "updateApps"),
+        /// or "". Separate from `busyOp`: the two can overlap.
+        #[qproperty(QString, apps_op, cxx_name = "appsOp")]
+        /// A restart of the computer has been asked for and has not ended.
+        #[qproperty(bool, restarting, cxx_name = "restarting")]
+        /// The operation whose failure set `errorText` (the `busyOp` names,
+        /// plus "restart", "crashSetting", "discardReport" and "timer", which
+        /// only ever appear here); "" when `errorText` is empty.
         #[qproperty(QString, error_op, cxx_name = "errorOp")]
         #[qproperty(bool, loaded, cxx_name = "loaded")]
         #[qproperty(QString, error_text, cxx_name = "errorText")]
@@ -242,6 +248,8 @@ pub struct BackendRust {
     notes_html: QString,
     notes_plain: QString,
     busy_op: QString,
+    apps_op: QString,
+    restarting: bool,
     error_op: QString,
     notes_version: QString,
     notes_error: QString,
@@ -299,6 +307,18 @@ fn q(s: &str) -> QString {
     QString::from(s)
 }
 
+/// Stores (or clears) the scheduled restart time. Fixture mode never touches
+/// the user's real settings file.
+fn save_schedule(fixtures: bool, at: Option<i64>) {
+    if !fixtures {
+        rc::set(
+            RC_RESTART,
+            "ScheduledAt",
+            at.map(|t| t.to_string()).as_deref(),
+        );
+    }
+}
+
 fn timer_failed(mut obj: Pin<&mut qobject::Backend>) {
     obj.as_mut().set_error("timer", q(
         "Atlas Updater could not start its background timer. Update checks and scheduled restarts will not run until it is reopened.",
@@ -308,13 +328,19 @@ fn timer_failed(mut obj: Pin<&mut qobject::Backend>) {
 impl qobject::Backend {
     /// Show `text` as the error of the operation `op` (a QML-side name).
     fn set_error(mut self: Pin<&mut Self>, op: &str, text: QString) {
-        self.as_mut()
-            .set_error_op(q(if text.is_empty() { "" } else { op }));
-        self.as_mut().set_error_text(text);
+        // never leave `errorOp` naming an error whose text is not there yet
+        // (or no longer is): text first when setting, op first when clearing
+        if text.is_empty() {
+            self.as_mut().set_error_op(QString::default());
+            self.as_mut().set_error_text(text);
+        } else {
+            self.as_mut().set_error_text(text);
+            self.as_mut().set_error_op(q(op));
+        }
     }
 
-    /// `busyOp` follows `busy` (and `apps_busy`): set when an operation
-    /// starts, cleared by that same operation when it ends.
+    /// `busyOp` follows `busy`: set when a system operation starts, cleared
+    /// by that same operation when it ends.
     fn begin_op(mut self: Pin<&mut Self>, name: &str) {
         self.as_mut().set_busy_op(q(name));
     }
@@ -350,8 +376,8 @@ impl qobject::Backend {
             if at > schedule::unix_now() {
                 self.as_mut().set_scheduled_at(at);
                 schedule.restore_restart(at);
-            } else if self.rust().fixtures.is_none() {
-                rc::set(RC_RESTART, "ScheduledAt", None);
+            } else {
+                save_schedule(self.rust().fixtures.is_some(), None);
             }
         }
         let qt = self.qt_thread();
@@ -407,7 +433,7 @@ impl qobject::Backend {
                 if !current(&this, t) {
                     return;
                 }
-                rc::set(RC_RESTART, "ScheduledAt", None);
+                save_schedule(this.rust().fixtures.is_some(), None);
                 if *this.restart_needed() && this.rust().fixtures.is_none() {
                     // scheduledAt stays set while the restart is in flight: the
                     // shell must not quit a window-less instance before the
@@ -431,7 +457,7 @@ impl qobject::Backend {
     }
 
     fn clear_schedule_state(mut self: Pin<&mut Self>) {
-        rc::set(RC_RESTART, "ScheduledAt", None);
+        save_schedule(self.rust().fixtures.is_some(), None);
         self.as_mut().set_scheduled_at(0);
     }
 
@@ -462,6 +488,8 @@ impl qobject::Backend {
         }
     }
 
+    /// Clears the error (and `errorOp`) and the info message. It leaves
+    /// `busyOp` and `appsOp` alone: they belong to operations still running.
     pub fn dismiss_messages(mut self: Pin<&mut Self>) {
         self.as_mut().set_error("", QString::default());
         self.as_mut().set_info_text(QString::default());
@@ -746,7 +774,7 @@ impl qobject::Backend {
             return;
         }
         self.as_mut().set_apps_busy(true);
-        self.as_mut().begin_op("checkApps");
+        self.as_mut().set_apps_op(q("checkApps"));
         self.as_mut().set_apps_error(QString::default());
         self.as_mut().set_apps_status(q("Looking for app updates…"));
         let fixtures = self.rust().fixtures.clone();
@@ -765,8 +793,7 @@ impl qobject::Backend {
 
     fn apps_listed(mut self: Pin<&mut Self>, res: Result<Vec<apps::Row>, String>) {
         self.as_mut().set_apps_busy(false);
-        self.as_mut().end_op("checkApps");
-        self.as_mut().end_op("updateApps");
+        self.as_mut().set_apps_op(QString::default());
         self.as_mut().set_apps_status(QString::default());
         match res {
             Ok(rows) => {
@@ -786,7 +813,7 @@ impl qobject::Backend {
             return;
         }
         self.as_mut().set_apps_busy(true);
-        self.as_mut().begin_op("updateApps");
+        self.as_mut().set_apps_op(q("updateApps"));
         self.as_mut().set_apps_error(QString::default());
         self.as_mut().set_apps_status(q("Updating apps…"));
         let fixtures = self.rust().fixtures.clone();
@@ -808,7 +835,7 @@ impl qobject::Backend {
             let _ = qt.queue(move |mut obj| {
                 if let Err(e) = &res {
                     obj.as_mut().set_apps_busy(false);
-                    obj.as_mut().end_op("updateApps");
+                    obj.as_mut().set_apps_op(QString::default());
                     obj.as_mut().set_apps_status(QString::default());
                     obj.as_mut()
                         .set_apps_error(q(&format!("Could not update apps: {e}")));
@@ -837,19 +864,19 @@ impl qobject::Backend {
             if config::fixture_hold("restart") {
                 // screenshot hook: look like a restart in progress, for good
                 self.as_mut().set_busy_text(q("Restarting…"));
-                self.as_mut().begin_op("restart");
+                self.as_mut().set_restarting(true);
                 return;
             }
             self.as_mut()
                 .set_info_text(q("Developer fixtures: restart skipped."));
             return;
         }
-        self.as_mut().begin_op("restart");
+        self.as_mut().set_restarting(true);
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         let qt_ok = qt.clone();
         let clear = move |mut obj: Pin<&mut qobject::Backend>| {
-            obj.as_mut().end_op("restart");
+            obj.as_mut().set_restarting(false);
             if let Some(t) = scheduled
                 && *obj.scheduled_at() == t
             {
@@ -863,7 +890,7 @@ impl qobject::Backend {
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
             obj.as_mut().set_error("restart", q(&text));
-            obj.as_mut().end_op("restart");
+            obj.as_mut().set_restarting(false);
             clear(obj.as_mut());
             obj.restart_problem(q(&text));
         };
@@ -896,7 +923,7 @@ impl qobject::Backend {
                 .set_info_text(q("That time has already passed. Pick a later time."));
             return;
         }
-        rc::set(RC_RESTART, "ScheduledAt", Some(&at.to_string()));
+        save_schedule(self.rust().fixtures.is_some(), Some(at));
         self.as_mut().set_scheduled_at(at);
         self.rust().schedule.set_restart(Some(at));
     }
