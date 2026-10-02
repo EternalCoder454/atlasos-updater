@@ -150,3 +150,25 @@ Screens:
 - Ships `atlasos-update-stage.timer`, autostarts `atlas-updater --tray`,
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.
+
+## System app
+
+atlas-core and atlas-updater are required parts of AtlasOS, not optional apps.
+They come with the image in the read-only `/usr`, which Discover and dnf
+can't remove. `/etc/dnf/protected.d/atlas.conf` (shipped by atlas-core)
+protects them from dnf in mutable contexts, and the image build fails without
+them. Root can still `rpm-ostree override remove` them; that's the limit on
+an open system.
+
+## Privacy and crash reports
+
+Crash reports are the only telemetry. `atlas_core::crash`:
+- saves a report locally when an app crashes (Rust panics; Qt fatal
+  messages through a message handler)
+- the report has the app and OS version, kernel, CPU, RAM and GPU, and
+  CPU and memory use at the time, plus the crash message and backtrace
+- `$HOME` and the username are scrubbed out; there's no hostname,
+  machine-id, network address, serials, file names or environment
+- nothing is sent unless the user chooses: "Report on GitHub" (a prefilled
+  issue), or "Send report" if an endpoint is configured (none by default),
+  and "Show report" displays exactly what would go
