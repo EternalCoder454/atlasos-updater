@@ -231,7 +231,10 @@ void Shell::onRestartSoon()
 {
     auto *n = new KNotification(QStringLiteral("restartSoon"));
     n->setComponentName(kComponent);
-    n->setTitle(tr("Restarting in 5 minutes"));
+    // The real time left: a saved time found at login can be much closer.
+    const qint64 left = m_backend->property("scheduledAt").toLongLong() - QDateTime::currentSecsSinceEpoch();
+    const int minutes = qMax<qint64>(1, (left + 59) / 60);
+    n->setTitle(tr("Restarting in %n minute(s)", "", minutes));
     n->setText(tr("Your computer will restart soon to finish updating. Save your work."));
     n->setIconName(kAppIcon);
     // The only warning before an automatic restart: it stays until the user

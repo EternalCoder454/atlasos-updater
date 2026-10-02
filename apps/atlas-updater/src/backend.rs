@@ -373,8 +373,8 @@ impl qobject::Backend {
                 if *this.restart_needed() && this.rust().fixtures.is_none() {
                     // scheduledAt stays set while the restart is in flight: the
                     // shell must not quit a window-less instance before the
-                    // logout call finishes. A failure clears it (restart_now).
-                    this.restart_now();
+                    // logout call finishes (start_restart clears it after).
+                    this.start_restart(Some(t));
                 } else {
                     this.as_mut().clear_schedule_state();
                 }
@@ -770,7 +770,14 @@ impl qobject::Backend {
 
     // ---- restart ----
 
-    pub fn restart_now(mut self: Pin<&mut Self>) {
+    pub fn restart_now(self: Pin<&mut Self>) {
+        self.start_restart(None);
+    }
+
+    /// `scheduled` is the time of the scheduled restart that fired, if this is
+    /// one: only that restart's end (a failure, or a logout that did not
+    /// happen) clears the schedule; a manual restart leaves it alone.
+    fn start_restart(mut self: Pin<&mut Self>, scheduled: Option<i64>) {
         if self.rust().fixtures.is_some() {
             self.as_mut()
                 .set_info_text(q("Developer fixtures: restart skipped."));
@@ -778,21 +785,36 @@ impl qobject::Backend {
         }
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
-        let fail = |mut obj: Pin<&mut qobject::Backend>, e: String| {
+        let qt_ok = qt.clone();
+        let clear = move |mut obj: Pin<&mut qobject::Backend>| {
+            if let Some(t) = scheduled
+                && *obj.scheduled_at() == t
+            {
+                obj.as_mut().clear_schedule_state();
+            }
+        };
+        let fail = move |mut obj: Pin<&mut qobject::Backend>, e: String| {
             // Nobody may be looking at a window (scheduled restart in the
             // tray): tell the user with a notification as well.
             let text = format!(
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
             obj.as_mut().set_error_text(q(&text));
-            obj.as_mut().clear_schedule_state();
+            clear(obj.as_mut());
             obj.restart_problem(q(&text));
         };
         if !spawn_named("atlas-restart", move || {
             let res =
                 guarded(restart::logout_and_reboot).unwrap_or_else(|| Err("internal error".into()));
-            if let Err(e) = res {
-                let _ = qt.queue(move |obj| fail(obj, e));
+            match res {
+                Err(e) => {
+                    let _ = qt.queue(move |obj| fail(obj, e));
+                }
+                // The request went through. If the session still runs (the
+                // logout was dismissed) the time must not stay set.
+                Ok(()) => {
+                    let _ = qt_ok.queue(clear);
+                }
             }
         }) {
             let _ = qt_fail.queue(move |obj| fail(obj, "could not start a worker thread".into()));
@@ -956,6 +978,11 @@ impl qobject::Backend {
             match res {
                 Ok(()) => {
                     obj.as_mut().drop_pending(&id);
+                    // an earlier load, dropped as stale, may have found newer
+                    // reports: read the folder again
+                    if !fixtures {
+                        obj.as_mut().load_reports();
+                    }
                     obj.as_mut().set_info_text(q("Crash report sent. Thank you."));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => obj.as_mut().set_error_text(q(
@@ -1004,7 +1031,10 @@ impl qobject::Backend {
                 .set_error_text(q(&format!("Could not delete the crash report: {e}")));
             return;
         }
-        self.drop_pending(&id);
+        self.as_mut().drop_pending(&id);
+        if self.rust().fixtures.is_none() {
+            self.load_reports();
+        }
     }
 
     /// Remove one pending report, by id, from the list the UI shows.
