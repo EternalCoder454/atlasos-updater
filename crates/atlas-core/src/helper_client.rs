@@ -181,5 +181,6 @@ impl HelperClient {
 fn parse(json: String) -> Result<bootc::Status> {
     let mut st = Status::from_json(&json).map_err(Error::Parse)?;
     st.image_ref_heads = bootc::image_ref_heads(std::path::Path::new(bootc::IMAGE_REFS_DIR));
+    st.bad_image_digests = bootc::bad_image_digests(std::path::Path::new(bootc::BAD_IMAGE_DIGESTS));
     Ok(st)
 }

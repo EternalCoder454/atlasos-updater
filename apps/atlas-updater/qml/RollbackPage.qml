@@ -15,7 +15,7 @@ AtlasPage {
     ConfirmDialog {
         id: confirm
         title: qsTr("Go back to %1?").arg(page.backend.rollbackVersion)
-        text: qsTr("The next restart starts the previous version. Your files and settings stay as they are.")
+        text: page.rollbackIsBad ? qsTr("This version didn't pass its startup checks on this computer and was undone, so it will probably fail again. Your files and settings stay as they are.") : qsTr("The next restart starts the previous version. Your files and settings stay as they are.")
         acceptText: qsTr("Go back to %1").arg(page.backend.rollbackVersion)
         focusReject: true
         onAccepted: page.backend.rollback()
@@ -43,6 +43,8 @@ AtlasPage {
     }
 
     readonly property bool queued: page.backend.rollbackQueued === true
+    // The previous version failed its startup checks here and was undone.
+    readonly property bool rollbackIsBad: page.backend.rollbackIsBad === true
     readonly property string target: queued && page.backend.rollbackTarget ? page.backend.rollbackTarget : page.backend.rollbackVersion
 
     function version(v, date) {
@@ -82,12 +84,21 @@ AtlasPage {
     StatusHero {
         Layout.topMargin: Kirigami.Units.gridUnit
         visible: page.backend.hasRollback && !page.queued && page.backend.restarting !== true
-        iconName: "edit-undo"
-        headline: qsTr("Something not working after an update?")
-        subtitle: qsTr("You can go back to the version you used before. Nothing is deleted: you can update again later.")
+        iconName: page.rollbackIsBad ? "dialog-warning" : "edit-undo"
+        tint: page.rollbackIsBad ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.highlightColor
+        headline: page.rollbackIsBad ? qsTr("The previous version didn't start properly") : qsTr("Something not working after an update?")
+        subtitle: page.rollbackIsBad ? qsTr("Version %1 failed its startup checks on this computer and was undone, so going back to it will probably fail again.").arg(page.backend.rollbackVersion) : qsTr("You can go back to the version you used before. Nothing is deleted: you can update again later.")
 
         PrimaryButton {
             text: page.backend.rollbackDate.length > 0 ? qsTr("Go back to %1 (%2)").arg(page.backend.rollbackVersion).arg(Dates.shortDate(page.backend.rollbackDate)) : qsTr("Go back to %1").arg(page.backend.rollbackVersion)
+            visible: !page.rollbackIsBad
+            enabled: !page.backend.busy && !page.backend.restarting
+            onClicked: confirm.open()
+        }
+        // Not the obvious next step: the confirmation says why.
+        SecondaryButton {
+            text: qsTr("Go back anyway")
+            visible: page.rollbackIsBad
             enabled: !page.backend.busy && !page.backend.restarting
             onClicked: confirm.open()
         }

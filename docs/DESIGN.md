@@ -138,6 +138,13 @@ Screens:
     entry), so the booted entry's can be stale: `Status::available_update`
     reads the ref heads from `/ostree/repo/refs/heads/ostree/container/image`
     and picks that entry.
+  - An update whose digest is in `/var/lib/atlasos/bad-image-digests`
+    (written by the AtlasOS image's greenboot red.d script when an image
+    fails its boot health checks for the last time and is rolled back) is
+    shown as a warning, "Version X didn't start properly", with "Download
+    anyway" behind a confirmation instead of "Download update". The
+    background stager skips it too. The file is read next to the ref heads,
+    without root.
   - Release notes of the new version as Markdown, from
     `release_notes_url` with `{version}` filled in (default
     `https://api.github.com/repos/EternalCoder454/AtlasOS/releases/tags/{version}`,
@@ -152,7 +159,8 @@ Screens:
   - Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
     session bus, so apps can save first.
 - **Go back**: "Go back to <rollback version> (<date>)" → `Rollback()`, then
-  offers the restart.
+  offers the restart. When the rollback image is in `bad-image-digests`, the
+  page and the confirmation say it failed its startup checks here.
 - **Channel**: stable or testing (from the booted ref's tag) →
   `SwitchChannel`, then offers the restart.
 - **History**: the versions this machine has booted, newest first, from

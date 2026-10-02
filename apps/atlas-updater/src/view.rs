@@ -30,6 +30,11 @@ pub struct View {
     /// The available image is the one the rollback deployment holds: the
     /// version the user went back from.
     pub available_is_rollback: bool,
+    /// The available image failed its boot health checks on this machine and
+    /// was rolled back.
+    pub available_is_bad: bool,
+    /// The rollback image failed its boot health checks on this machine.
+    pub rollback_is_bad: bool,
 }
 
 fn short_digest(d: &str) -> String {
@@ -74,6 +79,8 @@ pub fn from_status(st: &Status) -> View {
             && rollback.present
             && !available.digest.is_empty()
             && available.digest == rollback.digest,
+        available_is_bad: available.present && st.is_bad_image(&available.digest),
+        rollback_is_bad: rollback.present && st.is_bad_image(&rollback.digest),
         rollback_queued: queued,
         rollback_target: if queued {
             rollback.version.clone()
@@ -159,6 +166,41 @@ mod tests {
         );
         let v = from_status(&st(&other));
         assert!(!v.available_is_rollback);
+    }
+
+    #[test]
+    fn an_update_that_failed_its_health_checks() {
+        let cached = r#","cachedUpdate":{"image":{"image":"ghcr.io/eternalcoder454/atlasos:stable","transport":"registry"},
+                       "version":"44.20261009","timestamp":"2026-10-09T04:00:00Z","imageDigest":"sha256:bbb"}"#;
+        let mut s = build(cached, "null");
+        assert!(!from_status(&s).available_is_bad);
+        s.bad_image_digests = vec!["sha256:zzz".into(), "sha256:bbb".into()];
+        let v = from_status(&s);
+        assert!(v.available.present && v.available_is_bad && !v.rollback_is_bad);
+        // the booted image being listed doesn't make the update bad
+        s.bad_image_digests = vec!["sha256:aaa".into()];
+        assert!(!from_status(&s).available_is_bad);
+    }
+
+    #[test]
+    fn a_bad_image_left_behind_by_the_automatic_rollback() {
+        // greenboot booted 44.1 again; 44.2 is the rollback entry and still
+        // the newest image on the registry.
+        let json = r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+          "spec":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"}},
+          "status":{
+            "booted":{"image":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.1","imageDigest":"sha256:aaa"},
+                      "cachedUpdate":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.2","imageDigest":"sha256:bbb"}},
+            "staged": null,
+            "rollback":{"image":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.2","imageDigest":"sha256:bbb"}},
+            "rollbackQueued": false, "type":"bootcHost"}}"#;
+        let mut s = st(json);
+        s.bad_image_digests = vec!["sha256:bbb".into()];
+        let v = from_status(&s);
+        assert!(v.available_is_bad && v.available_is_rollback && v.rollback_is_bad);
     }
 
     #[test]

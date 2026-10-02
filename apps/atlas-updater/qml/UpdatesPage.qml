@@ -35,6 +35,8 @@ AtlasPage {
     readonly property bool working: page.backend.restarting === true || ["rollback", "cancelRollback", "switch"].indexOf(page.busyOp) >= 0
     readonly property bool rollbackQueued: page.backend.rollbackQueued === true
     readonly property bool availableIsRollback: page.backend.availableIsRollback === true
+    // The update failed its startup checks here and was undone (bad-image-digests).
+    readonly property bool availableIsBad: page.backend.availableIsBad === true
     // Something is waiting for a restart (an update, a switch or a go back).
     readonly property bool restartReady: page.backend.hasStaged || page.backend.restartNeeded || page.rollbackQueued
     readonly property bool checking: (!page.backend.loaded && !page.hasError) || page.busyOp === "check"
@@ -71,6 +73,25 @@ AtlasPage {
         }
         function onAvailableVersionChanged() {
             page.backend.loadNotes();
+        }
+    }
+
+    ConfirmDialog {
+        id: badDialog
+        title: qsTr("Download %1 anyway?").arg(page.backend.availableVersion)
+        text: qsTr("This version didn't pass its startup checks on this computer, and AtlasOS went back to the version before it. It will probably fail again.")
+        acceptText: qsTr("Download anyway")
+        focusReject: true
+        // The state can change under an open dialog (a background read).
+        onAccepted: {
+            if (page.availableIsBad) {
+                page.backend.downloadUpdate();
+            }
+        }
+    }
+    onAvailableIsBadChanged: {
+        if (!page.availableIsBad) {
+            badDialog.close();
         }
     }
 
@@ -168,7 +189,18 @@ AtlasPage {
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         busy: page.checking || page.downloading || page.working
-        tint: page.hasError ? Kirigami.Theme.negativeTextColor : (page.restartReady || page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor)
+        tint: {
+            if (page.hasError) {
+                return Kirigami.Theme.negativeTextColor;
+            }
+            if (page.restartReady) {
+                return Kirigami.Theme.highlightColor;
+            }
+            if (page.backend.updateAvailable && page.availableIsBad) {
+                return Kirigami.Theme.neutralTextColor;
+            }
+            return page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor;
+        }
         iconName: {
             if (page.hasError) {
                 return "dialog-error";
@@ -187,6 +219,9 @@ AtlasPage {
             }
             if (page.restartReady) {
                 return "system-reboot";
+            }
+            if (page.backend.updateAvailable && page.availableIsBad) {
+                return "dialog-warning";
             }
             if (page.backend.updateAvailable) {
                 return "update-medium";
@@ -214,6 +249,9 @@ AtlasPage {
             }
             if (page.restartReady) {
                 return qsTr("Restart to finish updating");
+            }
+            if (page.backend.updateAvailable && page.availableIsBad) {
+                return qsTr("Version %1 didn't start properly").arg(page.backend.availableVersion);
             }
             if (page.backend.updateAvailable && page.availableIsRollback) {
                 return qsTr("You went back from version %1").arg(page.backend.availableVersion);
@@ -244,6 +282,9 @@ AtlasPage {
             if (page.restartReady) {
                 return qsTr("A restart finishes the change you made.") + when;
             }
+            if (page.backend.updateAvailable && page.availableIsBad) {
+                return qsTr("It failed its startup checks on this computer and was undone. It won't download on its own; a newer version will.");
+            }
             if (page.backend.updateAvailable && page.availableIsRollback) {
                 return qsTr("It won't download on its own; download it again if you like.");
             }
@@ -271,15 +312,15 @@ AtlasPage {
         }
         PrimaryButton {
             text: qsTr("Download update")
-            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && !page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && !page.availableIsRollback && !page.availableIsBad && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
         SecondaryButton {
             text: qsTr("Download anyway")
-            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.restartReady && (page.availableIsRollback || page.availableIsBad) && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
-            onClicked: page.backend.downloadUpdate()
+            onClicked: page.availableIsBad ? badDialog.open() : page.backend.downloadUpdate()
         }
         // One primary pill at most: with a restart waiting, Try again is secondary.
         PrimaryButton {

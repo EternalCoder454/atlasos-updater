@@ -48,6 +48,10 @@ pub mod qobject {
         #[qproperty(QString, rollback_target, cxx_name = "rollbackTarget")]
         /// The available image is the one the user went back from.
         #[qproperty(bool, available_is_rollback, cxx_name = "availableIsRollback")]
+        /// The available image failed its boot health checks on this machine.
+        #[qproperty(bool, available_is_bad, cxx_name = "availableIsBad")]
+        /// The rollback image failed its boot health checks on this machine.
+        #[qproperty(bool, rollback_is_bad, cxx_name = "rollbackIsBad")]
         #[qproperty(QString, notes_state, cxx_name = "notesState")]
         /// The release notes as an HTML fragment (empty when there are none).
         #[qproperty(QString, notes_html, cxx_name = "notesHtml")]
@@ -247,6 +251,8 @@ pub struct BackendRust {
     rollback_queued: bool,
     rollback_target: QString,
     available_is_rollback: bool,
+    available_is_bad: bool,
+    rollback_is_bad: bool,
     notes_state: QString,
     notes_html: QString,
     notes_plain: QString,
@@ -624,6 +630,8 @@ impl qobject::Backend {
         self.as_mut().set_rollback_target(q(&v.rollback_target));
         self.as_mut()
             .set_available_is_rollback(v.available_is_rollback);
+        self.as_mut().set_available_is_bad(v.available_is_bad);
+        self.as_mut().set_rollback_is_bad(v.rollback_is_bad);
         let staged = v.staged.clone();
         // Tell the user once per staged image, even across restarts of the tray.
         // (fixture mode keeps this in memory and never touches real settings)

@@ -26,6 +26,11 @@ pub struct Status {
     /// [`Status::latest_image`] falls back to the booted entry.
     #[serde(skip)]
     pub image_ref_heads: Vec<String>,
+    /// Image digests that failed their boot health checks on this machine
+    /// (see [`bad_image_digests`]). Not part of bootc's JSON: the caller
+    /// fills it in.
+    #[serde(skip)]
+    pub bad_image_digests: Vec<String>,
 }
 
 /// Where ostree-ext keeps one ref per container image reference
@@ -58,6 +63,27 @@ pub fn image_ref_heads(dir: &Path) -> Vec<String> {
         }
     }
     heads
+}
+
+/// Digests of images that failed their boot health checks and were rolled
+/// back by greenboot, one per line, newest last (at most 20). The AtlasOS
+/// image's greenboot red.d script adds a digest; its green.d script removes one
+/// that later boots healthy. Readable without root.
+pub const BAD_IMAGE_DIGESTS: &str = "/var/lib/atlasos/bad-image-digests";
+
+/// The digests listed in a bad-image-digests file. Empty when it can't be read
+/// (none recorded, not AtlasOS, a test). Lines are taken as they are, the way
+/// the stager's `grep -x` matches them; a damaged line doesn't hide the others.
+pub fn bad_image_digests(path: &Path) -> Vec<String> {
+    std::fs::read(path)
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The desired state (`spec`).
@@ -365,6 +391,11 @@ impl Status {
         Some(latest)
     }
 
+    /// True when `digest` failed its boot health checks on this machine.
+    pub fn is_bad_image(&self, digest: &str) -> bool {
+        !digest.is_empty() && self.bad_image_digests.iter().any(|d| d == digest)
+    }
+
     /// True when [`Status::available_update`] has one.
     pub fn update_available(&self) -> bool {
         self.available_update().is_some()
@@ -522,6 +553,26 @@ mod tests {
             &["c-t"],
         );
         assert_eq!(available(&s), Some("sha256:new"));
+    }
+
+    #[test]
+    fn reads_bad_image_digests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-image-digests");
+        std::fs::write(&path, b"sha256:aaa\n\n\xff\xfe\nsha256:bbb\n").unwrap();
+        assert_eq!(
+            bad_image_digests(&path),
+            ["sha256:aaa", "\u{fffd}\u{fffd}", "sha256:bbb"]
+        );
+        assert!(bad_image_digests(&dir.path().join("missing")).is_empty());
+
+        let s = Status {
+            bad_image_digests: bad_image_digests(&path),
+            ..Status::default()
+        };
+        assert!(s.is_bad_image("sha256:bbb"));
+        assert!(!s.is_bad_image("sha256:ccc"));
+        assert!(!s.is_bad_image(""));
     }
 
     #[test]
