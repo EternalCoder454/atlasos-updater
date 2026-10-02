@@ -69,9 +69,35 @@ const MAX_LINE: usize = 4000;
 const MAX_TAG: usize = 300;
 /// HTML Qt may render without loading anything or hiding the text.
 const PLAIN_TAGS: &[&str] = &[
-    "b", "i", "em", "strong", "code", "pre", "br", "p", "ul", "ol", "li", "h1", "h2", "h3", "h4",
-    "h5", "h6", "blockquote", "kbd", "sub", "sup", "s", "del", "hr", "details", "summary", "tt",
-    "u", "strike",
+    "b",
+    "i",
+    "em",
+    "strong",
+    "code",
+    "pre",
+    "br",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "kbd",
+    "sub",
+    "sup",
+    "s",
+    "del",
+    "hr",
+    "details",
+    "summary",
+    "tt",
+    "u",
+    "strike",
 ];
 
 struct Out {
@@ -164,7 +190,11 @@ fn sanitize_line(line: &str) -> String {
     let next_gt = next_of(&chars, '>');
     let next_paren = next_of(&chars, ')');
     let escape_def = unsafe_definition(&chars);
-    let mut o = Out { s: String::with_capacity(n), bs: 0, last: None };
+    let mut o = Out {
+        s: String::with_capacity(n),
+        bs: 0,
+        last: None,
+    };
     let mut i = 0;
     while i < n {
         let c = chars[i];
@@ -198,7 +228,7 @@ fn sanitize_line(line: &str) -> String {
                     continue;
                 }
             }
-            '<' if o.bs % 2 == 0 => {
+            '<' if o.bs.is_multiple_of(2) => {
                 let gt = next_gt[i];
                 if gt < n && gt - i <= MAX_TAG {
                     let inner = &chars[i + 1..gt];
@@ -209,8 +239,8 @@ fn sanitize_line(line: &str) -> String {
                         i = gt + 1;
                         continue;
                     }
-                    let autolink =
-                        starts_https(inner) && !inner.iter().any(|c| c.is_whitespace() || *c == '<');
+                    let autolink = starts_https(inner)
+                        && !inner.iter().any(|c| c.is_whitespace() || *c == '<');
                     if autolink || tag_is_plain(inner) {
                         o.push('<');
                         i += 1;
@@ -331,40 +361,72 @@ mod tests {
         ] {
             let out = sanitize(md);
             assert!(!out.contains("!["), "{md:?} -> {out:?}");
-            assert!(!out.contains("](http://") && !out.contains("\n[r]:"), "{md:?} -> {out:?}");
+            assert!(
+                !out.contains("](http://") && !out.contains("\n[r]:"),
+                "{md:?} -> {out:?}"
+            );
         }
-        assert_eq!(sanitize("Hi ![pixel](http://t.example/p.png) there"), "Hi !pixel] there");
+        assert_eq!(
+            sanitize("Hi ![pixel](http://t.example/p.png) there"),
+            "Hi !pixel] there"
+        );
     }
 
     #[test]
     fn unsafe_link_targets_are_dropped_and_https_kept() {
         assert_eq!(
-            sanitize("[good](https://example.org/a) [bad](file:///etc/passwd) [worse](javascript:x)"),
+            sanitize(
+                "[good](https://example.org/a) [bad](file:///etc/passwd) [worse](javascript:x)"
+            ),
             "[good](https://example.org/a) [bad] [worse]"
         );
         assert_eq!(sanitize("[a\nb](javascript:x)"), "[a\nb]");
-        assert_eq!(sanitize("[open](  <HTTPS://e.org>)"), "[open](  <HTTPS://e.org>)");
+        assert_eq!(
+            sanitize("[open](  <HTTPS://e.org>)"),
+            "[open](  <HTTPS://e.org>)"
+        );
         assert_eq!(sanitize("[x](nope"), "[x] (nope");
     }
 
     #[test]
     fn html_is_neutralized_without_eating_text() {
-        assert_eq!(sanitize("<img src=\"http://t/p\"> ok"), "\\<img src=\"http://t/p\"> ok");
+        assert_eq!(
+            sanitize("<img src=\"http://t/p\"> ok"),
+            "\\<img src=\"http://t/p\"> ok"
+        );
         assert_eq!(sanitize("a <b>bold</b> <br/>"), "a <b>bold</b> <br/>");
-        assert_eq!(sanitize("Vec<String> and width <height later -> x"), "Vec\\<String> and width \\<height later -> x");
+        assert_eq!(
+            sanitize("Vec<String> and width <height later -> x"),
+            "Vec\\<String> and width \\<height later -> x"
+        );
         assert_eq!(sanitize("x <!-- hidden --> y"), "x  y");
-        assert_eq!(sanitize("<https://example.org> <javascript:x>"), "<https://example.org> \\<javascript:x>");
+        assert_eq!(
+            sanitize("<https://example.org> <javascript:x>"),
+            "<https://example.org> \\<javascript:x>"
+        );
         // already escaped by the author: no second backslash
         assert_eq!(sanitize("\\<img src=x>"), "\\<img src=x>");
-        assert_eq!(sanitize("<a href=\"http://x\">t</a>"), "\\<a href=\"http://x\">t\\</a>");
+        assert_eq!(
+            sanitize("<a href=\"http://x\">t</a>"),
+            "\\<a href=\"http://x\">t\\</a>"
+        );
     }
 
     #[test]
     fn reference_definitions() {
         assert_eq!(sanitize("[Security]: fixed X"), "\\[Security]: fixed X");
-        assert_eq!(sanitize("> [r]: http://t.example/p"), "> \\[r]: http://t.example/p");
-        assert_eq!(sanitize("- 1. [r]:\nhttp://t.example"), "- 1. [r]:\nhttp://t.example".replacen("[r]", "\\[r]", 1));
-        assert_eq!(sanitize("[r]: https://ok.example/x"), "[r]: https://ok.example/x");
+        assert_eq!(
+            sanitize("> [r]: http://t.example/p"),
+            "> \\[r]: http://t.example/p"
+        );
+        assert_eq!(
+            sanitize("- 1. [r]:\nhttp://t.example"),
+            "- 1. [r]:\nhttp://t.example".replacen("[r]", "\\[r]", 1)
+        );
+        assert_eq!(
+            sanitize("[r]: https://ok.example/x"),
+            "[r]: https://ok.example/x"
+        );
     }
 
     #[test]
@@ -389,7 +451,9 @@ mod tests {
     #[test]
     fn safe_link_check() {
         assert!(is_safe_link("https://x.example/a") && is_safe_link(" HTTPS://x.example "));
-        assert!(!is_safe_link("http://x") && !is_safe_link("file:///x") && !is_safe_link("HTTPS:// "));
+        assert!(
+            !is_safe_link("http://x") && !is_safe_link("file:///x") && !is_safe_link("HTTPS:// ")
+        );
         // byte 8 inside a multibyte char must not panic
         assert!(!is_safe_link("docs/été") && !is_safe_link("[x](docs/été)"));
         assert!(!is_safe_link("https://x\u{0}y"));
