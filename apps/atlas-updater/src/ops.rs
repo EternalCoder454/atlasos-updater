@@ -19,6 +19,18 @@ pub enum Op {
 }
 
 impl Op {
+    /// The name QML knows this operation by (`busyOp`, `errorOp`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Op::Status => "status",
+            Op::Check => "check",
+            Op::Upgrade => "download",
+            Op::Rollback => "rollback",
+            Op::CancelRollback => "cancelRollback",
+            Op::Switch(_) => "switch",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Op::Status => "Reading the system state…",
@@ -74,6 +86,41 @@ fn fixture_status(op: &Op, dir: &Path) -> Result<Status, OpError> {
     if let Some(msg) = text.strip_prefix("ERROR:") {
         return Err(OpError::Message(msg.trim().to_string()));
     }
+    // Screenshot hook: stay busy until the app quits.
+    if config::fixture_hold(op.name()) {
+        config::hold_forever();
+    }
     std::thread::sleep(std::time::Duration::from_millis(300));
     Status::from_json(&text).map_err(|e| OpError::Message(format!("Bad fixture: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_names_are_the_ones_qml_uses() {
+        let names: Vec<_> = [
+            Op::Status,
+            Op::Check,
+            Op::Upgrade,
+            Op::Rollback,
+            Op::CancelRollback,
+            Op::Switch(Channel::Stable),
+        ]
+        .iter()
+        .map(Op::name)
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "status",
+                "check",
+                "download",
+                "rollback",
+                "cancelRollback",
+                "switch"
+            ]
+        );
+    }
 }

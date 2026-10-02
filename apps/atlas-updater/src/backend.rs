@@ -13,6 +13,13 @@ pub mod qobject {
         #[qobject]
         #[qproperty(bool, busy, cxx_name = "busy")]
         #[qproperty(QString, busy_text, cxx_name = "busyText")]
+        /// The operation running now ("check", "download", "restart", "schedule",
+        /// "rollback", "cancelRollback", "switch", "checkApps", "updateApps",
+        /// "sendReport", "discardReport"), or "" when idle.
+        #[qproperty(QString, busy_op, cxx_name = "busyOp")]
+        /// The operation whose failure set `errorText` (the same names, plus
+        /// "crashSetting", "status" and "timer"); "" when `errorText` is empty.
+        #[qproperty(QString, error_op, cxx_name = "errorOp")]
         #[qproperty(bool, loaded, cxx_name = "loaded")]
         #[qproperty(QString, error_text, cxx_name = "errorText")]
         #[qproperty(QString, info_text, cxx_name = "infoText")]
@@ -38,6 +45,8 @@ pub mod qobject {
         #[qproperty(QString, notes_state, cxx_name = "notesState")]
         /// The release notes as an HTML fragment (empty when there are none).
         #[qproperty(QString, notes_html, cxx_name = "notesHtml")]
+        /// The release notes as plain text (for the accessible name).
+        #[qproperty(QString, notes_plain, cxx_name = "notesPlain")]
         #[qproperty(QString, notes_version, cxx_name = "notesVersion")]
         /// Plain-language reason when `notesState` is "error".
         #[qproperty(QString, notes_error, cxx_name = "notesError")]
@@ -231,6 +240,9 @@ pub struct BackendRust {
     available_is_rollback: bool,
     notes_state: QString,
     notes_html: QString,
+    notes_plain: QString,
+    busy_op: QString,
+    error_op: QString,
     notes_version: QString,
     notes_error: QString,
     apps_json: QString,
@@ -288,12 +300,31 @@ fn q(s: &str) -> QString {
 }
 
 fn timer_failed(mut obj: Pin<&mut qobject::Backend>) {
-    obj.as_mut().set_error_text(q(
+    obj.as_mut().set_error("timer", q(
         "Atlas Updater could not start its background timer. Update checks and scheduled restarts will not run until it is reopened.",
     ));
 }
 
 impl qobject::Backend {
+    /// Show `text` as the error of the operation `op` (a QML-side name).
+    fn set_error(mut self: Pin<&mut Self>, op: &str, text: QString) {
+        self.as_mut()
+            .set_error_op(q(if text.is_empty() { "" } else { op }));
+        self.as_mut().set_error_text(text);
+    }
+
+    /// `busyOp` follows `busy` (and `apps_busy`): set when an operation
+    /// starts, cleared by that same operation when it ends.
+    fn begin_op(mut self: Pin<&mut Self>, name: &str) {
+        self.as_mut().set_busy_op(q(name));
+    }
+
+    fn end_op(mut self: Pin<&mut Self>, name: &str) {
+        if self.busy_op().to_string() == name {
+            self.as_mut().set_busy_op(QString::default());
+        }
+    }
+
     pub fn start(mut self: Pin<&mut Self>) {
         if self.rust().started {
             return;
@@ -307,13 +338,19 @@ impl qobject::Backend {
             r.config = cfg;
             r.fixtures = fixtures;
         }
-        if let Some(at) = rc::get(RC_RESTART, "ScheduledAt").and_then(|v| v.parse::<i64>().ok()) {
+        // Fixture mode takes the schedule from `schedule.json` and leaves the
+        // user's own settings file alone.
+        let saved = match &self.rust().fixtures {
+            Some(d) => config::fixture_schedule(d),
+            None => rc::get(RC_RESTART, "ScheduledAt").and_then(|v| v.parse::<i64>().ok()),
+        };
+        if let Some(at) = saved {
             // A time that passed while we were not running is dropped: never
             // restart the machine unexpectedly at login.
             if at > schedule::unix_now() {
                 self.as_mut().set_scheduled_at(at);
                 schedule.restore_restart(at);
-            } else {
+            } else if self.rust().fixtures.is_none() {
                 rc::set(RC_RESTART, "ScheduledAt", None);
             }
         }
@@ -420,13 +457,13 @@ impl qobject::Backend {
             Ok(c) => self.spawn_op(Op::Switch(c), true),
             Err(e) => {
                 let mut this = self;
-                this.as_mut().set_error_text(q(&e.to_string()));
+                this.as_mut().set_error("switch", q(&e.to_string()));
             }
         }
     }
 
     pub fn dismiss_messages(mut self: Pin<&mut Self>) {
-        self.as_mut().set_error_text(QString::default());
+        self.as_mut().set_error("", QString::default());
         self.as_mut().set_info_text(QString::default());
     }
 
@@ -437,9 +474,10 @@ impl qobject::Backend {
             if *self.busy() {
                 return;
             }
-            self.as_mut().set_error_text(QString::default());
+            self.as_mut().set_error("", QString::default());
             self.as_mut().set_info_text(QString::default());
             self.as_mut().set_busy_text(q(op.label()));
+            self.as_mut().begin_op(op.name());
             self.as_mut().set_busy(true);
         } else {
             if self.rust().status_inflight {
@@ -468,6 +506,7 @@ impl qobject::Backend {
     fn finish_op(mut self: Pin<&mut Self>, op: Op, foreground: bool, res: Result<Status, OpError>) {
         if foreground {
             self.as_mut().set_busy(false);
+            self.as_mut().end_op(op.name());
         } else {
             self.as_mut().rust_mut().status_inflight = false;
         }
@@ -508,14 +547,14 @@ impl qobject::Backend {
                         Op::Status => "read the update state",
                     };
                     self.as_mut()
-                        .set_error_text(q(&errors::denied_text(action)));
+                        .set_error(op.name(), q(&errors::denied_text(action)));
                 }
             }
             Err(OpError::Message(m)) => {
                 // A silent read that fails before anything was ever loaded
                 // would leave "Reading the system state" up forever.
                 if foreground || !*self.loaded() {
-                    self.as_mut().set_error_text(q(&m));
+                    self.as_mut().set_error(op.name(), q(&m));
                 }
             }
         }
@@ -573,6 +612,7 @@ impl qobject::Backend {
         // Tray mode keeps no notes in memory and makes no requests.
         self.as_mut().set_notes_state(q("none"));
         self.as_mut().set_notes_html(QString::default());
+        self.as_mut().set_notes_plain(QString::default());
         self.as_mut().set_notes_version(QString::default());
         self.as_mut().set_notes_error(QString::default());
     }
@@ -596,6 +636,7 @@ impl qobject::Backend {
         if target.is_empty() {
             self.as_mut().set_notes_state(q("none"));
             self.as_mut().set_notes_html(QString::default());
+            self.as_mut().set_notes_plain(QString::default());
             self.as_mut().set_notes_version(QString::default());
             return;
         }
@@ -619,6 +660,7 @@ impl qobject::Backend {
         self.as_mut().set_notes_version(q(&target));
         self.as_mut().set_notes_state(q("loading"));
         self.as_mut().set_notes_html(QString::default());
+        self.as_mut().set_notes_plain(QString::default());
         self.as_mut().set_notes_error(QString::default());
         let template = self.rust().config.release_notes_url.clone();
         let fixtures = self.rust().fixtures.clone();
@@ -639,8 +681,9 @@ impl qobject::Backend {
                     return;
                 }
                 match res {
-                    Ok(Notes::Found(text)) => {
+                    Ok(Notes::Found(text, plain)) => {
                         obj.as_mut().set_notes_html(q(&text));
+                        obj.as_mut().set_notes_plain(q(&plain));
                         obj.as_mut().set_notes_state(q("ready"));
                     }
                     Ok(Notes::Missing) => obj.as_mut().set_notes_state(q("missing")),
@@ -703,11 +746,15 @@ impl qobject::Backend {
             return;
         }
         self.as_mut().set_apps_busy(true);
+        self.as_mut().begin_op("checkApps");
         self.as_mut().set_apps_error(QString::default());
         self.as_mut().set_apps_status(q("Looking for app updates…"));
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
         if !spawn_named("atlas-apps", move || {
+            if fixtures.is_some() && config::fixture_hold("checkApps") {
+                config::hold_forever();
+            }
             let res = guarded(|| apps::list(true, fixtures.as_deref()))
                 .unwrap_or_else(|| Err(INTERNAL.to_string()));
             let _ = qt.queue(move |obj| obj.apps_listed(res));
@@ -718,6 +765,8 @@ impl qobject::Backend {
 
     fn apps_listed(mut self: Pin<&mut Self>, res: Result<Vec<apps::Row>, String>) {
         self.as_mut().set_apps_busy(false);
+        self.as_mut().end_op("checkApps");
+        self.as_mut().end_op("updateApps");
         self.as_mut().set_apps_status(QString::default());
         match res {
             Ok(rows) => {
@@ -737,6 +786,7 @@ impl qobject::Backend {
             return;
         }
         self.as_mut().set_apps_busy(true);
+        self.as_mut().begin_op("updateApps");
         self.as_mut().set_apps_error(QString::default());
         self.as_mut().set_apps_status(q("Updating apps…"));
         let fixtures = self.rust().fixtures.clone();
@@ -744,6 +794,9 @@ impl qobject::Backend {
         let qt_fail = qt.clone();
         if !spawn_named("atlas-apps-update", move || {
             let qt_progress = qt.clone();
+            if fixtures.is_some() && config::fixture_hold("updateApps") {
+                config::hold_forever();
+            }
             let res = guarded(|| {
                 apps::update_all(fixtures.as_deref(), move |line| {
                     let _ =
@@ -755,6 +808,7 @@ impl qobject::Backend {
             let _ = qt.queue(move |mut obj| {
                 if let Err(e) = &res {
                     obj.as_mut().set_apps_busy(false);
+                    obj.as_mut().end_op("updateApps");
                     obj.as_mut().set_apps_status(QString::default());
                     obj.as_mut()
                         .set_apps_error(q(&format!("Could not update apps: {e}")));
@@ -780,14 +834,22 @@ impl qobject::Backend {
     /// happen) clears the schedule; a manual restart leaves it alone.
     fn start_restart(mut self: Pin<&mut Self>, scheduled: Option<i64>) {
         if self.rust().fixtures.is_some() {
+            if config::fixture_hold("restart") {
+                // screenshot hook: look like a restart in progress, for good
+                self.as_mut().set_busy_text(q("Restarting…"));
+                self.as_mut().begin_op("restart");
+                return;
+            }
             self.as_mut()
                 .set_info_text(q("Developer fixtures: restart skipped."));
             return;
         }
+        self.as_mut().begin_op("restart");
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         let qt_ok = qt.clone();
         let clear = move |mut obj: Pin<&mut qobject::Backend>| {
+            obj.as_mut().end_op("restart");
             if let Some(t) = scheduled
                 && *obj.scheduled_at() == t
             {
@@ -800,7 +862,8 @@ impl qobject::Backend {
             let text = format!(
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
-            obj.as_mut().set_error_text(q(&text));
+            obj.as_mut().set_error("restart", q(&text));
+            obj.as_mut().end_op("restart");
             clear(obj.as_mut());
             obj.restart_problem(q(&text));
         };
@@ -850,8 +913,10 @@ impl qobject::Backend {
             && let Err(e) = (atlas_core::crash::Settings { enabled: on }).save()
         {
             // Not saved: collection would still see "off", so do not claim "on".
-            self.as_mut()
-                .set_error_text(q(&format!("Could not save the crash report setting: {e}")));
+            self.as_mut().set_error(
+                "crashSetting",
+                q(&format!("Could not save the crash report setting: {e}")),
+            );
             return;
         }
         self.as_mut().set_crash_enabled(on);
@@ -966,8 +1031,9 @@ impl qobject::Backend {
         else {
             return;
         };
-        self.as_mut().set_error_text(QString::default());
+        self.as_mut().set_error("", QString::default());
         self.as_mut().set_busy_text(q("Sending the crash report…"));
+        self.as_mut().begin_op("sendReport");
         self.as_mut().set_busy(true);
         let fixtures = self.rust().fixtures.is_some();
         let qt = self.qt_thread();
@@ -976,6 +1042,7 @@ impl qobject::Backend {
                          id: String,
                          res: std::io::Result<()>| {
             obj.as_mut().set_busy(false);
+            obj.as_mut().end_op("sendReport");
             match res {
                 Ok(()) => {
                     obj.as_mut().drop_pending(&id);
@@ -986,19 +1053,22 @@ impl qobject::Backend {
                     }
                     obj.as_mut().set_info_text(q("Crash report sent. Thank you."));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => obj.as_mut().set_error_text(q(
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => obj.as_mut().set_error("sendReport", q(
                     "No crash report server is set up on this system, so the report can't be sent. It stays here until you decide.",
                 )),
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                    obj.as_mut().set_error_text(q("Crash reports are turned off, so nothing was sent."))
+                    obj.as_mut().set_error("sendReport", q("Crash reports are turned off, so nothing was sent."))
                 }
-                Err(e) => obj.as_mut().set_error_text(q(&format!("Could not send the crash report: {e}"))),
+                Err(e) => obj.as_mut().set_error("sendReport", q(&format!("Could not send the crash report: {e}"))),
             }
         };
         let id2 = id.clone();
         if !spawn_named("atlas-send", move || {
             let res = guarded(|| {
                 if fixtures {
+                    if config::fixture_hold("sendReport") {
+                        config::hold_forever();
+                    }
                     Ok(())
                 } else {
                     atlas_core::crash::send(&r)
@@ -1028,8 +1098,10 @@ impl qobject::Backend {
             && e.kind() != std::io::ErrorKind::NotFound
         {
             // Still on disk: keep it listed rather than let it come back later.
-            self.as_mut()
-                .set_error_text(q(&format!("Could not delete the crash report: {e}")));
+            self.as_mut().set_error(
+                "discardReport",
+                q(&format!("Could not delete the crash report: {e}")),
+            );
             return;
         }
         self.as_mut().drop_pending(&id);

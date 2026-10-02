@@ -4,8 +4,8 @@ use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Notes {
-    /// An HTML fragment from [`render`].
-    Found(String),
+    /// The HTML fragment from [`render`] and the plain text from [`render_plain`].
+    Found(String, String),
     /// No release for this version (404, missing file, empty body).
     Missing,
 }
@@ -263,6 +263,40 @@ pub fn render(md: &str) -> String {
     out
 }
 
+/// The notes as plain text for assistive technology: no markup, a line per
+/// paragraph, heading, list item and code line.
+pub fn render_plain(md: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    fn newline(out: &mut String) {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    let mut out = String::with_capacity(md.len());
+    for ev in Parser::new_ext(md, Options::ENABLE_STRIKETHROUGH) {
+        match ev {
+            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                out.push_str(&t)
+            }
+            Event::SoftBreak => out.push(' '),
+            Event::HardBreak | Event::Rule => newline(&mut out),
+            Event::Start(Tag::Item) => {
+                newline(&mut out);
+                out.push_str("- ");
+            }
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::CodeBlock
+                | TagEnd::Item
+                | TagEnd::BlockQuote(_),
+            ) => newline(&mut out),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Pulls `.body` out of a GitHub release JSON document.
 pub fn parse_body(json: &str) -> Notes {
     let body = serde_json::from_str::<serde_json::Value>(json)
@@ -270,8 +304,11 @@ pub fn parse_body(json: &str) -> Notes {
         .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_string))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    match body.map(|b| render(&b)).filter(|h| !h.trim().is_empty()) {
-        Some(h) => Notes::Found(h),
+    match body
+        .map(|b| (render(&b), b))
+        .filter(|(h, _)| !h.trim().is_empty())
+    {
+        Some((h, b)) => Notes::Found(h, render_plain(&b)),
         None => Notes::Missing,
     }
 }
@@ -546,6 +583,16 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_has_lines_and_no_markup() {
+        let md = "# Title\n\nSome **bold** and [a link](https://e.example/x) with `code`.\nSoft wrapped.\n\n- one\n- two *x*\n\n1. first\n\n```\nlet v: Vec<String>;\n```\n\n![alt text](http://e/i.png) <b>raw</b>";
+        assert_eq!(
+            render_plain(md),
+            "Title\nSome bold and a link with code. Soft wrapped.\n- one\n- two x\n- first\nlet v: Vec<String>;\nalt text <b>raw</b>"
+        );
+        assert_eq!(render_plain(""), "");
+    }
+
+    #[test]
     fn formatting_survives() {
         let o = render(
             "# T\n\n**b** *i* ~~s~~ `c`\n\n- one\n- two\n\n1. x\n\n> q\n\n---\n\n```\nlet v: Vec<String>;\n```\n\n[ok](https://e.example/a) a  \nb",
@@ -653,10 +700,13 @@ mod tests {
     #[test]
     fn body() {
         match parse_body("{\"tag_name\":\"44.1\",\"body\":\"## Changes\\n- a\\n\"}") {
-            Notes::Found(h) => assert!(
-                h.contains("<h4>Changes</h4>") && h.contains("<li>a</li>"),
-                "{h}"
-            ),
+            Notes::Found(h, p) => {
+                assert!(
+                    h.contains("<h4>Changes</h4>") && h.contains("<li>a</li>"),
+                    "{h}"
+                );
+                assert_eq!(p, "Changes\n- a");
+            }
             n => panic!("{n:?}"),
         }
         assert_eq!(parse_body(r#"{"body":null}"#), Notes::Missing);
@@ -672,7 +722,7 @@ mod tests {
         let t = format!("file://{}/{{version}}.json", dir.display());
         assert_eq!(
             fetch(&t, "44.2").unwrap(),
-            Notes::Found("<p>hello</p>\n".into())
+            Notes::Found("<p>hello</p>\n".into(), "hello".into())
         );
         assert_eq!(fetch(&t, "44.3").unwrap(), Notes::Missing);
         std::fs::remove_dir_all(dir).unwrap();
