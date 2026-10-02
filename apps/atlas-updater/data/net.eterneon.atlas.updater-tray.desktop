@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Atlas Updater (tray)
+Comment=Watches for staged AtlasOS updates
+Exec=atlas-updater --tray
+Icon=net.eterneon.atlas.updater
+Terminal=false
+NoDisplay=true
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=2
+X-KDE-StartupNotify=false

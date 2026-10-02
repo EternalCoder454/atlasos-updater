@@ -1,0 +1,20 @@
+[Global]
+IconName=net.eterneon.atlas.updater
+Comment=Atlas Updater
+Name=Atlas Updater
+DesktopEntry=net.eterneon.atlas.updater
+
+[Event/updateStaged]
+Name=Update ready
+Comment=An AtlasOS update has been downloaded and is waiting for a restart
+Action=Popup
+
+[Event/restartSoon]
+Name=Restart coming up
+Comment=A scheduled restart to finish updating is about to happen
+Action=Popup
+
+[Event/crashReport]
+Name=Crash report ready
+Comment=A crash report is waiting for your review. Nothing is sent without your say-so
+Action=Popup

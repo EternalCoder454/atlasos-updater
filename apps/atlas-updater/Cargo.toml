@@ -1,0 +1,31 @@
+[package]
+name = "atlas-updater"
+description = "Atlas Updater: system updates for AtlasOS (Kirigami UI over CXX-Qt)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+# CMake (Corrosion) links the static library into the C++ executable.
+# `rlib` is there so `cargo test` and `cargo clippy` work as usual.
+[lib]
+name = "atlas_updater"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+atlas-core = { path = "../../crates/atlas-core", features = ["flatpak"] }
+cxx = "1"
+cxx-qt = "0.10"
+cxx-qt-lib = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+tokio = { version = "1", features = ["rt", "time"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# Release notes: small blocking client, run on a worker thread.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[build-dependencies]
+cxx-qt-build = "0.10"
