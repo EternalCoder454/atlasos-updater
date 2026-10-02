@@ -10,6 +10,8 @@ Text {
 
     // The safe HTML fragment (backend.notesHtml).
     property string html
+    // The same notes as plain text, for screen readers.
+    property string plain
     signal linkClicked(string link)
 
     readonly property bool darkTheme: Kirigami.Theme.backgroundColor.hslLightness < 0.5
@@ -21,6 +23,8 @@ Text {
     readonly property string body: html.replace(/^\s*<h[1-5][^>]*>\s*What(?:'|&#39;|&#x27;|&rsquo;|\u2019)?s new[^<]*<\/h[1-5]>/i, "")
 
     text: "<style>" + css + "</style>" + body
+    Accessible.role: Accessible.StaticText
+    Accessible.name: root.plain.length > 0 ? root.plain : root.body
     textFormat: Text.RichText
     wrapMode: Text.Wrap
     color: Kirigami.Theme.textColor

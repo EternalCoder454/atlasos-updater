@@ -21,13 +21,21 @@ AtlasPage {
     title: qsTr("Updates")
 
     readonly property var apps: page.backend.appsJson.length > 0 ? JSON.parse(page.backend.appsJson) : []
-    readonly property bool hasError: page.backend.errorText.length > 0 && (!page.backend.loaded || !page.backend.busy)
-    readonly property bool downloading: page.backend.busy && page.backend.updateAvailable && !page.backend.hasStaged
+    // Errors from these operations belong to the hero; the others (apps, crash
+    // reports) stay in the banner at the top.
+    readonly property bool heroError: ["check", "download", "restart", "rollback", "cancelRollback", "switch", "status", "timer"].indexOf(page.backend.errorOp) >= 0
+    readonly property bool retryable: ["check", "status", "timer", "download"].indexOf(page.backend.errorOp) >= 0
+    readonly property bool hasError: page.backend.errorText.length > 0 && page.heroError && (!page.backend.loaded || !page.backend.busy)
+    // busyOp is only meaningful together with busy.
+    readonly property string busyOp: page.backend.busy ? page.backend.busyOp : ""
+    readonly property bool downloading: page.busyOp === "download"
+    // A change of state is running: show its own text, not "Checking".
+    readonly property bool working: page.backend.restarting === true || ["rollback", "cancelRollback", "switch"].indexOf(page.busyOp) >= 0
     readonly property bool rollbackQueued: page.backend.rollbackQueued === true
     readonly property bool availableIsRollback: page.backend.availableIsRollback === true
     // Something is waiting for a restart (an update, a switch or a go back).
     readonly property bool restartReady: page.backend.hasStaged || page.backend.restartNeeded || page.rollbackQueued
-    readonly property bool checking: (!page.backend.loaded && !page.hasError) || (page.backend.busy && !page.downloading)
+    readonly property bool checking: (!page.backend.loaded && !page.hasError) || page.busyOp === "check"
 
     function version(v, date) {
         return date.length > 0 ? qsTr("%1  (%2)").arg(v).arg(Dates.longDate(date)) : v;
@@ -124,7 +132,8 @@ AtlasPage {
     Cards {
         Layout.fillWidth: true
         backend: page.backend
-        showError: false
+        showError: !page.hasError
+        showBusy: false
     }
 
     // A crash report is waiting.
@@ -143,11 +152,14 @@ AtlasPage {
     StatusHero {
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
-        busy: page.checking || page.downloading
+        busy: page.checking || page.downloading || page.working
         tint: page.hasError ? Kirigami.Theme.negativeTextColor : (page.restartReady || page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor)
         iconName: {
             if (page.hasError) {
                 return "dialog-error";
+            }
+            if (page.working) {
+                return "view-refresh";
             }
             if (page.checking) {
                 return "view-refresh";
@@ -173,6 +185,9 @@ AtlasPage {
             if (!page.backend.loaded) {
                 return qsTr("Reading the system state…");
             }
+            if (page.working) {
+                return page.backend.restarting === true ? qsTr("Restarting…") : qsTr("Applying your change…");
+            }
             if (page.checking) {
                 return qsTr("Checking for updates…");
             }
@@ -197,7 +212,7 @@ AtlasPage {
             if (page.hasError) {
                 return page.backend.errorText;
             }
-            if (page.checking || page.downloading) {
+            if (page.checking || page.downloading || page.working) {
                 return page.backend.busyText;
             }
             var when = page.backend.scheduledAt > 0 ? " " + qsTr("Restart scheduled for %1.").arg(Dates.shortDateTime(page.backend.scheduledAt)) : "";
@@ -221,13 +236,13 @@ AtlasPage {
 
         PrimaryButton {
             text: page.rollbackQueued ? qsTr("Restart now") : qsTr("Restart to update")
-            visible: page.restartReady && !page.hasError
-            enabled: !page.backend.busy
+            visible: page.restartReady
+            enabled: !page.backend.busy && !page.working
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
             text: qsTr("Restart later…")
-            visible: page.restartReady && !page.hasError && page.backend.scheduledAt === 0
+            visible: page.restartReady && page.backend.scheduledAt === 0
             onClicked: scheduleDialog.open()
         }
         SecondaryButton {
@@ -249,16 +264,21 @@ AtlasPage {
         }
         PrimaryButton {
             text: qsTr("Try again")
-            visible: page.hasError
+            visible: page.hasError && page.retryable
             onClicked: {
-                if (!page.backend.loaded) {
-                    page.backend.refreshStatus();
-                } else if (page.backend.updateAvailable && !page.backend.hasStaged) {
+                if (page.backend.errorOp === "download") {
                     page.backend.downloadUpdate();
+                } else if (!page.backend.loaded) {
+                    page.backend.refreshStatus();
                 } else {
                     page.backend.checkForUpdate();
                 }
             }
+        }
+        SecondaryButton {
+            text: qsTr("Dismiss")
+            visible: page.hasError && !page.retryable
+            onClicked: page.backend.dismissMessages()
         }
         SecondaryButton {
             text: qsTr("Check for updates")
@@ -300,6 +320,7 @@ AtlasPage {
                 anchors.fill: parent
                 anchors.margins: Kirigami.Units.largeSpacing
                 html: page.backend.notesHtml
+                plain: page.backend.notesPlain
                 onLinkClicked: link => {
                     if (page.backend.isSafeLink(link)) {
                         Qt.openUrlExternally(link);

@@ -11,9 +11,11 @@ ColumnLayout {
     required property var backend
     // The Updates page shows the error in its hero instead.
     property bool showError: true
+    // The progress line (pages without their own busy display).
+    property bool showBusy: showError
 
     spacing: Kirigami.Units.smallSpacing
-    visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showError)
+    visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showBusy)
 
     component Banner: Rectangle {
         id: banner
@@ -76,7 +78,7 @@ ColumnLayout {
     }
     RowLayout {
         Layout.fillWidth: true
-        visible: root.backend.busy && root.showError
+        visible: root.backend.busy && root.showBusy
         spacing: Kirigami.Units.largeSpacing
         QQC2.BusyIndicator {
             running: root.backend.busy

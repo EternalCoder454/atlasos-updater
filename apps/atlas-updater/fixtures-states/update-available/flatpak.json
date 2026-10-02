@@ -1,0 +1,26 @@
+[
+ {
+  "name": "Kate",
+  "id": "org.kde.kate",
+  "branch": "stable",
+  "system": true,
+  "runtime": false,
+  "size": 24500000
+ },
+ {
+  "name": "Firefox",
+  "id": "org.mozilla.firefox",
+  "branch": "stable",
+  "system": true,
+  "runtime": false,
+  "size": 88200000
+ },
+ {
+  "name": "KDE Application Platform",
+  "id": "org.kde.Platform",
+  "branch": "6.10",
+  "system": true,
+  "runtime": true,
+  "size": 412000000
+ }
+]
