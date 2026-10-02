@@ -55,22 +55,15 @@ QQC2.ApplicationWindow {
         }
     }
 
-    // A scheduled restart did not happen.
+    // A restart did not happen. The Updates page explains it; the shell
+    // sends a notification instead when the window is not active.
     Connections {
         target: root.backend
         function onRestartProblem(text) {
-            // The tray also notifies; only interrupt a window the user is looking at.
             if (root.active) {
-                problemDialog.text = text;
-                problemDialog.open();
+                root.showPage("updates");
             }
         }
-    }
-    ConfirmDialog {
-        id: problemDialog
-        title: qsTr("Restart problem")
-        acceptText: qsTr("OK")
-        showReject: false
     }
 
     component NavItem: SidebarItem {
@@ -146,8 +139,9 @@ QQC2.ApplicationWindow {
                 NavItem {
                     page: "reports"
                     text: qsTr("Crash reports")
-                    icon.name: "data-warning"
-                    tintIcon: false
+                    // Warning colours only while reports wait for a decision.
+                    icon.name: root.backend.reportsCount > 0 ? "data-warning" : "tools-report-bug"
+                    tintIcon: root.backend.reportsCount === 0
                 }
                 NavItem {
                     page: "about"

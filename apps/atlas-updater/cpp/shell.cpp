@@ -251,6 +251,9 @@ void Shell::onRestartSoon()
 
 void Shell::onRestartProblem(const QString &text)
 {
+    if (windowIsActive()) {
+        return; // The window shows it on the Updates page.
+    }
     auto *n = new KNotification(QStringLiteral("restartFailed"));
     n->setComponentName(kComponent);
     n->setTitle(tr("Restart did not happen"));

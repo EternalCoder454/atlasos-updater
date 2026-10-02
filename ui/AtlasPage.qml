@@ -15,6 +15,13 @@ Item {
         id: scroll
         anchors.fill: parent
         contentWidth: width
+        // The scrollbar overlays the content. The desktop style would reserve
+        // its width as padding, which narrows the viewport whenever it shows
+        // and makes a binding loop on implicitWidth.
+        leftPadding: 0
+        rightPadding: 0
+        topPadding: 0
+        bottomPadding: 0
         QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
 
         // A slim overlay scrollbar instead of the classic one with arrows.
