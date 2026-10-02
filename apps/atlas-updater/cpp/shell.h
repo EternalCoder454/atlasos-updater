@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QTimer>
 
+class KNotification;
 class KStatusNotifierItem;
 class QAction;
 class QQmlApplicationEngine;
@@ -24,10 +25,15 @@ public:
     /// `page` is "updates" (default), "settings", "reports" or "sent".
     void openWindow(const QString &page = QString());
 
+    /// A tray launch arrived after the window: keep running when it closes.
+    void enableTrayMode();
+
 private Q_SLOTS:
     void updateTray();
     void onUpdateStaged(const QString &version);
     void onRestartSoon();
+    void onRestartProblem(const QString &text);
+    void onScheduleChanged();
     void onWatchedChanged(const QString &path);
     void updateCollectors();
     void onReportFound(const QString &appName, const QString &reportType);
@@ -37,6 +43,9 @@ private:
     bool windowIsActive() const;
     void watchOstree();
     void watchCollectors(bool on);
+    /// Watch each collector source, or the nearest existing parent until it
+    /// appears. Returns true if a source was newly watched.
+    bool syncCollectorPaths();
     void restartNow();
     void cancelRestart();
 
@@ -46,6 +55,8 @@ private:
     QAction *m_restartAction = nullptr;
     QAction *m_cancelAction = nullptr;
     QQmlApplicationEngine *m_engine = nullptr;
+    bool m_closing = false; // window closed, engine destruction queued
+    QPointer<KNotification> m_restartSoon;
     QPointer<QQuickWindow> m_window;
     QFileSystemWatcher m_watcher;
     QTimer m_debounce;

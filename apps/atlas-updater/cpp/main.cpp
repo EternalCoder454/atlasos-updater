@@ -6,8 +6,10 @@
 
 #include <QApplication>
 #include <QIcon>
+#include <QQmlEngine>
 #include <QQuickStyle>
 
+#include <cstdio>
 #include <cstring>
 
 // Rust, see src/lib.rs and src/crash.rs.
@@ -25,6 +27,11 @@ static void messageHandler(QtMsgType type, const QMessageLogContext &context, co
     }
     if (s_previousHandler) {
         s_previousHandler(type, context, msg);
+    } else {
+        // Qt's built-in handler is not returned by qInstallMessageHandler:
+        // print the message ourselves, so warnings and fatal errors are not lost.
+        fprintf(stderr, "%s\n", qPrintable(qFormatLogMessage(type, context, msg)));
+        fflush(stderr);
     }
 }
 
@@ -58,13 +65,18 @@ int main(int argc, char *argv[])
     KDBusService service(KDBusService::Unique);
 
     auto *backend = static_cast<QObject *>(atlas_backend_new());
+    // main() owns it: a destroyed QML engine must never delete it.
+    QQmlEngine::setObjectOwnership(backend, QQmlEngine::CppOwnership);
     int rc = 0;
     {
         Shell shell(backend, trayMode);
 
         QObject::connect(&service, &KDBusService::activateRequested, &shell, [&shell](const QStringList &arguments, const QString &) {
-            // The autostart entry (--tray) must not pop a window up.
-            if (!arguments.contains(QStringLiteral("--tray"))) {
+            // The autostart entry (--tray) must not pop a window up, but it
+            // does mean this instance is the session's tray: stay alive.
+            if (arguments.contains(QStringLiteral("--tray"))) {
+                shell.enableTrayMode();
+            } else {
                 shell.openWindow();
             }
         });

@@ -32,6 +32,8 @@ pub mod qobject {
         #[qproperty(QString, notes_state, cxx_name = "notesState")]
         #[qproperty(QString, notes_text, cxx_name = "notesText")]
         #[qproperty(QString, notes_version, cxx_name = "notesVersion")]
+        /// Plain-language reason when `notesState` is "error".
+        #[qproperty(QString, notes_error, cxx_name = "notesError")]
         #[qproperty(QString, apps_json, cxx_name = "appsJson")]
         #[qproperty(i32, apps_count, cxx_name = "appsCount")]
         #[qproperty(bool, apps_busy, cxx_name = "appsBusy")]
@@ -44,6 +46,9 @@ pub mod qobject {
         #[qproperty(QString, reports_json, cxx_name = "reportsJson")]
         #[qproperty(i32, reports_count, cxx_name = "reportsCount")]
         #[qproperty(QString, sent_json, cxx_name = "sentJson")]
+        /// `ATLAS_UPDATER_FIXTURES` is set: everything shown is fake. The UI
+        /// shows a permanent banner.
+        #[qproperty(bool, fixtures_active, cxx_name = "fixturesActive")]
         #[namespace = "atlas_updater"]
         type Backend = super::BackendRust;
 
@@ -61,6 +66,12 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "restartSoon"]
         fn restart_soon(self: Pin<&mut Backend>);
+
+        /// A scheduled restart did not happen (missed while asleep, or Plasma
+        /// refused it); the tray shows this as a notification.
+        #[qsignal]
+        #[cxx_name = "restartProblem"]
+        fn restart_problem(self: Pin<&mut Backend>, text: QString);
 
         /// Starts the scheduler thread and the first status read.
         #[qinvokable]
@@ -91,6 +102,18 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "loadNotes"]
         fn load_notes(self: Pin<&mut Backend>);
+        /// The window exists: release notes may be fetched.
+        #[qinvokable]
+        #[cxx_name = "windowOpened"]
+        fn window_opened(self: Pin<&mut Backend>);
+        /// The window is gone: forget the notes, fetch nothing more.
+        #[qinvokable]
+        #[cxx_name = "windowClosed"]
+        fn window_closed(self: Pin<&mut Backend>);
+        /// True for `https://` links: the only ones release notes may open.
+        #[qinvokable]
+        #[cxx_name = "isSafeLink"]
+        fn is_safe_link(self: &Backend, link: &QString) -> bool;
         #[qinvokable]
         #[cxx_name = "loadHistory"]
         fn load_history(self: Pin<&mut Backend>);
@@ -128,14 +151,15 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "collectReports"]
         fn collect_reports(self: Pin<&mut Backend>);
-        /// "Send": the user saw the exact data. `index` is into `reportsJson`.
+        /// "Send": the user saw the exact data. `event_id` is the report's
+        /// `eventId` in `reportsJson`.
         #[qinvokable]
         #[cxx_name = "sendReport"]
-        fn send_report(self: Pin<&mut Backend>, index: i32);
-        /// "Don't send".
+        fn send_report(self: Pin<&mut Backend>, event_id: &QString);
+        /// "Don't send". Ignored while a send is running.
         #[qinvokable]
         #[cxx_name = "discardReport"]
-        fn discard_report(self: Pin<&mut Backend>, index: i32);
+        fn discard_report(self: Pin<&mut Backend>, event_id: &QString);
     }
 
     // Lets worker threads post closures back to the Qt thread.
@@ -161,7 +185,7 @@ use cxx_qt_lib::QString;
 use serde_json::json;
 
 use crate::config::{self, Config};
-use crate::errors::OpError;
+use crate::errors::{self, OpError};
 use crate::notes::{self, Notes};
 use crate::ops::{self, Op};
 use crate::schedule::{self, Event, Schedule};
@@ -194,6 +218,7 @@ pub struct BackendRust {
     notes_state: QString,
     notes_text: QString,
     notes_version: QString,
+    notes_error: QString,
     apps_json: QString,
     apps_count: i32,
     apps_busy: bool,
@@ -206,6 +231,7 @@ pub struct BackendRust {
     reports_json: QString,
     reports_count: i32,
     sent_json: QString,
+    fixtures_active: bool,
 
     // Not exposed to QML.
     config: Config,
@@ -215,7 +241,30 @@ pub struct BackendRust {
     status_inflight: bool,
     view: View,
     pending: Vec<Report>,
+    window_open: bool,
+    /// Failed notes lookups: version and when, so a failure is not retried
+    /// on every status refresh.
+    notes_failed: Option<(String, std::time::Instant)>,
 }
+
+/// How long a failed (or missing) notes lookup is left alone.
+const NOTES_BACKOFF: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Runs `f` on a new named thread. `false` if the OS refused a thread.
+fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(f)
+        .is_ok()
+}
+
+/// Runs `f`; a panic inside becomes `None` so the caller can still report
+/// back (a dead worker must never leave a spinner on).
+fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+const INTERNAL: &str = "Atlas Updater hit an internal error. Please try again.";
 
 fn q(s: &str) -> QString {
     QString::from(s)
@@ -261,6 +310,8 @@ impl qobject::Backend {
             None => atlas_core::crash::Settings::load().enabled,
         };
         self.as_mut().set_crash_enabled(on);
+        let fix = self.rust().fixtures.is_some();
+        self.as_mut().set_fixtures_active(fix);
         if on {
             self.as_mut().collect_reports();
         }
@@ -283,6 +334,13 @@ impl qobject::Backend {
                 if *this.restart_needed() {
                     this.restart_now();
                 }
+            }
+            Event::RestartMissed => {
+                let mut this = self;
+                this.as_mut().clear_schedule_state();
+                let text = "The scheduled restart did not happen because the computer was asleep at that time. The update is still waiting. Restart when you are ready.";
+                this.as_mut().set_info_text(q(text));
+                this.restart_problem(q(text));
             }
         }
     }
@@ -340,10 +398,20 @@ impl qobject::Backend {
         }
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let res = ops::run(&op, fixtures.as_deref());
-            let _ = qt.queue(move |obj| obj.finish_op(op, foreground, res));
-        });
+        let op2 = op.clone();
+        if !spawn_named("atlas-op", move || {
+            let res = guarded(|| ops::run(&op2, fixtures.as_deref()))
+                .unwrap_or_else(|| Err(OpError::Message(INTERNAL.into())));
+            let _ = qt.queue(move |obj| obj.finish_op(op2, foreground, res));
+        }) {
+            self.finish_op(
+                op,
+                foreground,
+                Err(OpError::Message(
+                    "Could not start a worker thread. The system may be out of resources.".into(),
+                )),
+            );
+        }
     }
 
     fn finish_op(mut self: Pin<&mut Self>, op: Op, foreground: bool, res: Result<Status, OpError>) {
@@ -377,9 +445,15 @@ impl qobject::Backend {
                     self.as_mut().set_info_text(q(&msg));
                 }
             }
-            Err(OpError::Cancelled) => {}
-            Err(OpError::Message(m)) => {
+            Err(OpError::Cancelled) => {
                 if foreground {
+                    self.as_mut().set_info_text(q(errors::DENIED_TEXT));
+                }
+            }
+            Err(OpError::Message(m)) => {
+                // A silent read that fails before anything was ever loaded
+                // would leave "Reading the system state" up forever.
+                if foreground || !*self.loaded() {
                     self.as_mut().set_error_text(q(&m));
                 }
             }
@@ -413,8 +487,8 @@ impl qobject::Backend {
             rc::set(RC_NOTIFIED, "StagedDigest", Some(&staged.digest));
             self.as_mut().update_staged(q(&staged.version));
         }
-        // Notes follow the version once the window has asked for them.
-        if !self.notes_version().is_empty() {
+        // Notes follow the version, but only while a window is open.
+        if self.rust().window_open {
             self.as_mut().load_notes();
         }
         if !staged.present && !*self.restart_needed() && *self.scheduled_at() != 0 {
@@ -425,7 +499,27 @@ impl qobject::Backend {
 
     // ---- release notes ----
 
+    pub fn window_opened(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().window_open = true;
+    }
+
+    pub fn window_closed(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().window_open = false;
+        // Tray mode keeps no notes in memory and makes no requests.
+        self.as_mut().set_notes_state(q("none"));
+        self.as_mut().set_notes_text(QString::default());
+        self.as_mut().set_notes_version(QString::default());
+        self.as_mut().set_notes_error(QString::default());
+    }
+
+    pub fn is_safe_link(&self, link: &QString) -> bool {
+        notes::is_safe_link(&link.to_string())
+    }
+
     pub fn load_notes(mut self: Pin<&mut Self>) {
+        if !self.rust().window_open {
+            return;
+        }
         let v = self.rust().view.clone();
         let target = if v.staged.present {
             v.staged.version.clone()
@@ -440,28 +534,43 @@ impl qobject::Backend {
             self.as_mut().set_notes_version(QString::default());
             return;
         }
+        let same = self.notes_version().to_string() == target;
         let state = self.notes_state().to_string();
-        if self.notes_version().to_string() == target
-            && (state == "ready" || state == "loading" || state == "missing")
+        if same && (state == "ready" || state == "loading" || state == "missing") {
+            return;
+        }
+        // A failure is not retried for a while, so a rate-limited or offline
+        // machine does not hammer the server on every status refresh.
+        if same
+            && state == "error"
+            && self
+                .rust()
+                .notes_failed
+                .as_ref()
+                .is_some_and(|(ver, at)| *ver == target && at.elapsed() < NOTES_BACKOFF)
         {
             return;
         }
         self.as_mut().set_notes_version(q(&target));
         self.as_mut().set_notes_state(q("loading"));
         self.as_mut().set_notes_text(QString::default());
+        self.as_mut().set_notes_error(QString::default());
         let template = self.rust().config.release_notes_url.clone();
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let res = match &fixtures {
+        let target2 = target.clone();
+        let started = spawn_named("atlas-notes", move || {
+            let res = guarded(|| match &fixtures {
                 Some(dir) => Ok(config::read_fixture(dir, "notes.json")
                     .map(|t| notes::parse_body(&t))
                     .unwrap_or(Notes::Missing)),
-                None => notes::fetch(&template, &target),
-            };
+                None => notes::fetch(&template, &target2),
+            })
+            .unwrap_or_else(|| Err(notes::FetchError::Other("internal error".into())));
             let _ = qt.queue(move |mut obj| {
-                // Ignore an answer for a version we no longer show.
-                if obj.notes_version().to_string() != target {
+                // Ignore an answer for a version we no longer show, or after
+                // the window closed.
+                if obj.notes_version().to_string() != target2 || !obj.rust().window_open {
                     return;
                 }
                 match res {
@@ -470,10 +579,18 @@ impl qobject::Backend {
                         obj.as_mut().set_notes_state(q("ready"));
                     }
                     Ok(Notes::Missing) => obj.as_mut().set_notes_state(q("missing")),
-                    Err(_) => obj.as_mut().set_notes_state(q("error")),
+                    Err(e) => {
+                        obj.as_mut().rust_mut().notes_failed =
+                            Some((target2.clone(), std::time::Instant::now()));
+                        obj.as_mut().set_notes_error(q(&e.text()));
+                        obj.as_mut().set_notes_state(q("error"));
+                    }
                 }
             });
         });
+        if !started {
+            self.as_mut().set_notes_state(q("error"));
+        }
     }
 
     // ---- history ----
@@ -482,7 +599,7 @@ impl qobject::Backend {
         let fixtures = self.rust().fixtures.clone();
         let current = self.rust().view.current.digest.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
+        spawn_named("atlas-history", move || {
             let entries = match &fixtures {
                 Some(dir) => config::read_fixture(dir, "history.jsonl")
                     .map(|t| {
@@ -525,10 +642,13 @@ impl qobject::Backend {
         self.as_mut().set_apps_status(q("Looking for app updates…"));
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let res = apps::list(true, fixtures.as_deref());
+        if !spawn_named("atlas-apps", move || {
+            let res = guarded(|| apps::list(true, fixtures.as_deref()))
+                .unwrap_or_else(|| Err(INTERNAL.to_string()));
             let _ = qt.queue(move |obj| obj.apps_listed(res));
-        });
+        }) {
+            self.apps_listed(Err("could not start a worker thread".into()));
+        }
     }
 
     fn apps_listed(mut self: Pin<&mut Self>, res: Result<Vec<apps::Row>, String>) {
@@ -556,12 +676,17 @@ impl qobject::Backend {
         self.as_mut().set_apps_status(q("Updating apps…"));
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
+        let qt_fail = qt.clone();
+        if !spawn_named("atlas-apps-update", move || {
             let qt_progress = qt.clone();
-            let res = apps::update_all(fixtures.as_deref(), move |line| {
-                let _ = qt_progress.queue(move |mut obj| obj.as_mut().set_apps_status(q(&line)));
+            let res = guarded(|| {
+                apps::update_all(fixtures.as_deref(), move |line| {
+                    let _ =
+                        qt_progress.queue(move |mut obj| obj.as_mut().set_apps_status(q(&line)));
+                })
+                .and_then(|()| apps::list(false, fixtures.as_deref()))
             })
-            .and_then(|()| apps::list(false, fixtures.as_deref()));
+            .unwrap_or_else(|| Err(INTERNAL.to_string()));
             let _ = qt.queue(move |mut obj| {
                 if let Err(e) = &res {
                     obj.as_mut().set_apps_busy(false);
@@ -573,7 +698,10 @@ impl qobject::Backend {
                     // Fixture runs keep their list; a real run is now empty.
                 }
             });
-        });
+        }) {
+            let _ =
+                qt_fail.queue(|obj| obj.apps_listed(Err("could not start a worker thread".into())));
+        }
     }
 
     // ---- restart ----
@@ -585,19 +713,36 @@ impl qobject::Backend {
             return;
         }
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            if let Err(e) = restart::logout_and_reboot() {
-                let _ = qt.queue(move |mut obj| {
-                    obj.as_mut().set_error_text(q(&format!(
-                        "Could not ask Plasma to restart the computer: {e}"
-                    )));
-                });
+        let qt_fail = qt.clone();
+        let fail = |mut obj: Pin<&mut qobject::Backend>, e: String| {
+            // Nobody may be looking at a window (scheduled restart in the
+            // tray): tell the user with a notification as well.
+            let text = format!(
+                "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
+            );
+            obj.as_mut().set_error_text(q(&text));
+            obj.restart_problem(q(&text));
+        };
+        if !spawn_named("atlas-restart", move || {
+            let res =
+                guarded(restart::logout_and_reboot).unwrap_or_else(|| Err("internal error".into()));
+            if let Err(e) = res {
+                let _ = qt.queue(move |obj| fail(obj, e));
             }
-        });
+        }) {
+            let _ = qt_fail.queue(move |obj| fail(obj, "could not start a worker thread".into()));
+        }
     }
 
     pub fn schedule_restart(mut self: Pin<&mut Self>, at: i64) {
-        if !*self.restart_needed() || at <= schedule::unix_now() {
+        if !*self.restart_needed() {
+            self.as_mut()
+                .set_info_text(q("There is no update waiting for a restart."));
+            return;
+        }
+        if at <= schedule::unix_now() {
+            self.as_mut()
+                .set_info_text(q("That time has already passed. Pick a later time."));
             return;
         }
         rc::set(RC_RESTART, "ScheduledAt", Some(&at.to_string()));
@@ -613,28 +758,47 @@ impl qobject::Backend {
     // ---- crash reports (opt-in; see crash.rs) ----
 
     pub fn enable_crash_reports(mut self: Pin<&mut Self>, on: bool) {
-        if self.rust().fixtures.is_none() {
-            let _ = atlas_core::crash::Settings { enabled: on }.save();
+        if self.rust().fixtures.is_none()
+            && let Err(e) = (atlas_core::crash::Settings { enabled: on }).save()
+        {
+            // Not saved: collection would still see "off", so do not claim "on".
+            self.as_mut()
+                .set_error_text(q(&format!("Could not save the crash report setting: {e}")));
+            return;
         }
         self.as_mut().set_crash_enabled(on);
         if on {
             self.as_mut().collect_reports();
             self.load_reports();
+        } else {
+            // Off means off: nothing stays queued on screen.
+            self.as_mut().reports_loaded(Vec::new(), false);
+            self.as_mut().set_sent_json(q("[]"));
         }
     }
 
     pub fn load_reports(self: Pin<&mut Self>) {
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let reports = match &fixtures {
-                Some(dir) => fixture_reports(dir, "crash-pending.json"),
-                None => atlas_core::crash::pending(),
-            };
-            let has_server = fixtures.is_some()
-                && config::read_fixture(fixtures.as_deref().unwrap(), "crash-server").is_some()
-                || fixtures.is_none() && atlas_core::crash::Endpoint::load().is_some();
-            let _ = qt.queue(move |obj| obj.reports_loaded(reports, has_server));
+        spawn_named("atlas-reports", move || {
+            let (reports, has_server) = guarded(|| {
+                let reports = match &fixtures {
+                    Some(dir) => fixture_reports(dir, "crash-pending.json"),
+                    None => atlas_core::crash::pending(),
+                };
+                let has_server = match &fixtures {
+                    Some(d) => config::read_fixture(d, "crash-server").is_some(),
+                    None => atlas_core::crash::Endpoint::load().is_some(),
+                };
+                (reports, has_server)
+            })
+            .unwrap_or_default();
+            let _ = qt.queue(move |obj| {
+                // Switched off while we were reading: show nothing.
+                if *obj.crash_enabled() {
+                    obj.reports_loaded(reports, has_server);
+                }
+            });
         });
     }
 
@@ -653,14 +817,17 @@ impl qobject::Backend {
     pub fn load_sent_reports(self: Pin<&mut Self>) {
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let mut sent = match &fixtures {
-                Some(dir) => fixture_reports(dir, "crash-sent.json"),
-                None => atlas_core::crash::sent(),
-            };
-            sent.reverse(); // newest first
-            let views: Vec<_> = sent.iter().map(|r| crash::view(r, false)).collect();
-            let text = serde_json::Value::Array(views).to_string();
+        spawn_named("atlas-sent", move || {
+            let text = guarded(|| {
+                let mut sent = match &fixtures {
+                    Some(dir) => fixture_reports(dir, "crash-sent.json"),
+                    None => atlas_core::crash::sent(),
+                };
+                sent.reverse(); // newest first
+                let views: Vec<_> = sent.iter().map(|r| crash::view(r, false)).collect();
+                serde_json::Value::Array(views).to_string()
+            })
+            .unwrap_or_else(|| "[]".into());
             let _ = qt.queue(move |mut obj| obj.as_mut().set_sent_json(q(&text)));
         });
     }
@@ -671,16 +838,22 @@ impl qobject::Backend {
         }
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
+        spawn_named("atlas-collect", move || {
             if fixtures.is_some() {
                 return;
             }
-            let mut new = atlas_core::crash::collect_coredumps(None);
-            new.extend(atlas_core::crash::collect_events(None));
-            let first = new
-                .first()
-                .map(|r| (r.app_name.clone(), r.report_type.clone()));
+            let first = guarded(|| {
+                let mut new = atlas_core::crash::collect_coredumps(None);
+                new.extend(atlas_core::crash::collect_events(None));
+                new.first()
+                    .map(|r| (r.app_name.clone(), r.report_type.clone()))
+            })
+            .flatten();
             let _ = qt.queue(move |mut obj| {
+                // Switched off while collecting: no list, no notification.
+                if !*obj.crash_enabled() {
+                    return;
+                }
                 obj.as_mut().load_reports();
                 if let Some((app, kind)) = first {
                     obj.as_mut().report_found(q(&app), q(&kind));
@@ -689,57 +862,85 @@ impl qobject::Backend {
         });
     }
 
-    pub fn send_report(mut self: Pin<&mut Self>, index: i32) {
-        let Some(r) = self.rust().pending.get(index as usize).cloned() else {
+    pub fn send_report(mut self: Pin<&mut Self>, event_id: &QString) {
+        let id = event_id.to_string();
+        if *self.busy() {
+            return; // one send at a time; also blocks discard (see below)
+        }
+        let Some(r) = self
+            .rust()
+            .pending
+            .iter()
+            .find(|r| r.event_id == id)
+            .cloned()
+        else {
             return;
         };
-        if *self.busy() {
-            return;
-        }
         self.as_mut().set_error_text(QString::default());
         self.as_mut().set_busy_text(q("Sending the crash report…"));
         self.as_mut().set_busy(true);
         let fixtures = self.rust().fixtures.is_some();
         let qt = self.qt_thread();
-        std::thread::spawn(move || {
-            let res = if fixtures {
-                Ok(())
-            } else {
-                atlas_core::crash::send(&r)
-            };
-            let _ = qt.queue(move |mut obj| {
-                obj.as_mut().set_busy(false);
-                match res {
-                    Ok(()) => {
-                        obj.as_mut().drop_pending(index);
-                        obj.as_mut().set_info_text(q("Crash report sent. Thank you."));
-                    }
-                    Err(e) if e.to_string().contains("no endpoint") => obj.as_mut().set_error_text(q(
-                        "No crash report server is set up on this system, so the report can't be sent. It stays here until you decide.",
-                    )),
-                    Err(e) => obj.as_mut().set_error_text(q(&format!("Could not send the crash report: {e}"))),
+        let qt_fail = qt.clone();
+        let done = move |mut obj: Pin<&mut qobject::Backend>,
+                         id: String,
+                         res: std::io::Result<()>| {
+            obj.as_mut().set_busy(false);
+            match res {
+                Ok(()) => {
+                    obj.as_mut().drop_pending(&id);
+                    obj.as_mut().set_info_text(q("Crash report sent. Thank you."));
                 }
-            });
-        });
-    }
-
-    pub fn discard_report(self: Pin<&mut Self>, index: i32) {
-        if let Some(r) = self.rust().pending.get(index as usize) {
-            if self.rust().fixtures.is_none() {
-                let _ = atlas_core::crash::discard(r);
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => obj.as_mut().set_error_text(q(
+                    "No crash report server is set up on this system, so the report can't be sent. It stays here until you decide.",
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    obj.as_mut().set_error_text(q("Crash reports are turned off, so nothing was sent."))
+                }
+                Err(e) => obj.as_mut().set_error_text(q(&format!("Could not send the crash report: {e}"))),
             }
+        };
+        let id2 = id.clone();
+        if !spawn_named("atlas-send", move || {
+            let res = guarded(|| {
+                if fixtures {
+                    Ok(())
+                } else {
+                    atlas_core::crash::send(&r)
+                }
+            })
+            .unwrap_or_else(|| Err(std::io::Error::other(INTERNAL)));
+            let _ = qt.queue(move |obj| done(obj, id2, res));
+        }) {
+            let _ = qt_fail.queue(move |obj| {
+                done(
+                    obj,
+                    id,
+                    Err(std::io::Error::other("could not start a worker thread")),
+                )
+            });
         }
-        self.drop_pending(index);
     }
 
-    /// Remove one pending report from the list the UI shows.
-    fn drop_pending(self: Pin<&mut Self>, index: i32) {
+    pub fn discard_report(self: Pin<&mut Self>, event_id: &QString) {
+        if *self.busy() {
+            return; // a send is running: do not change the list under it
+        }
+        let id = event_id.to_string();
+        if let Some(r) = self.rust().pending.iter().find(|r| r.event_id == id)
+            && self.rust().fixtures.is_none()
+        {
+            let _ = atlas_core::crash::discard(r);
+        }
+        self.drop_pending(&id);
+    }
+
+    /// Remove one pending report, by id, from the list the UI shows.
+    fn drop_pending(self: Pin<&mut Self>, id: &str) {
         let mut this = self;
         let has_server = *this.crash_has_server();
         let mut list = this.rust().pending.clone();
-        if (index as usize) < list.len() {
-            list.remove(index as usize);
-        }
+        list.retain(|r| r.event_id != id);
         this.as_mut().reports_loaded(list, has_server);
     }
 }
@@ -748,4 +949,15 @@ fn fixture_reports(dir: &std::path::Path, name: &str) -> Vec<Report> {
     config::read_fixture(dir, name)
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_worker_is_reported_not_lost() {
+        assert_eq!(guarded(|| 7), Some(7));
+        assert_eq!(guarded(|| -> i32 { panic!("boom") }), None);
+    }
 }

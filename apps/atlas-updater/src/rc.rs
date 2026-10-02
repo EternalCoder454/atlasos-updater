@@ -4,11 +4,15 @@
 use std::path::PathBuf;
 
 pub fn path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    // XDG: relative values are ignored.
+    let abs = |k: &str| {
+        std::env::var_os(k)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let base = abs("XDG_CONFIG_HOME")
+        .or_else(|| abs("HOME").map(|h| h.join(".config")))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
     base.join("atlas-updaterrc")
 }
 
@@ -26,7 +30,12 @@ pub fn set(group: &str, key: &str, value: Option<&str>) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(&p, out);
+        // Write a temp file and rename it: a crash or a second instance
+        // writing at the same time never leaves a half-written file.
+        let tmp = p.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -39,12 +48,11 @@ pub fn get_in(text: &str, group: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         if let Some(g) = header(line) {
             in_group = g == group;
-        } else if in_group {
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim() == key {
-                    return Some(v.trim().to_string());
-                }
-            }
+        } else if in_group
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim().to_string());
         }
     }
     None
@@ -79,32 +87,32 @@ pub fn set_in(text: &str, group: &str, key: &str, value: Option<&str>) -> String
             out.push(line.to_string());
             continue;
         }
-        if in_group {
-            if let Some((k, _)) = line.split_once('=') {
-                if k.trim() == key {
-                    if !done {
-                        if let Some(l) = &new_line {
-                            out.push(l.clone());
-                        }
-                        done = true;
-                    }
-                    continue;
+        if in_group
+            && let Some((k, _)) = line.split_once('=')
+            && k.trim() == key
+        {
+            if !done {
+                if let Some(l) = &new_line {
+                    out.push(l.clone());
                 }
+                done = true;
             }
+            continue;
         }
         out.push(line.to_string());
     }
     if in_group {
         flush(&mut out, &mut done);
     }
-    if !group_seen && !done {
-        if let Some(l) = &new_line {
-            if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
-                out.push(String::new());
-            }
-            out.push(format!("[{group}]"));
-            out.push(l.clone());
+    if !group_seen
+        && !done
+        && let Some(l) = &new_line
+    {
+        if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.push(String::new());
         }
+        out.push(format!("[{group}]"));
+        out.push(l.clone());
     }
     let mut s = out.join("\n");
     if !s.is_empty() {

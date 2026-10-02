@@ -18,3 +18,8 @@ Action=Popup
 Name=Crash report ready
 Comment=A crash report is waiting for your review. Nothing is sent without your say-so
 Action=Popup
+
+[Event/restartFailed]
+Name=Restart did not happen
+Comment=A scheduled restart could not be done or was missed
+Action=Popup

@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QMenu>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
@@ -20,8 +21,10 @@ const QString kAppIcon = QStringLiteral("net.eterneon.atlas.updater");
 const QString kComponent = QStringLiteral("atlas-updater");
 const QString kOstreeRunDir = QStringLiteral("/run/ostree");
 const QString kCoredumpDir = QStringLiteral("/var/lib/systemd/coredump");
-const QString kAtlasStateDir = QStringLiteral("/var/lib/atlas-core");
 const QString kEventsFile = QStringLiteral("/var/lib/atlas-core/events.jsonl");
+// Watched in place of a source that does not exist yet.
+const QStringList kCoredumpParents = {QStringLiteral("/var/lib/systemd"), QStringLiteral("/var/lib")};
+const QStringList kEventsParents = {QStringLiteral("/var/lib/atlas-core"), QStringLiteral("/var/lib")};
 }
 
 Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
@@ -52,6 +55,8 @@ Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
     connect(m_backend, SIGNAL(scheduledAtChanged()), this, SLOT(updateTray()));
     connect(m_backend, SIGNAL(updateStaged(QString)), this, SLOT(onUpdateStaged(QString)));
     connect(m_backend, SIGNAL(restartSoon()), this, SLOT(onRestartSoon()));
+    connect(m_backend, SIGNAL(restartProblem(QString)), this, SLOT(onRestartProblem(QString)));
+    connect(m_backend, SIGNAL(scheduledAtChanged()), this, SLOT(onScheduleChanged()));
     connect(m_backend, SIGNAL(reportFound(QString,QString)), this, SLOT(onReportFound(QString,QString)));
     connect(m_backend, SIGNAL(crashEnabledChanged()), this, SLOT(updateCollectors()));
     updateTray();
@@ -117,23 +122,56 @@ void Shell::watchCollectors(bool on)
         return;
     }
     m_crashWatcher = new QFileSystemWatcher(this);
-    const auto changed = [this] { m_crashDebounce.start(); };
-    connect(m_crashWatcher, &QFileSystemWatcher::directoryChanged, this, changed);
-    connect(m_crashWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
-        // The events file may be replaced; keep watching the new one.
-        if (!m_crashWatcher->files().contains(path) && QFile::exists(path)) {
-            m_crashWatcher->addPath(path);
+    connect(m_crashWatcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString &path) {
+        // A parent only matters for noticing that a source appeared.
+        const bool newSource = syncCollectorPaths();
+        if (path == kCoredumpDir || newSource) {
+            m_crashDebounce.start();
         }
+    });
+    connect(m_crashWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
+        // The events file may be replaced (rotation): keep watching the new one.
+        syncCollectorPaths();
         m_crashDebounce.start();
     });
-    for (const QString &dir : {kCoredumpDir, kAtlasStateDir}) {
-        if (QDir(dir).exists()) {
-            m_crashWatcher->addPath(dir);
+    syncCollectorPaths();
+}
+
+bool Shell::syncCollectorPaths()
+{
+    if (!m_crashWatcher) {
+        return false;
+    }
+    bool added = false;
+    QStringList neededParents;
+    const auto watch = [&](const QString &source, const QStringList &parents) {
+        const QStringList watched = m_crashWatcher->files() + m_crashWatcher->directories();
+        if (QFileInfo::exists(source)) {
+            if (!watched.contains(source)) {
+                m_crashWatcher->addPath(source);
+                added = true;
+            }
+            return;
+        }
+        for (const QString &p : parents) {
+            if (QDir(p).exists()) {
+                neededParents << p;
+                if (!watched.contains(p)) {
+                    m_crashWatcher->addPath(p);
+                }
+                return;
+            }
+        }
+    };
+    watch(kCoredumpDir, kCoredumpParents);
+    watch(kEventsFile, kEventsParents);
+    // Parents only stand in for a missing source: drop them once not needed.
+    for (const QString &p : kCoredumpParents + kEventsParents) {
+        if (!neededParents.contains(p) && p != kCoredumpDir && m_crashWatcher->directories().contains(p)) {
+            m_crashWatcher->removePath(p);
         }
     }
-    if (QFile::exists(kEventsFile)) {
-        m_crashWatcher->addPath(kEventsFile);
-    }
+    return added;
 }
 
 void Shell::onReportFound(const QString &appName, const QString &reportType)
@@ -145,7 +183,7 @@ void Shell::onReportFound(const QString &appName, const QString &reportType)
     n->setComponentName(kComponent);
     n->setTitle(tr("Crash report ready"));
     const bool crash = reportType == QLatin1String("panic") || reportType == QLatin1String("fatal") || reportType == QLatin1String("coredump");
-    n->setText(crash ? tr("%1 closed unexpectedly. Review the crash report?").arg(appName) : tr("Something went wrong with a system update. Review the report?"));
+    n->setText(crash ? tr("%1 closed unexpectedly. Review the crash report?").arg(appName.toHtmlEscaped()) : tr("Something went wrong with a system update. Review the report?"));
     n->setIconName(QStringLiteral("tools-report-bug"));
     auto *review = n->addAction(tr("Review"));
     connect(review, &KNotificationAction::activated, this, [this] { openWindow(QStringLiteral("reports")); });
@@ -180,7 +218,7 @@ void Shell::onUpdateStaged(const QString &version)
     auto *n = new KNotification(QStringLiteral("updateStaged"));
     n->setComponentName(kComponent);
     n->setTitle(tr("Update ready"));
-    n->setText(tr("AtlasOS %1 is downloaded. Restart to finish installing it.").arg(version));
+    n->setText(tr("AtlasOS %1 is downloaded. Restart to finish installing it.").arg(version.toHtmlEscaped()));
     n->setIconName(kAppIcon);
     auto *restart = n->addAction(tr("Restart to update"));
     connect(restart, &KNotificationAction::activated, this, [this] { restartNow(); });
@@ -196,11 +234,46 @@ void Shell::onRestartSoon()
     n->setTitle(tr("Restarting in 5 minutes"));
     n->setText(tr("Your computer will restart soon to finish updating. Save your work."));
     n->setIconName(kAppIcon);
+    // The only warning before an automatic restart: it stays until the user
+    // acts, and closes itself when the restart is cancelled.
+    n->setFlags(KNotification::Persistent);
+    n->setUrgency(KNotification::CriticalUrgency);
+    m_restartSoon = n;
     auto *now = n->addAction(tr("Restart now"));
     connect(now, &KNotificationAction::activated, this, [this] { restartNow(); });
     auto *cancel = n->addAction(tr("Cancel restart"));
     connect(cancel, &KNotificationAction::activated, this, [this] { cancelRestart(); });
     n->sendEvent();
+}
+
+void Shell::onRestartProblem(const QString &text)
+{
+    auto *n = new KNotification(QStringLiteral("restartFailed"));
+    n->setComponentName(kComponent);
+    n->setTitle(tr("Restart did not happen"));
+    n->setText(text.toHtmlEscaped());
+    n->setIconName(kAppIcon);
+    n->setUrgency(KNotification::HighUrgency);
+    auto *open = n->addDefaultAction(tr("Open Atlas Updater"));
+    connect(open, &KNotificationAction::activated, this, [this] { openWindow(); });
+    n->sendEvent();
+}
+
+void Shell::onScheduleChanged()
+{
+    const bool scheduled = m_backend->property("scheduledAt").toLongLong() > 0;
+    if (!scheduled && m_restartSoon) {
+        m_restartSoon->close();
+    }
+    // Non-tray mode stays alive for a scheduled restart only.
+    if (!scheduled && !m_trayMode && !m_engine) {
+        QCoreApplication::quit();
+    }
+}
+
+void Shell::enableTrayMode()
+{
+    m_trayMode = true;
 }
 
 void Shell::restartNow()
@@ -216,6 +289,8 @@ void Shell::cancelRestart()
 void Shell::openWindow(const QString &page)
 {
     if (m_engine && m_window) {
+        // A close may have queued the engine's destruction: cancel it.
+        m_closing = false;
         m_window->show();
         m_window->raise();
         m_window->requestActivate();
@@ -225,27 +300,51 @@ void Shell::openWindow(const QString &page)
         return;
     }
     // The QML engine only exists while the window does.
-    m_engine = new QQmlApplicationEngine;
-    m_engine->setInitialProperties({
+    auto *engine = new QQmlApplicationEngine;
+    m_engine = engine;
+    m_closing = false;
+    engine->setInitialProperties({
         {QStringLiteral("backend"), QVariant::fromValue(m_backend)},
         {QStringLiteral("startPage"), page.isEmpty() ? QStringLiteral("updates") : page},
     });
-    connect(m_engine, &QQmlApplicationEngine::objectCreationFailed, this, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-    m_engine->loadFromModule(QStringLiteral("net.eterneon.atlas.updater"), QStringLiteral("Main"));
-    m_window = qobject_cast<QQuickWindow *>(m_engine->rootObjects().value(0));
+    connect(engine, &QQmlApplicationEngine::objectCreationFailed, this, [this] {
+        // A broken UI must not take the tray (and a scheduled restart) down.
+        if (m_trayMode) {
+            m_closing = true;
+            QTimer::singleShot(0, this, &Shell::destroyEngine);
+        } else {
+            QCoreApplication::exit(1);
+        }
+    }, Qt::QueuedConnection);
+    engine->loadFromModule(QStringLiteral("net.eterneon.atlas.updater"), QStringLiteral("Main"));
+    m_window = qobject_cast<QQuickWindow *>(engine->rootObjects().value(0));
     if (!m_window) {
+        // Nothing to show: do not keep a half-built engine around.
+        m_engine = nullptr;
+        delete engine;
+        if (m_trayMode) {
+            return;
+        }
+        QCoreApplication::exit(1);
         return;
     }
-    connect(m_window, &QQuickWindow::closing, this, [this] { QTimer::singleShot(0, this, &Shell::destroyEngine); });
+    connect(m_window, &QQuickWindow::closing, this, [this] {
+        m_closing = true;
+        QTimer::singleShot(0, this, &Shell::destroyEngine);
+    });
+    QMetaObject::invokeMethod(m_backend, "windowOpened");
     QMetaObject::invokeMethod(m_backend, "refreshStatus");
     QMetaObject::invokeMethod(m_backend, "loadReports");
 }
 
 void Shell::destroyEngine()
 {
-    if (!m_engine) {
+    // A second launch may have reopened the window since the close.
+    if (!m_engine || !m_closing) {
         return;
     }
+    m_closing = false;
+    QMetaObject::invokeMethod(m_backend, "windowClosed");
     QQmlApplicationEngine *engine = m_engine;
     m_engine = nullptr;
     m_window = nullptr;

@@ -7,6 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const POLL_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 pub const WARN_BEFORE_SECS: i64 = 5 * 60;
+/// A restart that is more overdue than this (the computer slept, the clock
+/// jumped) is missed, not run: a user who was away gets no surprise reboot.
+pub const GRACE_SECS: i64 = 2 * 60;
 /// While a restart is scheduled, re-check the wall clock at least this often
 /// (the monotonic sleep does not count time spent suspended).
 const WALL_RECHECK: Duration = Duration::from_secs(30);
@@ -35,6 +38,36 @@ pub enum Event {
     Poll,
     RestartWarning,
     RestartDue,
+    /// The time passed while we could not run (sleep, clock jump).
+    RestartMissed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    Missed,
+    Due,
+    Warn,
+    /// Seconds until the next thing for this restart.
+    Wait(i64),
+}
+
+/// What to do about a restart at `t` when it is `now`. The warning always
+/// comes before the restart: if we reach `t` without having warned (we slept
+/// through the warning window), the restart is missed.
+fn step(now: i64, t: i64, warned: bool) -> Step {
+    if now >= t {
+        if warned && now - t <= GRACE_SECS {
+            Step::Due
+        } else {
+            Step::Missed
+        }
+    } else if !warned && now >= t - WARN_BEFORE_SECS {
+        Step::Warn
+    } else if warned {
+        Step::Wait(t - now)
+    } else {
+        Step::Wait(t - WARN_BEFORE_SECS - now)
+    }
 }
 
 impl Schedule {
@@ -66,21 +99,24 @@ impl Schedule {
             let mut wait = next_poll.saturating_duration_since(Instant::now());
             let mut fired = None;
             if let Some(t) = guard.restart_at {
-                if now >= t {
-                    guard.restart_at = None;
-                    fired = Some(Event::RestartDue);
-                } else if !guard.warned && now >= t - WARN_BEFORE_SECS {
-                    guard.warned = true;
-                    fired = Some(Event::RestartWarning);
-                } else {
-                    let until = if guard.warned {
-                        t - now
-                    } else {
-                        t - WARN_BEFORE_SECS - now
-                    };
-                    wait = wait
-                        .min(Duration::from_secs(until.max(1) as u64))
-                        .min(WALL_RECHECK);
+                match step(now, t, guard.warned) {
+                    Step::Due => {
+                        guard.restart_at = None;
+                        fired = Some(Event::RestartDue);
+                    }
+                    Step::Missed => {
+                        guard.restart_at = None;
+                        fired = Some(Event::RestartMissed);
+                    }
+                    Step::Warn => {
+                        guard.warned = true;
+                        fired = Some(Event::RestartWarning);
+                    }
+                    Step::Wait(until) => {
+                        wait = wait
+                            .min(Duration::from_secs(until.max(1) as u64))
+                            .min(WALL_RECHECK);
+                    }
                 }
             }
             if fired.is_none() && Instant::now() >= next_poll {
@@ -102,6 +138,20 @@ impl Schedule {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn steps() {
+        let t = 10_000;
+        assert_eq!(step(t - 1000, t, false), Step::Wait(700));
+        assert_eq!(step(t - 299, t, false), Step::Warn);
+        assert_eq!(step(t - 299, t, true), Step::Wait(299));
+        assert_eq!(step(t, t, true), Step::Due);
+        assert_eq!(step(t + GRACE_SECS, t, true), Step::Due);
+        // slept through: never a surprise reboot
+        assert_eq!(step(t + GRACE_SECS + 1, t, true), Step::Missed);
+        assert_eq!(step(t + 5, t, false), Step::Missed);
+        assert_eq!(step(t + 3 * 3600, t, true), Step::Missed);
+    }
 
     #[test]
     fn due_restart_fires_and_clears() {
