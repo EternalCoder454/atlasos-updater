@@ -49,8 +49,8 @@ QQC2.ApplicationWindow {
         if (name === currentPage) {
             return;
         }
-        if (name === "sent" && (currentPage === "settings" || currentPage === "reports")) {
-            sentFrom = currentPage;
+        if (name === "sent") {
+            sentFrom = currentPage === "settings" ? "settings" : "reports";
         }
         var c = pages[name] ? pages[name] : updatesPage;
         currentPage = pages[name] ? name : "updates";
