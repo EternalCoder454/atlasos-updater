@@ -49,6 +49,8 @@ Summary:        Shared library and system helper for Atlas apps
 Requires:       bootc
 Requires:       polkit
 Requires:       dbus-common
+# Crash reports are posted with curl (only when the user sends one).
+Requires:       curl
 %{?systemd_requires}
 
 %description -n atlas-core
@@ -126,7 +128,7 @@ DESTDIR=%{buildroot} cmake --install %{_vpath_builddir}/app
 %{_datadir}/polkit-1/actions/net.eterneon.atlas.system.policy
 %{_datadir}/polkit-1/rules.d/50-atlas-system.rules
 %{_datadir}/atlas/crash-reporting.toml
-%config %{_sysconfdir}/dnf/protected.d/atlas.conf
+%config(noreplace) %{_sysconfdir}/dnf/protected.d/atlas.conf
 
 %if %{with app}
 %files -n atlas-updater
