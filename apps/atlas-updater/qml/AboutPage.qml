@@ -42,7 +42,7 @@ AtlasPage {
     }
 
     Section {
-        title: qsTr("Privacy")
+        title: qsTr("About")
         footer: qsTr("Atlas Updater collects nothing. Crash reports are off unless you turn them on. Each report is shown to you before it's sent.")
         SectionRow {
             title: qsTr("Licence")

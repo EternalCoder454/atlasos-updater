@@ -12,6 +12,9 @@ QQC2.Popup {
     property string acceptText: qsTr("OK")
     property string rejectText: qsTr("Cancel")
     property bool showReject: true
+    // Destructive dialogs start on Cancel; informational ones on the main button.
+    property bool focusReject: false
+    property bool closeOnAccept: true
     default property alias body: bodyColumn.data
 
     signal accepted
@@ -23,6 +26,8 @@ QQC2.Popup {
     closePolicy: QQC2.Popup.CloseOnEscape | QQC2.Popup.CloseOnPressOutside
     width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 0, Kirigami.Units.gridUnit * 25)
     padding: Math.round(Kirigami.Units.gridUnit * 1.3)
+    height: Math.min(implicitHeight, parent ? parent.height - Kirigami.Units.gridUnit * 2 : implicitHeight)
+    onOpened: (dialog.focusReject && dialog.showReject ? rejectButton : acceptButton).forceActiveFocus()
 
     enter: Transition {
         NumberAnimation {
@@ -53,6 +58,8 @@ QQC2.Popup {
     }
 
     contentItem: ColumnLayout {
+        Accessible.role: Accessible.Dialog
+        Accessible.name: dialog.title
         spacing: Kirigami.Units.largeSpacing
         QQC2.Label {
             Layout.fillWidth: true
@@ -84,15 +91,19 @@ QQC2.Popup {
                 Layout.fillWidth: true
             }
             SecondaryButton {
+                id: rejectButton
                 visible: dialog.showReject
                 text: dialog.rejectText
                 onClicked: dialog.close()
             }
             PrimaryButton {
+                id: acceptButton
                 text: dialog.acceptText
                 onClicked: {
                     dialog.accepted();
-                    dialog.close();
+                    if (dialog.closeOnAccept) {
+                        dialog.close();
+                    }
                 }
             }
         }

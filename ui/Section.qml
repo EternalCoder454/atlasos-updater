@@ -41,15 +41,16 @@ ColumnLayout {
         }
     }
 
-    QQC2.Label {
+    Text {
         visible: root.footer.length > 0
         Layout.fillWidth: true
         Layout.leftMargin: Kirigami.Units.largeSpacing
         Layout.rightMargin: Kirigami.Units.largeSpacing
         text: root.footer
         wrapMode: Text.Wrap
-        font: Kirigami.Theme.smallFont
-        opacity: 0.65
+        font.family: Kirigami.Theme.defaultFont.family
+        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 0.92
+        color: Qt.alpha(Kirigami.Theme.textColor, 0.65)
         textFormat: Text.PlainText
     }
 }

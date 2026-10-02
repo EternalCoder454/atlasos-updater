@@ -13,6 +13,7 @@ ColumnLayout {
     property bool showError: true
 
     spacing: Kirigami.Units.smallSpacing
+    visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showError)
 
     component Banner: Rectangle {
         id: banner
@@ -22,6 +23,8 @@ ColumnLayout {
         property bool dismissable: true
         Layout.fillWidth: true
         visible: message.length > 0
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: message
         implicitHeight: bannerRow.implicitHeight + Kirigami.Units.largeSpacing * 2
         radius: 10
         color: Qt.alpha(tint, 0.14)

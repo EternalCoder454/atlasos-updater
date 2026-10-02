@@ -13,12 +13,20 @@ AtlasPage {
     required property var backend
 
     signal openReports
+    signal appsChecked
+
+    // Set by Main: when the app list was last checked (ms since the epoch).
+    property double lastAppsCheck: 0
 
     title: qsTr("Updates")
 
     readonly property var apps: page.backend.appsJson.length > 0 ? JSON.parse(page.backend.appsJson) : []
     readonly property bool hasError: page.backend.errorText.length > 0 && (!page.backend.loaded || !page.backend.busy)
     readonly property bool downloading: page.backend.busy && page.backend.updateAvailable && !page.backend.hasStaged
+    readonly property bool rollbackQueued: page.backend.rollbackQueued === true
+    readonly property bool availableIsRollback: page.backend.availableIsRollback === true
+    // Something is waiting for a restart (an update, a switch or a go back).
+    readonly property bool restartReady: page.backend.hasStaged || page.backend.restartNeeded || page.rollbackQueued
     readonly property bool checking: (!page.backend.loaded && !page.hasError) || (page.backend.busy && !page.downloading)
 
     function version(v, date) {
@@ -27,7 +35,10 @@ AtlasPage {
 
     Component.onCompleted: {
         backend.loadNotes();
-        backend.checkApps();
+        if (Date.now() - page.lastAppsCheck > 10 * 60 * 1000) {
+            page.appsChecked();
+            backend.checkApps();
+        }
     }
 
     // The staged/available version can change under us (inotify, a check).
@@ -46,21 +57,37 @@ AtlasPage {
         title: qsTr("Restart later")
         text: qsTr("Atlas Updater restarts your computer at this time. You get a notification 5 minutes before, and apps get to save their work first.")
         acceptText: qsTr("Schedule restart")
+        closeOnAccept: false
+        property string problem: ""
         onAccepted: {
             var d = new Date();
             if (dayBox.currentIndex === 1) {
                 d.setDate(d.getDate() + 1);
             }
             d.setHours(hourSpin.value, minuteSpin.value, 0, 0);
+            if (d.getTime() <= Date.now()) {
+                scheduleDialog.problem = qsTr("That time has already passed. Pick a later time.");
+                return;
+            }
             page.backend.scheduleRestart(Math.floor(d.getTime() / 1000));
+            scheduleDialog.close();
         }
         onAboutToShow: {
+            scheduleDialog.problem = "";
             var d = new Date(Date.now() + 60 * 60 * 1000);
             dayBox.currentIndex = d.getDate() !== new Date().getDate() ? 1 : 0;
             hourSpin.value = d.getHours();
             minuteSpin.value = 0;
         }
 
+        QQC2.Label {
+            Layout.fillWidth: true
+            visible: scheduleDialog.problem.length > 0
+            text: scheduleDialog.problem
+            color: Kirigami.Theme.negativeTextColor
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.AlertMessage
+        }
         RowLayout {
             spacing: Kirigami.Units.largeSpacing
             QQC2.ComboBox {
@@ -98,11 +125,15 @@ AtlasPage {
     }
 
     // A crash report is waiting.
-    SecondaryButton {
-        Layout.alignment: Qt.AlignLeft
+    Section {
         visible: page.backend.reportsCount > 0
-        text: qsTr("A crash report is waiting. Review it")
-        onClicked: page.openReports()
+        SectionRow {
+            iconName: "data-warning"
+            title: qsTr("%n crash report(s) waiting", "", page.backend.reportsCount)
+            subtitle: qsTr("Review them. Nothing is sent unless you say so.")
+            chevron: true
+            onClicked: page.openReports()
+        }
     }
 
     // ---- the system ----
@@ -110,7 +141,7 @@ AtlasPage {
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         busy: page.checking || page.downloading
-        tint: page.hasError ? Kirigami.Theme.negativeTextColor : (page.backend.hasStaged ? Kirigami.Theme.highlightColor : (page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor))
+        tint: page.hasError ? Kirigami.Theme.negativeTextColor : (page.restartReady || page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor)
         iconName: {
             if (page.hasError) {
                 return "dialog-error";
@@ -121,7 +152,10 @@ AtlasPage {
             if (page.downloading) {
                 return "download";
             }
-            if (page.backend.hasStaged) {
+            if (page.rollbackQueued) {
+                return "edit-undo";
+            }
+            if (page.restartReady) {
                 return "system-reboot";
             }
             if (page.backend.updateAvailable) {
@@ -131,7 +165,7 @@ AtlasPage {
         }
         headline: {
             if (page.hasError) {
-                return page.backend.loaded ? qsTr("Could not check for updates") : qsTr("Could not read the system state");
+                return page.backend.loaded ? qsTr("Something went wrong") : qsTr("Could not read the system state");
             }
             if (!page.backend.loaded) {
                 return qsTr("Reading the system state…");
@@ -142,8 +176,14 @@ AtlasPage {
             if (page.downloading) {
                 return qsTr("Downloading %1…").arg(page.backend.availableVersion);
             }
-            if (page.backend.hasStaged) {
+            if (page.rollbackQueued) {
+                return qsTr("Restart to go back to %1").arg(page.backend.rollbackTarget);
+            }
+            if (page.restartReady) {
                 return qsTr("Restart to finish updating");
+            }
+            if (page.backend.updateAvailable && page.availableIsRollback) {
+                return qsTr("You went back from version %1").arg(page.backend.availableVersion);
             }
             if (page.backend.updateAvailable) {
                 return qsTr("AtlasOS %1 is available").arg(page.backend.availableVersion);
@@ -157,8 +197,18 @@ AtlasPage {
             if (page.checking || page.downloading) {
                 return page.backend.busyText;
             }
+            var when = page.backend.scheduledAt > 0 ? " " + qsTr("Restart scheduled for %1.").arg(Dates.shortDateTime(page.backend.scheduledAt)) : "";
+            if (page.rollbackQueued) {
+                return qsTr("The previous version starts after the restart.") + when;
+            }
             if (page.backend.hasStaged) {
-                return page.backend.scheduledAt > 0 ? qsTr("Version %1 is ready. Restart scheduled for %2.").arg(page.backend.stagedVersion).arg(Dates.shortDateTime(page.backend.scheduledAt)) : qsTr("Version %1 is downloaded and waits for a restart.").arg(page.backend.stagedVersion);
+                return qsTr("Version %1 is downloaded and waits for a restart.").arg(page.backend.stagedVersion) + when;
+            }
+            if (page.restartReady) {
+                return qsTr("A restart finishes the change you made.") + when;
+            }
+            if (page.backend.updateAvailable && page.availableIsRollback) {
+                return qsTr("It won't download on its own; download it again if you like.");
             }
             if (page.backend.updateAvailable) {
                 return qsTr("It can be downloaded now. You are on %1.").arg(page.backend.currentVersion);
@@ -168,17 +218,14 @@ AtlasPage {
 
         PrimaryButton {
             text: qsTr("Restart to update")
-            visible: page.backend.hasStaged || page.backend.restartNeeded
+            visible: page.restartReady && !page.hasError
             enabled: !page.backend.busy
             onClicked: page.backend.restartNow()
         }
-        MenuButton {
+        SecondaryButton {
             text: qsTr("Restart later…")
-            visible: page.backend.restartNeeded && page.backend.scheduledAt === 0
-            QQC2.MenuItem {
-                text: qsTr("Choose a time…")
-                onTriggered: scheduleDialog.open()
-            }
+            visible: page.restartReady && !page.hasError && page.backend.scheduledAt === 0
+            onClicked: scheduleDialog.open()
         }
         SecondaryButton {
             text: qsTr("Cancel scheduled restart")
@@ -187,18 +234,32 @@ AtlasPage {
         }
         PrimaryButton {
             text: qsTr("Download update")
-            visible: page.backend.updateAvailable && !page.backend.hasStaged
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && !page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
+            enabled: !page.backend.busy
+            onClicked: page.backend.downloadUpdate()
+        }
+        SecondaryButton {
+            text: qsTr("Download anyway")
+            visible: page.backend.updateAvailable && !page.backend.hasStaged && page.availableIsRollback && !page.hasError && !page.checking && !page.downloading
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
         PrimaryButton {
             text: qsTr("Try again")
             visible: page.hasError
-            onClicked: page.backend.checkForUpdate()
+            onClicked: {
+                if (!page.backend.loaded) {
+                    page.backend.refreshStatus();
+                } else if (page.backend.updateAvailable && !page.backend.hasStaged) {
+                    page.backend.downloadUpdate();
+                } else {
+                    page.backend.checkForUpdate();
+                }
+            }
         }
         SecondaryButton {
             text: qsTr("Check for updates")
-            visible: !page.hasError && !page.backend.hasStaged && !page.backend.restartNeeded
+            visible: !page.hasError && !page.restartReady
             enabled: !page.backend.busy
             onClicked: page.backend.checkForUpdate()
         }
@@ -234,7 +295,7 @@ AtlasPage {
                 id: notes
                 anchors.fill: parent
                 anchors.margins: Kirigami.Units.largeSpacing
-                markdown: page.backend.notesText
+                html: page.backend.notesHtml
                 onLinkClicked: link => {
                     if (page.backend.isSafeLink(link)) {
                         Qt.openUrlExternally(link);

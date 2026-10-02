@@ -26,6 +26,7 @@ AtlasPage {
         title: qsTr("Switch to the %1 channel?").arg(page.choice === "testing" ? qsTr("Testing") : qsTr("Stable"))
         text: qsTr("The new channel's latest version downloads and waits for a restart. Your files and settings stay as they are.")
         acceptText: qsTr("Switch channel")
+        focusReject: true
         onAccepted: page.backend.switchChannel(page.choice)
     }
 
@@ -42,6 +43,7 @@ AtlasPage {
             title: qsTr("Stable")
             subtitle: qsTr("A new version about once a week. Recommended.")
             clickable: true
+            radio: true
             checkmark: page.choice === "stable"
             Accessible.role: Accessible.RadioButton
             Accessible.checked: page.choice === "stable"
@@ -51,6 +53,7 @@ AtlasPage {
             title: qsTr("Testing")
             subtitle: qsTr("A new version every day. You get changes first, and things may break more often.")
             clickable: true
+            radio: true
             checkmark: page.choice === "testing"
             Accessible.role: Accessible.RadioButton
             Accessible.checked: page.choice === "testing"
@@ -64,7 +67,7 @@ AtlasPage {
         Item {
             Layout.fillWidth: true
         }
-        PrimaryButton {
+        SecondaryButton {
             text: qsTr("Restart to update")
             visible: page.backend.restartNeeded
             enabled: !page.backend.busy

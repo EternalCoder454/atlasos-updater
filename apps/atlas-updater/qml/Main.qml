@@ -21,7 +21,13 @@ QQC2.ApplicationWindow {
     visible: true
     color: Kirigami.Theme.backgroundColor
 
+    LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
+    LayoutMirroring.childrenInherit: true
+
     property string currentPage: ""
+    // When the app list was last checked, so revisiting Updates does not run a
+    // Flatpak check every time.
+    property double lastAppsCheck: 0
     // Icons only when the window is narrow.
     readonly property bool compact: width < Kirigami.Units.gridUnit * 38
 
@@ -53,8 +59,11 @@ QQC2.ApplicationWindow {
     Connections {
         target: root.backend
         function onRestartProblem(text) {
-            problemDialog.text = text;
-            problemDialog.open();
+            // The tray also notifies; only interrupt a window the user is looking at.
+            if (root.active) {
+                problemDialog.text = text;
+                problemDialog.open();
+            }
         }
     }
     ConfirmDialog {
@@ -137,7 +146,8 @@ QQC2.ApplicationWindow {
                 NavItem {
                     page: "reports"
                     text: qsTr("Crash reports")
-                    icon.name: "dialog-warning"
+                    icon.name: "data-warning"
+                    tintIcon: false
                 }
                 NavItem {
                     page: "about"
@@ -186,6 +196,8 @@ QQC2.ApplicationWindow {
         id: updatesPage
         UpdatesPage {
             backend: root.backend
+            lastAppsCheck: root.lastAppsCheck
+            onAppsChecked: root.lastAppsCheck = Date.now()
             onOpenReports: root.showPage("reports")
         }
     }

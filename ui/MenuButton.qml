@@ -8,12 +8,12 @@ SecondaryButton {
 
     default property alias items: menu.contentData
 
-    rightPadding: leftPadding + Kirigami.Units.iconSizes.small
+    rightPadding: control.mirrored ? leftPadding : leftPadding + Kirigami.Units.iconSizes.small
+    leftPadding: control.mirrored ? Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + Kirigami.Units.iconSizes.small : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     onClicked: menu.popup(control, 0, control.height + 4)
 
     Kirigami.Icon {
-        anchors.right: parent.right
-        anchors.rightMargin: Kirigami.Units.smallSpacing + 2
+        x: control.mirrored ? Kirigami.Units.smallSpacing + 2 : parent.width - width - Kirigami.Units.smallSpacing - 2
         anchors.verticalCenter: parent.verticalCenter
         source: "arrow-down"
         isMask: true

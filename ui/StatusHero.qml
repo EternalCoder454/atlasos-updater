@@ -90,10 +90,25 @@ ColumnLayout {
         text: root.subtitle
         textFormat: Text.PlainText
     }
-    RowLayout {
+    // Actions sit side by side when they fit, and stack when they do not.
+    GridLayout {
         id: actionRow
         Layout.alignment: Qt.AlignHCenter
         Layout.topMargin: Kirigami.Units.smallSpacing
-        spacing: Kirigami.Units.largeSpacing
+        columnSpacing: Kirigami.Units.largeSpacing
+        rowSpacing: Kirigami.Units.smallSpacing
+        columns: root.sideBySide ? 100 : 1
     }
+    readonly property real wideWidth: {
+        var w = 0, n = 0;
+        for (var i = 0; i < actionRow.children.length; ++i) {
+            var c = actionRow.children[i];
+            if (c.visible) {
+                w += c.implicitWidth;
+                n++;
+            }
+        }
+        return w + Math.max(0, n - 1) * Kirigami.Units.largeSpacing;
+    }
+    readonly property bool sideBySide: wideWidth <= root.width
 }

@@ -15,3 +15,15 @@ function longDate(iso) {
 function shortDateTime(secs) {
     return new Date(secs * 1000).toLocaleString(Qt.locale(), Qt.locale().dateTimeFormat(1)) // 1 = Locale.ShortFormat;
 }
+
+// Compact numeric date for tight places (button labels).
+function shortDate(iso) {
+    if (!iso) {
+        return "";
+    }
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) {
+        return iso;
+    }
+    return d.toLocaleDateString(Qt.locale(), Qt.locale().dateFormat(1)) // 1 = Locale.ShortFormat;
+}

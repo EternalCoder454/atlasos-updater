@@ -10,12 +10,18 @@ T.AbstractButton {
     property bool selected: false
     // Icon only (narrow windows); the text becomes the tooltip and accessible name.
     property bool compact: false
+    // Tint a monochrome icon with the accent; false keeps a coloured icon as is.
+    property bool tintIcon: true
 
     implicitHeight: Math.round(Kirigami.Units.gridUnit * 2.1)
     implicitWidth: compact ? implicitHeight + Kirigami.Units.smallSpacing : Kirigami.Units.gridUnit * 10
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
     Accessible.name: control.text
+    Accessible.checkable: true
+    Accessible.checked: control.selected
+    Keys.onReturnPressed: control.clicked()
+    Keys.onEnterPressed: control.clicked()
 
     background: Rectangle {
         radius: 8
@@ -40,18 +46,19 @@ T.AbstractButton {
             Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
             Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
             source: control.icon.name
-            isMask: true
+            isMask: control.tintIcon
             color: Kirigami.Theme.highlightColor
         }
         Text {
             visible: !control.compact
             Layout.fillWidth: true
             text: control.text
-            font: Kirigami.Theme.defaultFont
+            font.family: Kirigami.Theme.defaultFont.family
+            font.pointSize: Kirigami.Theme.defaultFont.pointSize
+            font.weight: Font.Medium
             textFormat: Text.PlainText
             elide: Text.ElideRight
             color: Kirigami.Theme.textColor
-            Component.onCompleted: font.weight = Font.Medium
         }
         Item {
             Layout.fillWidth: control.compact

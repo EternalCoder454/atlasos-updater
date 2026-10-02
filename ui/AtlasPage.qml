@@ -14,7 +14,8 @@ Item {
     QQC2.ScrollView {
         id: scroll
         anchors.fill: parent
-        contentWidth: availableWidth
+        contentWidth: width
+        QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
 
         // A slim overlay scrollbar instead of the classic one with arrows.
         QQC2.ScrollBar.vertical: QQC2.ScrollBar {
@@ -39,7 +40,7 @@ Item {
         }
 
         Item {
-            width: scroll.availableWidth
+            width: scroll.width
             implicitHeight: col.implicitHeight + Kirigami.Units.gridUnit * 3
 
             ColumnLayout {

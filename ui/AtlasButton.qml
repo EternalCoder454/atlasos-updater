@@ -19,6 +19,8 @@ T.AbstractButton {
     scale: control.down && control.enabled ? 0.97 : 1
 
     Accessible.name: control.text
+    Keys.onReturnPressed: if (enabled) control.clicked()
+    Keys.onEnterPressed: if (enabled) control.clicked()
 
     Behavior on scale {
         NumberAnimation {
@@ -48,8 +50,8 @@ T.AbstractButton {
                 anchors.verticalCenter: parent.verticalCenter
                 text: control.text
                 font: Kirigami.Theme.defaultFont
-                color: control.prominent ? Kirigami.Theme.highlightedTextColor : control.textTint
-                opacity: control.enabled ? 1 : 0.45
+                color: control.prominent && control.enabled ? Kirigami.Theme.highlightedTextColor : control.textTint
+                opacity: control.enabled ? 1 : 0.75
                 textFormat: Text.PlainText // no mnemonics
             }
         }
@@ -60,7 +62,7 @@ T.AbstractButton {
         color: {
             if (control.prominent) {
                 if (!control.enabled) {
-                    return Qt.alpha(control.accent, 0.35);
+                    return Qt.alpha(control.textTint, 0.12);
                 }
                 return control.down ? Qt.darker(control.accent, 1.2) : control.hovered ? Qt.lighter(control.accent, 1.12) : control.accent;
             }

@@ -24,16 +24,15 @@ AtlasPage {
         title: qsTr("What was sent")
         acceptText: qsTr("Close")
         showReject: false
-        width: Math.min(parent.width - Kirigami.Units.gridUnit * 2, Kirigami.Units.gridUnit * 36)
+        width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 0, Kirigami.Units.gridUnit * 36)
 
         QQC2.ScrollView {
             Layout.fillWidth: true
-            Layout.preferredHeight: Kirigami.Units.gridUnit * 18
+            Layout.preferredHeight: Math.min(Kirigami.Units.gridUnit * 18, payloadDialog.parent ? payloadDialog.parent.height * 0.5 : 100)
             QQC2.TextArea {
                 readOnly: true
                 text: payloadDialog.payload
-                font.family: "monospace"
-                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                font: Kirigami.Theme.fixedWidthFont
                 wrapMode: TextEdit.NoWrap
                 Accessible.name: qsTr("Sent data")
             }

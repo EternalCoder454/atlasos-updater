@@ -13,6 +13,8 @@ QQC2.ApplicationWindow {
     height: Kirigami.Units.gridUnit * 30
     visible: true
     color: Kirigami.Theme.backgroundColor
+    LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
+    LayoutMirroring.childrenInherit: true
 
     MainPage {
         anchors.fill: parent

@@ -90,10 +90,10 @@ AtlasPage {
                         QQC2.TextArea {
                             readOnly: true
                             text: card.modelData.stacktrace
-                            font.family: "monospace"
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
+                            font: Kirigami.Theme.fixedWidthFont
                             wrapMode: TextEdit.NoWrap
                             background: null
+                            padding: Kirigami.Units.smallSpacing
                             Accessible.name: qsTr("Stack trace")
                         }
                     }
@@ -105,6 +105,8 @@ AtlasPage {
                     title: card.showPayload ? qsTr("Hide exact data") : qsTr("Show exact data")
                     subtitle: qsTr("Exactly what would be sent")
                     chevron: true
+                    disclosure: true
+                    expanded: card.showPayload
                     onClicked: card.showPayload = !card.showPayload
                 }
                 Item {
@@ -117,10 +119,10 @@ AtlasPage {
                         QQC2.TextArea {
                             readOnly: true
                             text: card.modelData.payload
-                            font.family: "monospace"
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
+                            font: Kirigami.Theme.fixedWidthFont
                             wrapMode: TextEdit.NoWrap
                             background: null
+                            padding: Kirigami.Units.smallSpacing
                             Accessible.name: qsTr("Exact data")
                         }
                     }
@@ -142,11 +144,10 @@ AtlasPage {
                 }
                 TextButton {
                     text: qsTr("Report on GitHub instead")
-                    visible: card.modelData.githubUrl.length > 0
+                    visible: card.modelData.githubUrl.length > 0 && page.backend.isSafeLink(card.modelData.githubUrl)
+                    enabled: !page.backend.busy
                     onClicked: {
-                        if (page.backend.isSafeLink(card.modelData.githubUrl)) {
-                            Qt.openUrlExternally(card.modelData.githubUrl);
-                        }
+                        Qt.openUrlExternally(card.modelData.githubUrl);
                         page.backend.discardReport(card.modelData.eventId);
                     }
                 }

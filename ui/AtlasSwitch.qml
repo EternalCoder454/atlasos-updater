@@ -31,7 +31,7 @@ T.Switch {
             height: 20
             radius: 10
             y: 2
-            x: control.checked ? parent.width - width - 2 : 2
+            x: (control.checked !== control.mirrored) ? parent.width - width - 2 : 2
             color: "white"
             Behavior on x {
                 NumberAnimation {

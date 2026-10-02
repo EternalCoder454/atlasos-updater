@@ -13,6 +13,8 @@ T.AbstractButton {
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
     Accessible.name: control.text
+    Keys.onReturnPressed: if (enabled) control.clicked()
+    Keys.onEnterPressed: if (enabled) control.clicked()
 
     contentItem: Text {
         id: label
