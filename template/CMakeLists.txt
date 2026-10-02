@@ -21,6 +21,10 @@ set_target_properties(template-app PROPERTIES OUTPUT_NAME atlas-app-template)
 
 # qt_add_qml_module compiles the QML to C++ with qmlcachegen at build time and
 # embeds it in the executable: no .qml files are read at run time.
+# The shared Atlas look. When you copy this template out of the repo, copy ../ui
+# next to it (or point this at wherever Atlas.Ui lives).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../ui atlas-ui)
+
 qt_add_qml_module(template-app
     URI net.eterneon.atlas.apptemplate
     VERSION 1.0
@@ -30,7 +34,7 @@ qt_add_qml_module(template-app
 )
 
 target_link_libraries(template-app PRIVATE
-    atlas_app_template
+    atlas_app_template atlas-ui atlas-uiplugin
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets)
 
 install(TARGETS template-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
