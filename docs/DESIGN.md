@@ -201,9 +201,30 @@ default; when off nothing is collected or written):
   a timestamp and the report type. Never: core dumps, usernames, hostname,
   MAC/IP addresses, serials, installed apps, file contents, command lines,
   environment, working directory.
-- **Scrubbing.** `/home/<name>` and `/var/home/<name>` become `.../USER`, the
-  username `USER`, the hostname `HOST`; MAC and IP addresses are removed;
-  panic messages also lose paths into user data.
+- **Scrubbing.** Case-insensitive. `/home/<name>` and `/var/home/<name>`
+  become `.../USER`; the user name, full name (GECOS), `$HOME` and the host
+  names (kernel, static, pretty; first label too) become `USER`/`HOST`
+  (names of 4+ characters anywhere, shorter ones only at word boundaries);
+  MAC and IP addresses (IPv6 with zones, MAC-named interfaces), 32-hex and
+  UUID tokens become placeholders. Messages and stack traces also lose any
+  path into user data (`/home`, `/run/user`, `/run/media`, `/tmp`, `file://`,
+  `~/`, ...). Stored traces keep only frame lines and thread headers.
+- **events.jsonl is system-wide.** It is world-readable and has no user, so
+  the helper scrubs the `error` text fully (same scrubber, paths and
+  addresses included) before writing, and `collect_events` scrubs every
+  string again when it copies one into a report.
+- **First opt-in.** Turning reporting on (or finding no marker) sets the
+  coredump and event markers to "now": nothing from before the opt-in is ever
+  queued. The journal is read with `--all`, `--output-fields` limited to the
+  fields above, and `--since` from the marker.
+- **Limits.** Panic reports: at most 5 an hour per app, the same top frames
+  once; the hook runs the previous hook first and is guarded against
+  reentrancy. Sent reports older than 90 days (or with a future mtime) are
+  pruned on every send, collect, install and when reporting is turned off.
+- **Sending.** Refused when reporting is off. `https` only (`http` only for
+  localhost, 127.0.0.1, ::1). `/usr/bin/curl` runs with a cleared
+  environment, `-q`, `--proto`, `--noproxy '*'`, no redirects, and the body
+  from a 0600 temp file.
 - **Consent.** Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/`.
   The app shows `Report::payload()` (the exact Sentry event JSON that `send()`
   posts to `{dsn host}/api/{project}/store/`) and only then calls `send()`,

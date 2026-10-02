@@ -33,20 +33,21 @@ pub struct Event {
 
 impl Event {
     pub fn new(event: &str, version: Option<String>, error: Option<&str>) -> Event {
-        let scrubber = crate::crash::Scrubber::new(None, hostname().as_deref());
+        // paths and addresses included: the file is world-readable
+        let scrubber = crate::crash::Scrubber::for_system();
         Event {
             event: event.to_string(),
             version,
-            error: error.map(|e| scrubber.scrub(e).chars().take(MAX_ERROR_CHARS).collect()),
+            error: error.map(|e| {
+                scrubber
+                    .scrub_message(e)
+                    .chars()
+                    .take(MAX_ERROR_CHARS)
+                    .collect()
+            }),
             time: crate::history::now_rfc3339(),
         }
     }
-}
-
-fn hostname() -> Option<String> {
-    fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|h| h.trim().to_string())
 }
 
 /// The file is cut when it grows past `MAX_BYTES`, down to at most
@@ -71,8 +72,6 @@ pub fn append(path: &Path, event: &Event) -> io::Result<()> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path.with_extension("jsonl.lock"))?;
-    // File::lock needs Rust 1.89; Fedora 44 ships 1.98.
-    #[allow(clippy::incompatible_msrv)]
     lock.lock()?; // released when `lock` is dropped
     crate::fsutil::append_line(path, &line, 0o644)?;
     if fs::symlink_metadata(path)?.len() > MAX_BYTES
@@ -230,10 +229,7 @@ mod tests {
         append(&p, &Event::new("update-staged", None, None)).unwrap();
         let ev = read(&p);
         assert_eq!(ev.len(), 2);
-        assert_eq!(
-            ev[0].error.as_deref(),
-            Some("cannot read /home/USER/x from <ip>")
-        );
+        assert_eq!(ev[0].error.as_deref(), Some("cannot read <path> from <ip>"));
         assert!(!fs::read_to_string(&p).unwrap().contains("\"error\":null"));
         assert!(read(&d.path().join("none")).is_empty());
     }
