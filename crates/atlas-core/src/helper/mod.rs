@@ -8,12 +8,14 @@ pub mod events;
 pub mod service;
 
 use std::cmp::Ordering as Cmp;
+use std::collections::HashSet;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::bootc::{Channel, Status};
@@ -66,25 +68,35 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Process group of the bootc that is running now (0 if none).
-static RUNNING_PGID: AtomicU32 = AtomicU32::new(0);
+/// Process groups of the bootc processes running now (an upgrade and a
+/// status can run at the same time; each call adds and removes its own).
+static RUNNING: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 
-/// Send `signal` to a whole process group. There is no safe libc call for
-/// this, so it uses kill(1).
-fn kill_group(pgid: u32, signal: &str) {
-    let _ = Command::new("/usr/bin/kill")
-        .args([signal, "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+/// Set once the helper asks bootc to stop; a bootc that dies after that was
+/// interrupted, not broken.
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// What a stopped bootc reports (and what is never logged as an update failure).
+pub const INTERRUPTED: &str = "bootc was interrupted before it finished";
+
+/// Send `signal` to a whole process group (`false` if there was none).
+fn kill_group(pgid: u32, signal: rustix::process::Signal) -> bool {
+    i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::kill_process_group(pid, signal).is_ok())
 }
 
-/// Ask a running bootc (and its children) to stop; used at shutdown.
+/// Ask every running bootc (and its children) to stop; used at shutdown.
 pub fn terminate_running() {
-    let pgid = RUNNING_PGID.load(Ordering::Acquire);
-    if pgid != 0 {
-        kill_group(pgid, "-TERM");
+    CLOSING.store(true, Ordering::Release);
+    stop_running();
+}
+
+fn stop_running() {
+    let pgids: Vec<u32> = lock(&RUNNING).iter().flatten().copied().collect();
+    for pgid in pgids {
+        kill_group(pgid, rustix::process::Signal::TERM);
     }
 }
 
@@ -135,9 +147,15 @@ fn run_limited(
         .spawn()
         .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
     let pgid = child.id();
-    RUNNING_PGID.store(pgid, Ordering::Release);
+    lock(&RUNNING).get_or_insert_with(HashSet::new).insert(pgid);
+    // The helper may have started closing between its check and the spawn.
+    if CLOSING.load(Ordering::Acquire) {
+        kill_group(pgid, rustix::process::Signal::TERM);
+    }
     let result = supervise(&mut child, pgid, timeout, cap);
-    RUNNING_PGID.store(0, Ordering::Release);
+    if let Some(set) = lock(&RUNNING).as_mut() {
+        set.remove(&pgid);
+    }
     result
 }
 
@@ -166,7 +184,7 @@ fn supervise(
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) if Instant::now() >= deadline => {
-                kill_group(pgid, "-KILL");
+                kill_group(pgid, rustix::process::Signal::KILL);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -176,7 +194,7 @@ fn supervise(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => {
-                kill_group(pgid, "-KILL");
+                kill_group(pgid, rustix::process::Signal::KILL);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("waiting for bootc failed: {e}"));
@@ -192,7 +210,7 @@ fn supervise(
         pipes_closed &= rx.recv_timeout(left).is_ok();
     }
     if !pipes_closed {
-        kill_group(pgid, "-KILL");
+        kill_group(pgid, rustix::process::Signal::KILL);
     }
     let (stdout, over) = {
         let b = lock(&out_buf);
@@ -205,7 +223,18 @@ fn supervise(
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
         let stderr = lock(&err_buf).data.clone();
-        Err(tail(&String::from_utf8_lossy(&stderr), STDERR_TAIL))
+        let text = tail(&String::from_utf8_lossy(&stderr), STDERR_TAIL);
+        if CLOSING.load(Ordering::Acquire) && (status.signal().is_some() || text.is_empty()) {
+            return Err(INTERRUPTED.into());
+        }
+        Err(match (text.is_empty(), status.signal(), status.code()) {
+            (false, _, _) => text,
+            (true, Some(sig), _) => format!("bootc was stopped by signal {sig}"),
+            (true, None, Some(code)) => {
+                format!("bootc failed (exit status {code}) without a message")
+            }
+            (true, None, None) => "bootc failed without a message".into(),
+        })
     }
 }
 
@@ -266,12 +295,6 @@ impl Op {
         }
     }
 
-    /// True for operations that change the system (they hold a shutdown
-    /// inhibitor in the service).
-    pub fn changes_system(&self) -> bool {
-        matches!(self, Op::Upgrade | Op::Rollback | Op::SwitchChannel(_))
-    }
-
     /// Reject bad arguments before anything else happens.
     pub fn validate(&self) -> Result<(), HelperError> {
         if let Op::SwitchChannel(c) = self {
@@ -288,11 +311,31 @@ pub struct Core {
     runner: Arc<dyn BootcRunner>,
     busy: AtomicBool,
     events: Option<PathBuf>,
-    /// The last successful `bootc status` and when it ran; the lock is held
-    /// while bootc runs, so at most one status process exists and callers
-    /// that waited share its result.
-    status_cache: Mutex<Option<(Instant, String)>>,
+    /// `bootc status` shared between callers; see [`Core::cached_status`].
+    status_cache: StatusCache,
 }
+
+/// The last `bootc status` result (failures too, so a broken bootc is not
+/// asked again by every caller in turn) and who is refreshing it. The lock is
+/// never held while bootc runs.
+#[derive(Default)]
+struct StatusState {
+    entry: Option<(Instant, Result<String, String>)>,
+    refreshing: bool,
+    waiters: usize,
+    /// Bumped when a changing operation starts or ends: a status that began
+    /// before is not stored.
+    generation: u64,
+}
+
+#[derive(Default)]
+struct StatusCache {
+    state: Mutex<StatusState>,
+    done: Condvar,
+}
+
+/// Most callers that wait for one running `bootc status`.
+const MAX_STATUS_WAITERS: usize = 8;
 
 struct BusyGuard<'a>(&'a AtomicBool);
 
@@ -308,7 +351,7 @@ impl Core {
             runner,
             busy: AtomicBool::new(false),
             events: None,
-            status_cache: Mutex::new(None),
+            status_cache: StatusCache::default(),
         }
     }
 
@@ -356,6 +399,8 @@ impl Core {
                     _ => self.event(ok, None, None),
                 }
             }
+            // A bootc stopped at shutdown is not a failed update.
+            Err(HelperError::Failed(m)) if m == INTERRUPTED => {}
             Err(HelperError::Failed(m)) => self.event(fail, None, Some(m)),
             Err(_) => {}
         }
@@ -379,13 +424,14 @@ impl Core {
             return Err(HelperError::Busy("another operation is running".into()));
         }
         let _guard = BusyGuard(&self.busy);
+        self.invalidate_status();
         let before = (self.events.is_some() && *op == Op::Upgrade)
-            .then(|| self.status().ok())
+            .then(|| Status::from_json(&self.cached_status().ok()?).ok())
             .flatten()
             .and_then(|s| s.status.staged)
             .and_then(|b| b.digest().map(str::to_string));
         let result = self.run_op(op);
-        *lock(&self.status_cache) = None;
+        self.invalidate_status();
         self.record_outcome(op, before.as_deref(), &result);
         result
     }
@@ -431,17 +477,52 @@ impl Core {
         self.status_json()
     }
 
-    /// `bootc status --json`, at most one process at a time, shared for 2 s.
+    /// Forget the cached status (an operation started or ended). Never waits
+    /// for a running status.
+    fn invalidate_status(&self) {
+        let mut st = lock(&self.status_cache.state);
+        st.entry = None;
+        st.generation += 1;
+    }
+
+    /// `bootc status --json`: one process at a time, its result (an error too)
+    /// shared for 2 s. Callers that arrive meanwhile wait for it, up to
+    /// [`MAX_STATUS_WAITERS`]; the lock is not held while bootc runs.
     fn cached_status(&self) -> Result<String, HelperError> {
-        let mut cache = lock(&self.status_cache);
-        if let Some((at, json)) = cache.as_ref()
-            && at.elapsed() < STATUS_CACHE
-        {
-            return Ok(json.clone());
+        let cache = &self.status_cache;
+        let mut st = lock(&cache.state);
+        loop {
+            if let Some((at, res)) = &st.entry
+                && at.elapsed() < STATUS_CACHE
+            {
+                return res.clone().map_err(HelperError::Failed);
+            }
+            if !st.refreshing {
+                break;
+            }
+            if st.waiters >= MAX_STATUS_WAITERS {
+                return Err(HelperError::Busy("too many status requests".into()));
+            }
+            st.waiters += 1;
+            st = cache.done.wait(st).unwrap_or_else(|e| e.into_inner());
+            st.waiters -= 1;
         }
-        let json = self.status_json()?;
-        *cache = Some((Instant::now(), json.clone()));
-        Ok(json)
+        st.refreshing = true;
+        let generation = st.generation;
+        drop(st);
+        let res = self.status_json();
+        let mut st = lock(&cache.state);
+        st.refreshing = false;
+        if st.generation == generation {
+            let stored = match &res {
+                Ok(j) => Ok(j.clone()),
+                Err(HelperError::Failed(m)) => Err(m.clone()),
+                Err(e) => Err(format!("{e:?}")),
+            };
+            st.entry = Some((Instant::now(), stored));
+        }
+        cache.done.notify_all();
+        res
     }
 
     fn bootc(&self, args: &[&str]) -> Result<String, HelperError> {
@@ -1002,6 +1083,100 @@ mod tests {
         assert_eq!(*r.0.lock().unwrap(), 4); // rollback + its status + a fresh status
     }
 
+    #[test]
+    fn failed_status_is_cached_briefly_and_does_not_block_operations() {
+        struct Failing(Mutex<usize>);
+        impl BootcRunner for Failing {
+            fn run(&self, a: &[&str]) -> Result<String, String> {
+                if a[0] == "status" {
+                    *self.0.lock().unwrap() += 1;
+                    std::thread::sleep(Duration::from_millis(100));
+                    return Err("boom".into());
+                }
+                Ok(String::new())
+            }
+        }
+        let r = Arc::new(Failing(Mutex::new(0)));
+        let c = Arc::new(Core::new(r.clone()));
+        let hs: Vec<_> = (0..6)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || c.execute(&Op::Status))
+            })
+            .collect();
+        for h in hs {
+            assert!(matches!(h.join().unwrap(), Err(HelperError::Failed(m)) if m == "boom"));
+        }
+        assert_eq!(*r.0.lock().unwrap(), 1, "one bootc run, failure shared");
+        // invalidating never waits for a running status
+        let c2 = c.clone();
+        let slow = std::thread::spawn(move || c2.execute(&Op::Status));
+        std::thread::sleep(Duration::from_millis(20));
+        let t = Instant::now();
+        c.invalidate_status();
+        assert!(t.elapsed() < Duration::from_millis(50));
+        let _ = slow.join().unwrap();
+    }
+
+    #[test]
+    fn a_stopped_bootc_is_interrupted_not_a_failed_update() {
+        // not through CLOSING (global): a signal death without text still says so
+        let e = run_limited(
+            Path::new("/bin/sh"),
+            &["-c", "kill -KILL $$"],
+            Duration::from_secs(5),
+            1000,
+        )
+        .unwrap_err();
+        assert!(e.contains("signal 9"), "{e}");
+        let e = run_limited(
+            Path::new("/bin/sh"),
+            &["-c", "exit 3"],
+            Duration::from_secs(5),
+            1000,
+        )
+        .unwrap_err();
+        assert!(e.contains("exit status 3"), "{e}");
+        // the failure event is skipped for an interruption
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("events.jsonl");
+        let c = Core::new(Fake::new(PLAIN)).with_events(p.clone());
+        c.record_outcome(
+            &Op::Upgrade,
+            None,
+            &Err(HelperError::Failed(INTERRUPTED.into())),
+        );
+        assert!(events::read(&p).is_empty());
+        c.record_outcome(&Op::Upgrade, None, &Err(HelperError::Failed("x".into())));
+        assert_eq!(events::read(&p).len(), 1);
+    }
+
+    #[test]
+    fn two_running_groups_are_tracked_at_once() {
+        // (RUNNING is shared with parallel tests, so nothing here signals it)
+        let hs: Vec<_> = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    run_limited(
+                        Path::new("/bin/sleep"),
+                        &["30"],
+                        Duration::from_secs(1),
+                        1000,
+                    )
+                })
+            })
+            .collect();
+        let t = Instant::now();
+        while lock(&RUNNING).as_ref().map_or(0, |s| s.len()) < 2 {
+            assert!(t.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for h in hs {
+            assert!(h.join().unwrap().is_err());
+        }
+        assert!(t.elapsed() < Duration::from_secs(15));
+    }
+
     /// The fixture with `signature` added to the booted ref (the third
     /// `"transport"`: spec, staged, booted).
     fn signed(sig: &str) -> String {
@@ -1059,7 +1234,6 @@ mod tests {
             .to_string();
         // reaped: no zombie left behind either
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
-        assert_eq!(RUNNING_PGID.load(Ordering::Acquire), 0);
     }
 
     #[test]
