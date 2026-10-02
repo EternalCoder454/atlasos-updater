@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use atlas_core::helper::service::{IDLE_TIMEOUT, serve};
-use atlas_core::helper::{Core, SystemBootc};
+use atlas_core::helper::{Core, SystemBootc, events};
 use atlas_core::history;
 
 #[tokio::main]
@@ -20,7 +20,7 @@ async fn main() -> ExitCode {
         .as_slice()
     {
         ["record-boot"] => {
-            let core = Core::new(Arc::new(SystemBootc));
+            let core = Core::new(Arc::new(SystemBootc)).with_events(events::DEFAULT_PATH.into());
             match core.record_boot(Path::new(history::DEFAULT_PATH)) {
                 Ok(true) => eprintln!("atlas-system-helper: recorded the booted image"),
                 Ok(false) => eprintln!("atlas-system-helper: booted image already recorded"),
@@ -30,6 +30,16 @@ async fn main() -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+        ["record-event", name] => {
+            let core = Core::new(Arc::new(SystemBootc)).with_events(events::DEFAULT_PATH.into());
+            match core.record_event(name) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("atlas-system-helper: {e}");
+                    ExitCode::from(2)
+                }
+            }
         }
         [] => {
             let builder = match zbus::connection::Builder::system() {
@@ -48,7 +58,9 @@ async fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: atlas-system-helper [record-boot]");
+            eprintln!(
+                "usage: atlas-system-helper [record-boot | record-event health-check-failed|health-check-passed]"
+            );
             ExitCode::from(2)
         }
     }

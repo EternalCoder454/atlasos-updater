@@ -1,0 +1,12 @@
+[Unit]
+Description=Atlas system helper (runs bootc for Atlas apps)
+Documentation=https://github.com/EternalCoder454/atlasos-updater
+
+[Service]
+Type=dbus
+BusName=net.eterneon.atlas.SystemHelper
+ExecStart=/usr/libexec/atlas-system-helper
+# No sandboxing on purpose (no ProtectSystem, PrivateTmp, PrivateMounts,
+# ProtectHome, NoNewPrivileges, ...). bootc needs mounts, /sysroot, /ostree,
+# /etc, the network and the container auth files, and sandbox options break it.
+# The helper exits by itself after 60 seconds without calls.

@@ -1,21 +1,25 @@
-//! Crash reports: the only telemetry an Atlas app may have.
+//! Crash reports: the only telemetry an Atlas app may have. Opt-in, off by
+//! default, and the user sees the exact payload before every send.
 //!
-//! [`install`] puts a panic hook in place that saves a [`Report`] under
-//! `$XDG_STATE_HOME/atlas/<app-id>/crashes/` (mode 0600) and then lets the
-//! previous hook run. For fatal errors that are not panics (a Qt fatal message
-//! handler, say) call [`record_fatal`].
+//! - [`Settings`]: per-user switch, `~/.config/atlas/crash-reporting.toml`
+//!   (`enabled = false`). When off, nothing is collected or written.
+//! - [`Endpoint`]: a GlitchTip (Sentry compatible) DSN from
+//!   `/etc/atlas/crash-reporting.toml`, default `/usr/share/atlas/...`. Empty
+//!   by default: [`send`] then fails with "no endpoint configured".
+//! - Sources: Rust panics ([`install`], [`record_fatal`]), systemd-coredump
+//!   entries of the user's own processes ([`collect_coredumps`]) and update
+//!   and rollback events from the helper ([`collect_events`]).
+//! - Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/` for the
+//!   user's decision ([`pending`], [`discard`]); sent ones move to `sent/`
+//!   and are pruned after 90 days.
 //!
-//! Nothing here sends anything by itself. The app shows the user what would be
-//! sent ([`Report::to_json_pretty`]) and, only if the user agrees, opens
-//! [`github_issue_url`] or calls [`send`] with a configured endpoint.
-//!
-//! A report holds: app name, ID and version; OS name, version, image version
-//! and variant; kernel, CPU model and thread count, RAM and GPU IDs; the
-//! process's memory and CPU time, system memory and load at crash time; and the
-//! crash message, location and backtrace. It never holds a username, hostname,
-//! machine-id, network address, serial number, environment variable or the
-//! name of a file the user opened. `$HOME` and the username are replaced by
-//! `~` and `<user>` in every string.
+//! Collected: AtlasOS version, channel, previous version; app name, version
+//! and category; the stack trace; kernel; GPU model and driver; uptime; CPU
+//! model, RAM total and use; a rotating random ID (new every 30 days; never
+//! `/etc/machine-id`), a timestamp and the report type. Never: core dumps,
+//! usernames, hostnames, MAC/IP addresses, serials, installed apps, file
+//! contents, command lines, environment or working directory. Every string
+//! is scrubbed ([`Scrubber`]).
 
 use std::fs;
 use std::io::{self, Write};
@@ -23,97 +27,317 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-use crate::history::now_rfc3339;
+use crate::history::{self, now_rfc3339};
 
-/// Identifies the app a report is about.
+pub const SYSTEM_CONFIG: &str = "/etc/atlas/crash-reporting.toml";
+pub const DEFAULT_CONFIG: &str = "/usr/share/atlas/crash-reporting.toml";
+const SENT_KEEP: Duration = Duration::from_secs(90 * 86_400);
+const ID_MAX_AGE: Duration = Duration::from_secs(30 * 86_400);
+const COREDUMP_MESSAGE_ID: &str = "fc2e22bc6ee647b6b90729ab34a250b1";
+
+/// Identifies the Atlas app that installs the panic hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppInfo {
     pub name: String,
     /// Reverse-DNS app ID, e.g. `net.eterneon.atlas.updater`.
     pub id: String,
     pub version: String,
-    /// Repository name under `github.com/EternalCoder454/` that gets issues.
+    /// Repository under `github.com/EternalCoder454/` for [`github_issue_url`].
     pub repo: String,
 }
 
+/// One crash or event report. [`Report::payload`] is what gets sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub schema: u32,
-    /// RFC 3339 UTC time of the crash.
+    /// 32 hex chars; the Sentry event ID.
+    pub event_id: String,
+    /// `panic`, `fatal`, `coredump` or an event name such as `update-failed`.
+    pub report_type: String,
+    /// RFC 3339 UTC.
     pub time: String,
-    pub app: AppInfo,
-    pub os: OsInfo,
-    pub system: SystemInfo,
-    pub usage: Usage,
-    pub crash: CrashInfo,
-    /// Where this report is stored; not part of the report itself.
+    /// The rotating anonymous ID.
+    pub crash_id: String,
+    pub atlasos_version: Option<String>,
+    pub channel: Option<String>,
+    pub previous_version: Option<String>,
+    pub app_name: String,
+    pub app_version: Option<String>,
+    /// `Plasma`, `KWin`, `Atlas app` or `other`.
+    pub category: String,
+    pub message: String,
+    pub stacktrace: String,
+    pub kernel: Option<String>,
+    pub gpu: Option<String>,
+    pub gpu_driver: Option<String>,
+    pub uptime_secs: u64,
+    pub cpu_model: Option<String>,
+    pub ram_total_kb: u64,
+    pub mem_used_kb: u64,
+    /// Server-side event ID once sent.
+    #[serde(default)]
+    pub sent_event_id: Option<String>,
+    /// Where the report is stored; not part of the report.
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct OsInfo {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub image_version: Option<String>,
-    pub variant_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct SystemInfo {
-    pub kernel: Option<String>,
-    pub cpu_model: Option<String>,
-    pub cpu_threads: u32,
-    pub ram_total_kb: u64,
-    /// `AMD [1002:744c]` style: vendor name and PCI IDs, nothing else.
-    pub gpus: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct Usage {
-    pub rss_kb: u64,
-    pub cpu_time_secs: f64,
-    pub mem_used_kb: u64,
-    pub mem_available_kb: u64,
-    pub load_avg: [f64; 3],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CrashInfo {
-    /// `panic` or `fatal`.
-    pub kind: String,
-    pub message: String,
-    pub location: Option<String>,
-    pub backtrace: String,
-}
-
 impl Report {
-    /// The report as pretty JSON: exactly what [`send`] would post.
+    /// The exact Sentry event JSON that [`send`] posts.
+    pub fn payload(&self) -> Value {
+        let tag = |v: &Option<String>| v.clone().unwrap_or_else(|| "unknown".to_string());
+        let mut event = json!({
+            "event_id": self.event_id,
+            "timestamp": self.time,
+            "platform": "native",
+            "level": "fatal",
+            "logger": "atlas-core",
+            "release": format!("atlasos@{}", tag(&self.atlasos_version)),
+            "environment": tag(&self.channel),
+            "message": self.message,
+            "tags": {
+                "app": self.app_name,
+                "app_version": tag(&self.app_version),
+                "category": self.category,
+                "atlasos_version": tag(&self.atlasos_version),
+                "channel": tag(&self.channel),
+                "previous_version": tag(&self.previous_version),
+                "kernel": tag(&self.kernel),
+                "gpu": tag(&self.gpu),
+                "gpu_driver": tag(&self.gpu_driver),
+                "report_type": self.report_type,
+            },
+            "contexts": {
+                "os": {"name": "AtlasOS", "version": tag(&self.atlasos_version),
+                       "kernel_version": tag(&self.kernel)},
+                "gpu": {"name": tag(&self.gpu), "version": tag(&self.gpu_driver)},
+                "device": {"cpu": tag(&self.cpu_model), "memory_size": self.ram_total_kb * 1024,
+                           "free_memory": (self.ram_total_kb.saturating_sub(self.mem_used_kb)) * 1024},
+                "runtime": {"uptime_secs": self.uptime_secs},
+            },
+            "user": {"id": self.crash_id},
+        });
+        let frames = parse_frames(&self.stacktrace);
+        if !frames.is_empty() {
+            event["exception"] = json!({"values": [{
+                "type": self.report_type,
+                "value": self.message,
+                "stacktrace": {"frames": frames},
+            }]});
+        }
+        event
+    }
+
+    /// The payload as pretty JSON, for the "Show report" view.
     pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        serde_json::to_string_pretty(&self.payload()).unwrap_or_default()
+    }
+}
+
+/// Frames in Sentry order (oldest call first) from a systemd-coredump style
+/// (`#0  0x7f.. func (lib.so + 0x1)`) or Rust (`  0: func`) trace.
+fn parse_frames(trace: &str) -> Vec<Value> {
+    let mut frames = Vec::new();
+    for line in trace.lines() {
+        let l = line.trim();
+        let (body, rust) = if let Some(rest) = l.strip_prefix('#') {
+            (
+                rest.split_once(char::is_whitespace)
+                    .map_or("", |x| x.1)
+                    .trim(),
+                false,
+            )
+        } else if let Some((n, rest)) = l.split_once(": ")
+            && !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+        {
+            (rest.trim(), true)
+        } else {
+            continue;
+        };
+        if rust {
+            frames.push(json!({"function": body}));
+            continue;
+        }
+        let mut addr = None;
+        let mut rest = body;
+        if let Some(a) = body
+            .split_whitespace()
+            .next()
+            .filter(|a| a.starts_with("0x"))
+        {
+            addr = Some(a.to_string());
+            rest = body[a.len()..].trim();
+        }
+        let (func, module) = match rest.split_once('(') {
+            Some((f, m)) => (
+                f.trim(),
+                m.trim_end_matches(')')
+                    .split(" + ")
+                    .next()
+                    .unwrap_or("")
+                    .trim(),
+            ),
+            None => (rest, ""),
+        };
+        let mut f = json!({"function": if func.is_empty() { "n/a" } else { func }});
+        if let Some(a) = addr {
+            f["instruction_addr"] = json!(a);
+        }
+        if !module.is_empty() {
+            f["package"] = json!(module);
+            f["module"] = json!(module);
+        }
+        frames.push(f);
+    }
+    frames.reverse();
+    frames
+}
+
+// ---------------------------------------------------------------- settings
+
+fn config_home() -> Option<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => Some(PathBuf::from(v)),
+        None => {
+            Some(PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?).join(".config"))
+        }
+    }
+}
+
+fn state_home() -> Option<PathBuf> {
+    match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => Some(PathBuf::from(v)),
+        None => Some(
+            PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?).join(".local/state"),
+        ),
+    }
+}
+
+/// `key = "value"` / `key = true` lookup in a tiny TOML subset.
+fn toml_value(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let l = l.split('#').next()?.trim();
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().trim_matches('"').to_string())
+    })
+}
+
+/// The per-user opt-in. Off unless the file says `enabled = true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Settings {
+    pub enabled: bool,
+}
+
+impl Settings {
+    pub fn path() -> Option<PathBuf> {
+        Some(config_home()?.join("atlas/crash-reporting.toml"))
+    }
+
+    pub fn load() -> Settings {
+        Self::path()
+            .map(|p| Self::load_from(&p))
+            .unwrap_or_default()
+    }
+
+    pub fn load_from(path: &Path) -> Settings {
+        let on = fs::read_to_string(path)
+            .ok()
+            .and_then(|t| toml_value(&t, "enabled"))
+            .is_some_and(|v| v == "true");
+        Settings { enabled: on }
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let p = Self::path().ok_or_else(|| io::Error::other("no config directory"))?;
+        self.save_to(&p)
+    }
+
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
+        if let Some(d) = path.parent() {
+            fs::create_dir_all(d)?;
+        }
+        fs::write(
+            path,
+            format!(
+                "# Atlas crash reporting; see docs. Off unless true.\nenabled = {}\n",
+                self.enabled
+            ),
+        )
+    }
+}
+
+/// A GlitchTip DSN: `https://<key>@<host>[/prefix]/<project>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub key: String,
+    /// Full store URL: `https://host/api/<project>/store/`.
+    pub store_url: String,
+}
+
+impl Endpoint {
+    /// The configured endpoint: `/etc/atlas/...` first, then the shipped
+    /// default. `None` when no DSN is set (the default).
+    pub fn load() -> Option<Endpoint> {
+        [SYSTEM_CONFIG, DEFAULT_CONFIG]
+            .iter()
+            .find_map(|p| Self::load_from(Path::new(p)))
+    }
+
+    pub fn load_from(path: &Path) -> Option<Endpoint> {
+        Self::parse(&toml_value(&fs::read_to_string(path).ok()?, "dsn")?)
+    }
+
+    pub fn parse(dsn: &str) -> Option<Endpoint> {
+        let (scheme, rest) = dsn.trim().split_once("://")?;
+        if scheme != "https" && scheme != "http" {
+            return None;
+        }
+        let (key, rest) = rest.split_once('@')?;
+        let (host, path) = rest.split_once('/')?;
+        let (prefix, project) = path
+            .trim_matches('/')
+            .rsplit_once('/')
+            .unwrap_or(("", path.trim_matches('/')));
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+        };
+        if !ok(key) || !ok(host) || !ok(project) {
+            return None;
+        }
+        let prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("/{prefix}")
+        };
+        Some(Endpoint {
+            key: key.into(),
+            store_url: format!("{scheme}://{host}{prefix}/api/{project}/store/"),
+        })
     }
 }
 
 // ---------------------------------------------------------------- scrubbing
 
-/// Replaces `$HOME`, the username and the hostname in strings.
+/// Replaces home directories, the username, the hostname, MAC and IP
+/// addresses in strings.
 #[derive(Debug, Clone, Default)]
 pub struct Scrubber {
-    home: Option<String>,
     user: Option<String>,
     host: Option<String>,
 }
 
 impl Scrubber {
-    pub fn new(home: Option<&str>, user: Option<&str>, host: Option<&str>) -> Self {
+    pub fn new(user: Option<&str>, host: Option<&str>) -> Self {
         let keep = |s: Option<&str>| s.filter(|s| !s.is_empty()).map(str::to_string);
         Scrubber {
-            home: keep(home)
-                .map(|h| h.trim_end_matches('/').to_string())
-                .filter(|h| !h.is_empty()),
             user: keep(user),
             host: keep(host),
         }
@@ -121,63 +345,56 @@ impl Scrubber {
 
     /// From the process environment (only to know what to remove).
     pub fn from_env() -> Self {
-        let home = std::env::var("HOME").ok();
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
             .ok()
             .or_else(|| {
-                home.as_deref()
-                    .and_then(|h| Path::new(h).file_name())
+                let h = std::env::var("HOME").ok()?;
+                Path::new(&h)
+                    .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
             });
         let host = fs::read_to_string("/proc/sys/kernel/hostname")
             .ok()
             .map(|h| h.trim().to_string());
-        Scrubber::new(home.as_deref(), user.as_deref(), host.as_deref())
+        Scrubber::new(user.as_deref(), host.as_deref())
     }
 
-    /// `$HOME` becomes `~`, the username `<user>`, the hostname `<host>`.
+    /// `/home/<name>` and `/var/home/<name>` become `.../USER`, the bare
+    /// username `USER`, the hostname `HOST`; MAC and IP addresses go.
     pub fn scrub(&self, s: &str) -> String {
-        let mut out = s.to_string();
-        if let Some(h) = self.home.as_deref().filter(|h| *h != "/") {
-            // on ostree systems /home is /var/home
-            out = replace_path(&out, &format!("/var{h}"), "~");
-            out = replace_path(&out, h, "~");
-        }
+        let mut out = scrub_homes(s);
         if let Some(u) = &self.user {
-            out = replace_token(&out, u, "<user>");
+            out = replace_token(&out, u, "USER");
         }
         if let Some(h) = &self.host {
-            out = replace_token(&out, h, "<host>");
+            out = replace_token(&out, h, "HOST");
         }
-        out
+        scrub_addresses(&out)
     }
 
     /// [`scrub`](Self::scrub), then hide paths that can name a file the user
-    /// had open. Used for the panic message, which can quote anything.
+    /// had open. For panic messages, which can quote anything.
     pub fn scrub_message(&self, s: &str) -> String {
         redact_paths(&self.scrub(s))
     }
 }
 
-/// Replace the path `needle` where it starts a path (not in the middle of a
-/// longer one) and ends at a `/` or a non-word character.
-fn replace_path(s: &str, needle: &str, with: &str) -> String {
+/// Replace the name after `/home/` and `/var/home/` with `USER`.
+fn scrub_homes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(i) = rest.find(needle) {
-        let before = rest[..i].chars().next_back();
-        let after = rest[i + needle.len()..].chars().next();
-        let (head, tail) = rest.split_at(i + needle.len());
-        out.push_str(&head[..i]);
-        let starts_path = !before.is_some_and(|c| is_word(c) || "/.-~".contains(c));
-        let ends_path = !after.is_some_and(|c| is_word(c) || c == '-');
-        out.push_str(if starts_path && ends_path {
-            with
-        } else {
-            needle
-        });
-        rest = tail;
+    while let Some(i) = rest.find("/home/") {
+        let end = i + "/home/".len();
+        out.push_str(&rest[..end]);
+        rest = &rest[end..];
+        let name_end = rest
+            .find(|c: char| c == '/' || c.is_whitespace() || "'\"`:;,)>]".contains(c))
+            .unwrap_or(rest.len());
+        if name_end > 0 {
+            out.push_str("USER");
+        }
+        rest = &rest[name_end..];
     }
     out.push_str(rest);
     out
@@ -210,8 +427,68 @@ fn replace_token(s: &str, needle: &str, with: &str) -> String {
     out
 }
 
+fn is_mac(t: &str) -> bool {
+    let sep = if t.contains(':') { ':' } else { '-' };
+    let parts: Vec<&str> = t.split(sep).collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn is_ipv4(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok())
+}
+
+fn is_ipv6(t: &str) -> bool {
+    let colons = t.matches(':').count();
+    colons >= 2
+        && t.len() >= 3
+        && t.chars()
+            .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        && (t.contains("::") || colons == 7)
+}
+
+/// Replace MAC and IP address words with `<mac>` / `<ip>`.
+fn scrub_addresses(s: &str) -> String {
+    let delim = |c: char| c.is_whitespace() || "'\"`(),;[]{}<>=/".contains(c);
+    let mut out = String::with_capacity(s.len());
+    let mut tok = String::new();
+    let flush = |tok: &mut String, out: &mut String| {
+        // an address may carry a trailing sentence dot/colon or a :port
+        let mut core = tok.trim_end_matches(['.', ':']);
+        if let Some((h, p)) = core.rsplit_once(':')
+            && is_ipv4(h)
+            && !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+        {
+            core = h;
+        }
+        if is_mac(core) || is_ipv4(core) || is_ipv6(core) {
+            out.push_str(if is_mac(core) { "<mac>" } else { "<ip>" });
+            out.push_str(&tok[core.len()..]);
+        } else {
+            out.push_str(tok);
+        }
+        tok.clear();
+    };
+    for c in s.chars() {
+        if delim(c) {
+            flush(&mut tok, &mut out);
+            out.push(c);
+        } else {
+            tok.push(c);
+        }
+    }
+    flush(&mut tok, &mut out);
+    out
+}
+
 const PRIVATE_PREFIXES: &[&str] = &[
-    "~/",
     "/home/",
     "/var/home/",
     "/media/",
@@ -227,11 +504,11 @@ fn redact_paths(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut token = String::new();
     let flush = |token: &mut String, out: &mut String| {
-        if PRIVATE_PREFIXES.iter().any(|p| token.starts_with(p)) || token == "~" {
-            out.push_str("<path>");
+        out.push_str(if PRIVATE_PREFIXES.iter().any(|p| token.starts_with(p)) {
+            "<path>"
         } else {
-            out.push_str(token);
-        }
+            token
+        });
         token.clear();
     };
     for c in s.chars() {
@@ -248,21 +525,12 @@ fn redact_paths(s: &str) -> String {
 
 // ------------------------------------------------------------- collecting
 
-/// `KEY=value` lines of an os-release file; values may be quoted.
-fn parse_os_release(text: &str) -> OsInfo {
-    let get = |key: &str| {
-        text.lines().find_map(|l| {
-            let v = l.strip_prefix(key)?.strip_prefix('=')?;
-            let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
-            (!v.is_empty()).then(|| v.to_string())
-        })
-    };
-    OsInfo {
-        name: get("NAME"),
-        version: get("VERSION"),
-        image_version: get("IMAGE_VERSION"),
-        variant_id: get("VARIANT_ID"),
-    }
+/// `(model name, logical cores)` from /proc/cpuinfo text.
+fn cpu_model(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        (k.trim() == "model name").then(|| v.trim().to_string())
+    })
 }
 
 fn kb_field(text: &str, key: &str) -> Option<u64> {
@@ -274,173 +542,234 @@ fn kb_field(text: &str, key: &str) -> Option<u64> {
         .ok()
 }
 
-/// `(model name, logical cores)` from /proc/cpuinfo text.
-fn parse_cpuinfo(text: &str) -> (Option<String>, u32) {
-    let model = text.lines().find_map(|l| {
-        let (k, v) = l.split_once(':')?;
-        (k.trim() == "model name").then(|| v.trim().to_string())
-    });
-    let threads = text.lines().filter(|l| l.starts_with("processor")).count() as u32;
-    (model, threads)
+fn read(path: &str) -> String {
+    fs::read_to_string(path).unwrap_or_default()
 }
 
-/// utime + stime in seconds from /proc/self/stat (assumes 100 ticks/s, which
-/// holds on every Linux target we build for).
-fn parse_stat_cpu_secs(stat: &str) -> f64 {
-    // The command name is in parentheses and may contain spaces.
-    let Some(after) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
-        return 0.0;
-    };
-    let f: Vec<&str> = after.split_whitespace().collect();
-    // After ")": state is f[0]; utime is field 14 overall, f[11]; stime f[12].
-    let tick = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    (tick(11) + tick(12)) / 100.0
-}
-
-fn parse_loadavg(text: &str) -> [f64; 3] {
-    let mut it = text.split_whitespace().map(|v| v.parse().unwrap_or(0.0));
-    [
-        it.next().unwrap_or(0.0),
-        it.next().unwrap_or(0.0),
-        it.next().unwrap_or(0.0),
-    ]
-}
-
-fn vendor_name(id: &str) -> &'static str {
-    match id {
-        "0x1002" => "AMD",
-        "0x10de" => "NVIDIA",
-        "0x8086" => "Intel",
-        "0x1af4" => "virtio",
-        "0x15ad" => "VMware",
-        _ => "GPU",
+/// Model name for PCI IDs from pci.ids text (`0x1002`, `0x744c` forms ok).
+fn pci_name(ids: &str, vendor: &str, device: &str) -> Option<String> {
+    let (v, d) = (
+        vendor.trim_start_matches("0x").to_lowercase(),
+        device.trim_start_matches("0x").to_lowercase(),
+    );
+    let mut in_vendor = false;
+    for l in ids.lines() {
+        if l.starts_with('#') || l.is_empty() {
+            continue;
+        }
+        if !l.starts_with('\t') {
+            in_vendor = l.starts_with(&v) && l[v.len()..].starts_with(' ');
+        } else if in_vendor && !l.starts_with("\t\t") {
+            let t = l.trim_start();
+            if t.starts_with(&d) && t[d.len()..].starts_with(' ') {
+                return Some(t[d.len()..].trim().to_string());
+            }
+        }
     }
+    None
 }
 
-/// GPUs from sysfs: `<vendor> [<vendor id>:<device id>]` per `cardN`.
-fn read_gpus(drm: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(drm) else {
-        return Vec::new();
-    };
-    let mut gpus: Vec<String> = entries
+/// `(model or IDs, driver name, driver version)` of the first GPU in sysfs.
+fn read_gpu(
+    drm: &Path,
+    pci_ids: &str,
+    modules: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut cards: Vec<PathBuf> = fs::read_dir(drm)
+        .into_iter()
+        .flatten()
         .flatten()
         .filter(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             n.strip_prefix("card")
                 .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
         })
-        .filter_map(|e| {
-            let dev = e.path().join("device");
-            let vendor = fs::read_to_string(dev.join("vendor")).ok()?;
-            let device = fs::read_to_string(dev.join("device")).ok()?;
-            let (v, d) = (vendor.trim(), device.trim());
-            Some(format!(
-                "{} [{}:{}]",
-                vendor_name(v),
+        .map(|e| e.path().join("device"))
+        .collect();
+    cards.sort();
+    for dev in cards {
+        let (Ok(v), Ok(d)) = (
+            fs::read_to_string(dev.join("vendor")),
+            fs::read_to_string(dev.join("device")),
+        ) else {
+            continue;
+        };
+        let (v, d) = (v.trim(), d.trim());
+        let name = pci_name(pci_ids, v, d).unwrap_or_else(|| {
+            format!(
+                "{}:{}",
                 v.trim_start_matches("0x"),
                 d.trim_start_matches("0x")
-            ))
-        })
-        .collect();
-    gpus.sort();
-    gpus.dedup();
-    gpus
+            )
+        });
+        let driver = fs::read_link(dev.join("driver"))
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let version = driver
+            .as_ref()
+            .and_then(|drv| fs::read_to_string(modules.join(drv).join("version")).ok())
+            .map(|s| s.trim().to_string());
+        return (Some(name), driver, version);
+    }
+    (None, None, None)
 }
 
-fn read(path: &str) -> String {
-    fs::read_to_string(path).unwrap_or_default()
-}
-
-fn collect_system() -> SystemInfo {
-    let (cpu_model, cpu_threads) = parse_cpuinfo(&read("/proc/cpuinfo"));
-    SystemInfo {
-        kernel: Some(read("/proc/sys/kernel/osrelease").trim().to_string())
-            .filter(|s| !s.is_empty()),
-        cpu_model,
-        cpu_threads,
-        ram_total_kb: kb_field(&read("/proc/meminfo"), "MemTotal").unwrap_or(0),
-        gpus: read_gpus(Path::new("/sys/class/drm")),
+fn category_of(app: &str) -> &'static str {
+    let a = app.rsplit('/').next().unwrap_or(app);
+    if a == "plasmashell" || a.starts_with("plasma-") || a.starts_with("plasma_") {
+        "Plasma"
+    } else if a.starts_with("kwin_") || a == "kwin" {
+        "KWin"
+    } else if a.starts_with("net.eterneon.atlas.") || a.starts_with("atlas-") {
+        "Atlas app"
+    } else {
+        "other"
     }
 }
 
-fn collect_usage() -> Usage {
+/// The version, channel and previous version of the running AtlasOS from a
+/// `bootc status --json` document and the history.
+pub fn os_info(
+    status: Option<&crate::bootc::Status>,
+    hist: &[history::Entry],
+) -> (Option<String>, Option<String>, Option<String>) {
+    let version = status
+        .and_then(|s| s.status.booted.as_ref())
+        .and_then(|b| b.version().map(str::to_string))
+        .or_else(|| hist.first().and_then(|e| e.version.clone()));
+    let channel = status.and_then(|s| s.channel()).map(|c| c.to_string());
+    let previous = status
+        .and_then(|s| s.status.rollback.as_ref())
+        .and_then(|b| b.version().map(str::to_string))
+        .or_else(|| hist.get(1).and_then(|e| e.version.clone()));
+    (version, channel, previous)
+}
+
+/// What `build_report` needs to know about the crash.
+pub struct Crash<'a> {
+    pub report_type: &'a str,
+    pub app_name: &'a str,
+    pub app_version: Option<&'a str>,
+    pub message: &'a str,
+    pub stacktrace: &'a str,
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        let _ = io::Read::read_exact(&mut f, &mut buf);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Build a report for `crash` now. All strings are scrubbed. Does not check
+/// [`Settings`]; callers do.
+pub fn build_report(crash: &Crash, scrubber: &Scrubber, time: Option<&str>) -> Report {
+    let hist = history::read_default().unwrap_or_default();
+    let (atlasos_version, channel, previous_version) = os_info(None, &hist);
+    let channel = channel.or_else(|| {
+        hist.first()
+            .and_then(|e| e.image.rsplit_once(':').map(|x| x.1.to_string()))
+            .filter(|c| c == "stable" || c == "testing")
+    });
     let meminfo = read("/proc/meminfo");
     let total = kb_field(&meminfo, "MemTotal").unwrap_or(0);
     let avail = kb_field(&meminfo, "MemAvailable").unwrap_or(0);
-    Usage {
-        rss_kb: kb_field(&read("/proc/self/status"), "VmRSS").unwrap_or(0),
-        cpu_time_secs: parse_stat_cpu_secs(&read("/proc/self/stat")),
-        mem_used_kb: total.saturating_sub(avail),
-        mem_available_kb: avail,
-        load_avg: parse_loadavg(&read("/proc/loadavg")),
-    }
-}
-
-/// Build a report for a crash now. All strings are scrubbed.
-pub fn build_report(
-    app: &AppInfo,
-    kind: &str,
-    message: &str,
-    location: Option<&str>,
-    backtrace: &str,
-    scrubber: &Scrubber,
-) -> Report {
-    let os_text = {
-        let t = read("/etc/os-release");
-        if t.is_empty() {
-            read("/usr/lib/os-release")
-        } else {
-            t
-        }
-    };
-    let os = parse_os_release(&os_text);
-    let s = |x: Option<String>| x.map(|v| scrubber.scrub(&v));
+    let (gpu, gpu_driver, gpu_ver) = read_gpu(
+        Path::new("/sys/class/drm"),
+        &read("/usr/share/hwdata/pci.ids"),
+        Path::new("/sys/module"),
+    );
+    let s = |x: &str| scrubber.scrub(x);
     Report {
-        schema: 1,
-        time: now_rfc3339(),
-        app: app.clone(),
-        os: OsInfo {
-            name: s(os.name),
-            version: s(os.version),
-            image_version: s(os.image_version),
-            variant_id: s(os.variant_id),
-        },
-        system: collect_system(),
-        usage: collect_usage(),
-        crash: CrashInfo {
-            kind: kind.to_string(),
-            message: scrubber.scrub_message(message),
-            location: location.map(|l| scrubber.scrub(l)),
-            backtrace: scrubber.scrub(backtrace),
-        },
+        schema: 2,
+        event_id: random_hex(16),
+        report_type: crash.report_type.to_string(),
+        time: time.map_or_else(now_rfc3339, str::to_string),
+        crash_id: crash_id(),
+        atlasos_version,
+        channel,
+        previous_version,
+        app_name: s(crash.app_name),
+        app_version: crash.app_version.map(s),
+        category: category_of(crash.app_name).to_string(),
+        message: scrubber.scrub_message(crash.message),
+        stacktrace: s(crash.stacktrace),
+        kernel: Some(read("/proc/sys/kernel/osrelease").trim().to_string())
+            .filter(|k| !k.is_empty()),
+        gpu,
+        gpu_driver: gpu_driver.map(|d| match gpu_ver {
+            Some(v) => format!("{d} {v}"),
+            None => d,
+        }),
+        uptime_secs: read("/proc/uptime")
+            .split_whitespace()
+            .next()
+            .and_then(|u| u.parse::<f64>().ok())
+            .map_or(0, |u| u as u64),
+        cpu_model: cpu_model(&read("/proc/cpuinfo")),
+        ram_total_kb: total,
+        mem_used_kb: total.saturating_sub(avail),
+        sent_event_id: None,
         path: None,
     }
 }
 
 // ----------------------------------------------------------------- storage
 
-/// `$XDG_STATE_HOME/atlas/<app-id>/crashes` (default `~/.local/state/...`).
-pub fn crash_dir(app_id: &str) -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
-        Some(v) => PathBuf::from(v),
-        None => {
-            PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?).join(".local/state")
-        }
-    };
-    // an app ID is a plain name; refuse anything that could leave the dir
-    if app_id.is_empty() || app_id.contains('/') || app_id.starts_with('.') {
-        return None;
-    }
-    Some(base.join("atlas").join(app_id).join("crashes"))
+/// `$XDG_STATE_HOME/atlas`.
+fn state_dir() -> Option<PathBuf> {
+    Some(state_home()?.join("atlas"))
 }
 
-/// Write `report` into `dir` as `<time>.json` (0600). Returns the path.
+fn reports_dir() -> Option<PathBuf> {
+    Some(state_dir()?.join("crash-reports"))
+}
+
+/// The rotating anonymous ID: random, replaced when 30 days old. There is no
+/// permanent ID anywhere.
+pub fn crash_id() -> String {
+    state_dir().map_or_else(|| random_hex(16), |d| crash_id_in(&d, SystemTime::now()))
+}
+
+fn crash_id_in(dir: &Path, now: SystemTime) -> String {
+    let path = dir.join("crash-id");
+    let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if let Ok(text) = fs::read_to_string(&path) {
+        let mut l = text.lines();
+        if let (Some(id), Some(created)) = (l.next(), l.next().and_then(|c| c.parse::<u64>().ok()))
+            && id.len() == 32
+            && id.chars().all(|c| c.is_ascii_hexdigit())
+            && secs(now).saturating_sub(created) < ID_MAX_AGE.as_secs()
+        {
+            return id.to_string();
+        }
+    }
+    let id = random_hex(16);
+    let _ = write_private(&path, format!("{id}\n{}\n", secs(now)).as_bytes(), true);
+    id
+}
+
+fn write_private(path: &Path, data: &[u8], overwrite: bool) -> io::Result<()> {
+    if let Some(d) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(d)?;
+    }
+    let mut o = fs::OpenOptions::new();
+    o.write(true).mode(0o600);
+    if overwrite {
+        o.create(true).truncate(true);
+    } else {
+        o.create_new(true);
+    }
+    o.open(path)?.write_all(data)
+}
+
+/// Save `report` in `dir` as `<time>[-n].json` (0600).
 pub fn write_report(dir: &Path, report: &Report) -> io::Result<PathBuf> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let json = report.to_json_pretty();
+    let json = serde_json::to_string_pretty(report).map_err(io::Error::other)?;
     for n in 0..100 {
         let name = if n == 0 {
             format!("{}.json", report.time)
@@ -448,16 +777,8 @@ pub fn write_report(dir: &Path, report: &Report) -> io::Result<PathBuf> {
             format!("{}-{n}.json", report.time)
         };
         let path = dir.join(name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                f.write_all(json.as_bytes())?;
-                return Ok(path);
-            }
+        match write_private(&path, json.as_bytes(), false) {
+            Ok(()) => return Ok(path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -465,12 +786,10 @@ pub fn write_report(dir: &Path, report: &Report) -> io::Result<PathBuf> {
     Err(io::Error::other("too many reports in the same second"))
 }
 
-/// Unsent reports in `dir`, oldest first.
-pub fn pending_in(dir: &Path) -> Vec<Report> {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = rd
+fn read_reports(dir: &Path) -> Vec<Report> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
@@ -486,213 +805,473 @@ pub fn pending_in(dir: &Path) -> Vec<Report> {
         .collect()
 }
 
-/// Reports saved for `app_id` that were neither sent nor discarded.
-pub fn pending(app_id: &str) -> Vec<Report> {
-    crash_dir(app_id)
-        .map(|d| pending_in(&d))
+/// Reports waiting for the user's decision, oldest first.
+pub fn pending() -> Vec<Report> {
+    prune_sent();
+    reports_dir()
+        .map(|d| read_reports(&d.join("pending")))
         .unwrap_or_default()
 }
 
-/// Keep the report on disk but stop listing it as pending (`.sent` suffix).
-pub fn mark_sent(report: &Report) -> io::Result<()> {
-    let path = report
-        .path
-        .as_ref()
-        .ok_or_else(|| io::Error::other("report has no path"))?;
-    let mut to = path.clone().into_os_string();
-    to.push(".sent");
-    fs::rename(path, to)
+/// Reports already sent, oldest first (the history list).
+pub fn sent() -> Vec<Report> {
+    prune_sent();
+    reports_dir()
+        .map(|d| read_reports(&d.join("sent")))
+        .unwrap_or_default()
 }
 
-/// Delete the report's file.
+/// "Don't send": delete the pending report's file.
 pub fn discard(report: &Report) -> io::Result<()> {
-    let path = report
+    fs::remove_file(
+        report
+            .path
+            .as_ref()
+            .ok_or_else(|| io::Error::other("report has no path"))?,
+    )
+}
+
+fn prune_sent() {
+    if let Some(d) = reports_dir() {
+        prune_older_than(&d.join("sent"), SENT_KEEP, SystemTime::now());
+    }
+}
+
+fn prune_older_than(dir: &Path, keep: Duration, now: SystemTime) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > keep);
+        if old {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Move a pending report to `sent/`, recording the server's event ID.
+fn mark_sent(report: &Report, server_id: Option<String>) -> io::Result<()> {
+    let from = report
         .path
         .as_ref()
         .ok_or_else(|| io::Error::other("report has no path"))?;
-    fs::remove_file(path)
+    let mut r = report.clone();
+    r.sent_event_id = server_id;
+    let sent = from
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("bad path"))?
+        .join("sent");
+    write_report(&sent, &r)?;
+    fs::remove_file(from)
+}
+
+/// Save a report to `pending/` if the user enabled crash reporting.
+fn queue(report: &Report) -> Option<PathBuf> {
+    if !Settings::load().enabled {
+        return None;
+    }
+    write_report(&reports_dir()?.join("pending"), report).ok()
 }
 
 // -------------------------------------------------------------------- hooks
 
 static APP: OnceLock<AppInfo> = OnceLock::new();
 
-/// Install the panic hook for `app`. Call once, early in `main`. The previous
-/// hook (the default one prints the panic) still runs afterwards.
+/// Install the panic hook for `app`. Call once, early in `main`. At a panic
+/// it queues a report only when crash reporting is enabled, then runs the
+/// previous hook (the default one prints the panic).
 pub fn install(app: AppInfo) {
     if APP.set(app).is_err() {
-        return; // already installed
+        return;
     }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let message = match info.payload().downcast_ref::<&str>() {
             Some(s) => (*s).to_string(),
-            None => match info.payload().downcast_ref::<String>() {
-                Some(s) => s.clone(),
-                None => "Box<dyn Any>".to_string(),
-            },
+            None => info
+                .payload()
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "Box<dyn Any>".to_string()),
         };
-        let location = info
+        let at = info
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-        let _ = save("panic", &message, location.as_deref());
+        let _ = save("panic", &message, at.as_deref());
         previous(info);
     }));
 }
 
-/// Save a report for a fatal error that is not a Rust panic, for example from
-/// a Qt message handler. Needs [`install`] to have been called. Returns the
-/// path of the saved report.
+/// Queue a report for a fatal error that is not a Rust panic (a Qt fatal
+/// message handler). Needs [`install`]; does nothing when disabled.
 pub fn record_fatal(message: &str) -> Option<PathBuf> {
     save("fatal", message, None)
 }
 
-fn save(kind: &str, message: &str, location: Option<&str>) -> Option<PathBuf> {
+fn save(kind: &str, message: &str, at: Option<&str>) -> Option<PathBuf> {
+    if !Settings::load().enabled {
+        return None;
+    }
     let app = APP.get()?;
-    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-    let report = build_report(
-        app,
-        kind,
-        message,
-        location,
-        &backtrace,
-        &Scrubber::from_env(),
-    );
-    write_report(&crash_dir(&app.id)?, &report).ok()
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    let msg = match at {
+        Some(a) => format!("{message} at {a}"),
+        None => message.to_string(),
+    };
+    let crash = Crash {
+        report_type: kind,
+        app_name: &app.id,
+        app_version: Some(&app.version),
+        message: &msg,
+        stacktrace: &trace,
+    };
+    queue(&build_report(&crash, &Scrubber::from_env(), None))
 }
 
-// ------------------------------------------------------------- reporting
+// ------------------------------------------------------------ coredumps
 
-/// Longest issue URL we produce.
-const MAX_URL: usize = 7000;
+fn last_seen_path(name: &str) -> Option<PathBuf> {
+    Some(state_dir()?.join(name))
+}
 
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
+fn field(v: &Value, key: &str) -> Option<String> {
+    match v.get(key)? {
+        Value::String(s) => Some(s.clone()),
+        // journald prints non-UTF-8 and some multi-line values as byte arrays
+        Value::Array(a) => Some(
+            String::from_utf8_lossy(
+                &a.iter()
+                    .filter_map(|n| n.as_u64().map(|b| b as u8))
+                    .collect::<Vec<u8>>(),
+            )
+            .into_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// The "Stack trace of thread" blocks of a coredump MESSAGE.
+fn trace_lines(message: &str) -> String {
+    message
+        .lines()
+        .skip_while(|l| !l.contains("Stack trace of thread"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One coredump journal entry (`journalctl -o json`) as a report plus its
+/// timestamp in microseconds. Reads only COREDUMP_EXE, COMM, SIGNAL_NAME,
+/// TIMESTAMP, PACKAGE_NAME/VERSION and MESSAGE.
+fn coredump_report(
+    entry: &Value,
+    scrubber: &Scrubber,
+    rpm_version: impl Fn(&str) -> Option<String>,
+) -> Option<(u64, Report)> {
+    let ts: u64 = field(entry, "COREDUMP_TIMESTAMP")?.parse().ok()?;
+    let exe = field(entry, "COREDUMP_EXE").unwrap_or_default();
+    let comm = field(entry, "COREDUMP_COMM").unwrap_or_default();
+    let signal = field(entry, "COREDUMP_SIGNAL_NAME").unwrap_or_else(|| "unknown signal".into());
+    let name = if exe.is_empty() {
+        comm.clone()
+    } else {
+        exe.clone()
+    };
+    let version = match (
+        field(entry, "COREDUMP_PACKAGE_NAME"),
+        field(entry, "COREDUMP_PACKAGE_VERSION"),
+    ) {
+        (_, Some(v)) => Some(v),
+        _ if !exe.is_empty() => rpm_version(&exe),
+        _ => None,
+    };
+    let trace = trace_lines(&field(entry, "MESSAGE").unwrap_or_default());
+    let time = history::rfc3339_from_unix(ts / 1_000_000);
+    let crash = Crash {
+        report_type: "coredump",
+        app_name: &scrubber.scrub(&name),
+        app_version: version.as_deref(),
+        message: &format!("{} crashed with {signal}", scrubber.scrub(&comm)),
+        stacktrace: &trace,
+    };
+    Some((ts, build_report(&crash, scrubber, Some(&time))))
+}
+
+fn own_uid() -> String {
+    read("/proc/self/status")
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("Uid:")?
+                .split_whitespace()
+                .next()
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn journal(args: &[&str]) -> Vec<Value> {
+    let out = Command::new("journalctl")
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn rpm_version(exe: &str) -> Option<String> {
+    let o = Command::new("rpm")
+        .args(["-qf", "--qf", "%{NAME} %{VERSION}-%{RELEASE}", exe])
+        .env_clear()
+        .env("PATH", "/usr/bin")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// New systemd-coredump crashes of the user's own processes since the last
+/// call (or since `since_micros`), queued as pending reports. Returns them.
+/// Tries the user journal, then the system journal filtered to our UID
+/// (readable for members of `wheel`/`systemd-journal`). Empty when disabled.
+pub fn collect_coredumps(since_micros: Option<u64>) -> Vec<Report> {
+    if !Settings::load().enabled {
+        return Vec::new();
+    }
+    let marker = last_seen_path("coredump-last");
+    let since = since_micros
+        .or_else(|| {
+            marker
+                .as_ref()
+                .and_then(|p| fs::read_to_string(p).ok())
+                .and_then(|t| t.trim().parse().ok())
+        })
+        .unwrap_or(0);
+    let id = format!("MESSAGE_ID={COREDUMP_MESSAGE_ID}");
+    let mut entries = journal(&["--user", "-o", "json", "--no-pager", &id]);
+    if entries.is_empty() {
+        entries = journal(&[
+            "-o",
+            "json",
+            "--no-pager",
+            &id,
+            &format!("COREDUMP_UID={}", own_uid()),
+        ]);
+    }
+    let scrubber = Scrubber::from_env();
+    let mut newest = since;
+    let mut out = Vec::new();
+    for e in &entries {
+        let Some((ts, report)) = coredump_report(e, &scrubber, rpm_version) else {
+            continue;
+        };
+        if ts <= since {
+            continue;
         }
+        newest = newest.max(ts);
+        if let Some(d) = reports_dir() {
+            let mut r = report;
+            r.path = write_report(&d.join("pending"), &r).ok();
+            out.push(r);
+        }
+    }
+    if let Some(p) = marker.filter(|_| newest > since) {
+        let _ = write_private(&p, newest.to_string().as_bytes(), true);
     }
     out
 }
 
-fn issue_body(r: &Report, backtrace: &str, truncated: bool) -> String {
-    let mut b = String::new();
-    let na = |o: &Option<String>| o.clone().unwrap_or_else(|| "unknown".into());
-    b.push_str(&format!(
-        "**App:** {} {} ({})\n",
-        r.app.name, r.app.version, r.app.id
-    ));
-    b.push_str(&format!(
-        "**OS:** {} {} (image {}, {})\n",
-        na(&r.os.name),
-        na(&r.os.version),
-        na(&r.os.image_version),
-        na(&r.os.variant_id)
-    ));
-    b.push_str(&format!(
-        "**System:** kernel {}, {} ({} threads), {} MiB RAM, GPU {}\n",
-        na(&r.system.kernel),
-        na(&r.system.cpu_model),
-        r.system.cpu_threads,
-        r.system.ram_total_kb / 1024,
-        if r.system.gpus.is_empty() {
-            "unknown".to_string()
-        } else {
-            r.system.gpus.join(", ")
+// --------------------------------------------------------------- events
+
+/// Reports for helper events (update and rollback results) newer than the
+/// last call (or `since`, an RFC 3339 time), queued as pending. Empty when
+/// disabled.
+pub fn collect_events(since: Option<&str>) -> Vec<Report> {
+    if !Settings::load().enabled {
+        return Vec::new();
+    }
+    let marker = last_seen_path("events-last");
+    let since = since
+        .map(str::to_string)
+        .or_else(|| {
+            marker
+                .as_ref()
+                .and_then(|p| fs::read_to_string(p).ok())
+                .map(|t| t.trim().to_string())
+        })
+        .unwrap_or_default();
+    let events = crate::helper::events::read(Path::new(crate::helper::events::DEFAULT_PATH));
+    let scrubber = Scrubber::from_env();
+    let mut newest = since.clone();
+    let mut out = Vec::new();
+    for e in events.iter().filter(|e| e.time > since) {
+        let mut msg = e.event.clone();
+        if let Some(v) = &e.version {
+            msg.push_str(&format!(" (version {v})"));
         }
-    ));
-    b.push_str(&format!(
-        "**At crash:** RSS {} MiB, CPU time {:.1} s, memory used {} MiB, available {} MiB, load {:.2} {:.2} {:.2}\n\n",
-        r.usage.rss_kb / 1024,
-        r.usage.cpu_time_secs,
-        r.usage.mem_used_kb / 1024,
-        r.usage.mem_available_kb / 1024,
-        r.usage.load_avg[0],
-        r.usage.load_avg[1],
-        r.usage.load_avg[2]
-    ));
-    b.push_str(&format!(
-        "**Crash ({}):** {}\n",
-        r.crash.kind, r.crash.message
-    ));
-    if let Some(l) = &r.crash.location {
-        b.push_str(&format!("**Location:** {l}\n"));
+        if let Some(err) = &e.error {
+            msg.push_str(&format!(": {err}"));
+        }
+        let crash = Crash {
+            report_type: &e.event,
+            app_name: "atlas-system-helper",
+            app_version: Some(env!("CARGO_PKG_VERSION")),
+            message: &msg,
+            stacktrace: "",
+        };
+        let mut r = build_report(&crash, &scrubber, Some(&e.time));
+        if r.atlasos_version.is_none() {
+            r.atlasos_version = e.version.clone();
+        }
+        if let Some(d) = reports_dir() {
+            r.path = write_report(&d.join("pending"), &r).ok();
+        }
+        if e.time > newest {
+            newest = e.time.clone();
+        }
+        out.push(r);
     }
-    b.push_str("\n```\n");
-    b.push_str(backtrace);
-    if truncated {
-        b.push_str("\n... (backtrace truncated)");
+    if let Some(p) = marker.filter(|_| newest != since) {
+        let _ = write_private(&p, newest.as_bytes(), true);
     }
-    b.push_str("\n```\n");
-    b
+    out
 }
 
-/// A prefilled `https://github.com/EternalCoder454/<repo>/issues/new?...` URL,
-/// at most about 7 KB: the backtrace is cut line by line to fit.
-pub fn github_issue_url(r: &Report) -> String {
-    let first_line = r.crash.message.lines().next().unwrap_or("");
-    let mut short: String = first_line.chars().take(80).collect();
-    if first_line.chars().count() > 80 {
-        short.push_str("...");
-    }
-    let title = format!("Crash in {} {}: {}", r.app.name, r.app.version, short);
-    let base = format!(
-        "https://github.com/EternalCoder454/{}/issues/new?title={}&body=",
-        percent_encode(&r.app.repo),
-        percent_encode(&title)
+// ------------------------------------------------------------- reporting
+
+/// POST the report's [`payload`](Report::payload) to GlitchTip (Sentry store
+/// API) and move it to `sent/`. The caller must have shown the user the
+/// payload and got a yes. Fails with "no endpoint configured" when the DSN is
+/// empty. Uses `curl`.
+pub fn send(report: &Report) -> io::Result<()> {
+    let ep = Endpoint::load()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no endpoint configured"))?;
+    let id = post(report, &ep)?;
+    mark_sent(report, id)
+}
+
+fn post(report: &Report, ep: &Endpoint) -> io::Result<Option<String>> {
+    let body = serde_json::to_vec(&report.payload()).map_err(io::Error::other)?;
+    let auth = format!(
+        "X-Sentry-Auth: Sentry sentry_version=7, sentry_key={}, sentry_client=atlas-core/{}",
+        ep.key,
+        env!("CARGO_PKG_VERSION")
     );
-    let lines: Vec<&str> = r.crash.backtrace.lines().collect();
-    let mut keep = lines.len();
-    loop {
-        let bt = lines[..keep].join("\n");
-        let body = percent_encode(&issue_body(r, &bt, keep < lines.len()));
-        if base.len() + body.len() <= MAX_URL || keep == 0 {
-            return format!("{base}{body}");
-        }
-        // drop a tenth of the remaining lines at a time, at least one
-        keep -= (keep / 10).max(1);
-    }
-}
-
-/// POST the report's JSON to `endpoint` (an `http://` or `https://` URL from
-/// the app's config; empty by default, which is an error here). The caller
-/// must have the user's consent. Uses `curl`, which AtlasOS ships.
-pub fn send(report: &Report, endpoint: &str) -> io::Result<()> {
-    let endpoint = endpoint.trim();
-    if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no crash report endpoint configured",
-        ));
-    }
     let mut child = Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--max-time", "30"])
         .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "30",
             "--request",
             "POST",
+        ])
+        .args([
             "--header",
             "Content-Type: application/json",
+            "--header",
+            &auth,
+            "--data-binary",
+            "@-",
+            "--url",
+            &ep.store_url,
         ])
-        .args(["--data-binary", "@-", "--url", endpoint])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     child
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("no stdin"))?
-        .write_all(report.to_json_pretty().as_bytes())?;
+        .write_all(&body)?;
     let out = child.wait_with_output()?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(
+    if !out.status.success() {
+        return Err(io::Error::other(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        ))
+        ));
+    }
+    Ok(serde_json::from_slice::<Value>(&out.stdout)
+        .ok()
+        .and_then(|v| v.get("id")?.as_str().map(str::to_string)))
+}
+
+const MAX_URL: usize = 7000;
+
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// A prefilled `https://github.com/EternalCoder454/<repo>/issues/new?...`
+/// URL, at most about 7 KB (the trace is cut to fit). Secondary to [`send`].
+pub fn github_issue_url(r: &Report, repo: &str) -> String {
+    let first: String = r
+        .message
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    let title = format!(
+        "Crash in {} {}: {}",
+        r.app_name,
+        r.app_version.as_deref().unwrap_or(""),
+        first
+    );
+    let base = format!(
+        "https://github.com/EternalCoder454/{}/issues/new?title={}&body=",
+        percent_encode(repo),
+        percent_encode(&title)
+    );
+    let na = |o: &Option<String>| o.clone().unwrap_or_else(|| "unknown".into());
+    let head = format!(
+        "**App:** {} {}\n**AtlasOS:** {} ({})\n**Kernel:** {}\n**GPU:** {} ({})\n**Type:** {}\n**Message:** {}\n\n```\n",
+        r.app_name,
+        na(&r.app_version),
+        na(&r.atlasos_version),
+        na(&r.channel),
+        na(&r.kernel),
+        na(&r.gpu),
+        na(&r.gpu_driver),
+        r.report_type,
+        r.message
+    );
+    let lines: Vec<&str> = r.stacktrace.lines().collect();
+    let mut keep = lines.len();
+    loop {
+        let cut = if keep < lines.len() {
+            "\n... (trace truncated)"
+        } else {
+            ""
+        };
+        let body = percent_encode(&format!("{head}{}{cut}\n```\n", lines[..keep].join("\n")));
+        if base.len() + body.len() <= MAX_URL || keep == 0 {
+            return format!("{base}{body}");
+        }
+        keep -= (keep / 10).max(1);
     }
 }
 
@@ -701,207 +1280,334 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn scrubber() -> Scrubber {
-        Scrubber::new(Some("/home/zach"), Some("zach"), Some("atlas-box"))
+    fn sc() -> Scrubber {
+        Scrubber::new(Some("zach"), Some("atlas-box"))
     }
 
-    fn app() -> AppInfo {
-        AppInfo {
-            name: "Atlas Updater".into(),
-            id: "net.eterneon.atlas.updater".into(),
-            version: "0.1.0".into(),
-            repo: "atlasos-updater".into(),
-        }
-    }
-
-    #[test]
-    fn scrubs_home_user_and_host() {
-        let s = scrubber();
-        assert_eq!(s.scrub("/home/zach/.cargo/x.rs"), "~/.cargo/x.rs");
-        assert_eq!(s.scrub("/home/zach"), "~");
-        assert_eq!(s.scrub("user zach on atlas-box"), "user <user> on <host>");
-        // no HOME match, still no username
-        assert_eq!(s.scrub("/var/home/zach/x"), "~/x");
-        assert_eq!(s.scrub("/srv/home/zach/x"), "/srv/home/<user>/x");
-        assert_eq!(s.scrub("/run/user/1000/zach/a"), "/run/user/1000/<user>/a");
+    fn report(trace: &str) -> Report {
+        let c = Crash {
+            report_type: "panic",
+            app_name: "net.eterneon.atlas.updater",
+            app_version: Some("0.1.0"),
+            message: "boom",
+            stacktrace: trace,
+        };
+        build_report(&c, &sc(), Some("2026-10-02T10:00:00Z"))
     }
 
     #[test]
-    fn username_inside_other_words_is_left_alone() {
-        let s = scrubber();
+    fn scrubs_homes_user_and_host() {
+        let s = sc();
+        assert_eq!(s.scrub("/home/zach/.cargo/x.rs"), "/home/USER/.cargo/x.rs");
+        assert_eq!(s.scrub("/var/home/zach/x"), "/var/home/USER/x");
         assert_eq!(
-            s.scrub("zachary and zach_x and xzach"),
-            "zachary and zach_x and xzach"
+            s.scrub("/var/home/other/x and /home/bob"),
+            "/var/home/USER/x and /home/USER"
         );
-        assert_eq!(s.scrub("zach."), "<user>.");
+        assert_eq!(s.scrub("user zach on atlas-box"), "user USER on HOST");
+        assert_eq!(s.scrub("zachary zach_x xzach"), "zachary zach_x xzach");
+        assert_eq!(s.scrub("a/b /usr/lib/x"), "a/b /usr/lib/x");
     }
 
     #[test]
-    fn short_home_and_empty_values_do_not_mangle_text() {
-        let s = Scrubber::new(Some("/"), Some(""), None);
-        assert_eq!(s.scrub("a/b zach"), "a/b zach");
-        let s = Scrubber::new(Some("/home/zach/"), Some("zach"), None);
-        assert_eq!(s.scrub("/home/zach/a"), "~/a");
+    fn scrubs_mac_and_ip_addresses() {
+        let s = sc();
+        assert_eq!(
+            s.scrub("mac aa:bb:cc:dd:ee:ff and AA-BB-CC-DD-EE-FF"),
+            "mac <mac> and <mac>"
+        );
+        assert_eq!(
+            s.scrub("ip 192.168.1.20 and 10.0.0.1:8080."),
+            "ip <ip> and <ip>:8080."
+        );
+        assert_eq!(
+            s.scrub("v6 fe80::1ff:fe23:4567:890a and 2001:db8:0:0:0:0:0:1"),
+            "v6 <ip> and <ip>"
+        );
+        assert_eq!(s.scrub("::1 up"), "<ip> up");
+        // not addresses
+        assert_eq!(
+            s.scrub("time 10:20:30 ver 1.2.3 at 0x7f12:34"),
+            "time 10:20:30 ver 1.2.3 at 0x7f12:34"
+        );
+        assert_eq!(s.scrub("300.1.1.1"), "300.1.1.1");
     }
 
     #[test]
     fn message_paths_into_user_data_are_hidden() {
-        let s = scrubber();
-        let m = s.scrub_message("No such file: '/home/zach/Documents/tax 2025.pdf' (os error 2)");
-        assert_eq!(m, "No such file: '<path> 2025.pdf' (os error 2)");
-        assert!(!m.contains("Documents"));
-        assert_eq!(
-            s.scrub_message("open /run/media/zach/USB/a.txt failed"),
-            "open <path> failed"
+        let m = sc().scrub_message(
+            "No such file: '/home/zach/Documents/tax.pdf' (os error 2) /run/media/zach/USB/a",
         );
-        assert_eq!(s.scrub_message("read /mnt/data/x"), "read <path>");
+        assert_eq!(m, "No such file: '<path>' (os error 2) <path>");
         assert_eq!(
-            s.scrub_message("see /usr/lib/foo.so"),
+            sc().scrub_message("see /usr/lib/foo.so"),
             "see /usr/lib/foo.so"
         );
     }
 
     #[test]
     fn report_has_no_identifying_strings() {
-        let s = scrubber();
-        let r = build_report(
-            &app(),
-            "panic",
-            "failed at /home/zach/Documents/notes.md for zach",
-            Some("/home/zach/src/main.rs:10:5"),
-            "  0: f\n     at /home/zach/.cargo/registry/foo.rs:1\n  1: zach::main\n",
-            &s,
+        let c = Crash {
+            report_type: "panic",
+            app_name: "net.eterneon.atlas.updater",
+            app_version: Some("0.1.0"),
+            message: "failed at /home/zach/Documents/notes.md for zach on 10.1.2.3",
+            stacktrace: "  0: f\n     at /var/home/zach/.cargo/foo.rs:1\n  1: zach::main\n",
+        };
+        let r = build_report(&c, &sc(), None);
+        let json = format!(
+            "{}{}",
+            r.to_json_pretty(),
+            serde_json::to_string(&r).unwrap()
         );
-        let json = r.to_json_pretty();
-        for needle in ["zach", "atlas-box", "Documents", "notes.md"] {
+        for needle in [
+            "zach",
+            "atlas-box",
+            "Documents",
+            "notes.md",
+            "10.1.2.3",
+            "machine-id",
+        ] {
             assert!(!json.contains(needle), "{needle} in {json}");
         }
-        assert!(r.crash.location.as_deref().unwrap().starts_with("~/src"));
-        assert!(r.crash.backtrace.contains("~/.cargo/registry"));
-        assert_eq!(r.app.id, "net.eterneon.atlas.updater");
-        assert!(!json.contains("machine-id") && !json.contains("hostname"));
+        assert!(json.contains("/var/home/USER/.cargo"));
     }
 
     #[test]
-    fn parses_os_release() {
-        let o = parse_os_release(
-            "NAME=\"Fedora Linux\"\nVERSION=\"44 (Kinoite)\"\nVARIANT_ID=kinoite\nIMAGE_VERSION=44.20261001\nID=fedora\nHOME_URL=\"x\"\n",
-        );
-        assert_eq!(o.name.as_deref(), Some("Fedora Linux"));
-        assert_eq!(o.version.as_deref(), Some("44 (Kinoite)"));
-        assert_eq!(o.variant_id.as_deref(), Some("kinoite"));
-        assert_eq!(o.image_version.as_deref(), Some("44.20261001"));
-        assert_eq!(parse_os_release("NAME=x\n").image_version, None);
-    }
-
-    #[test]
-    fn parses_proc_files() {
-        let meminfo = "MemTotal:       32768000 kB\nMemFree: 100 kB\nMemAvailable:   20000000 kB\n";
-        assert_eq!(kb_field(meminfo, "MemTotal"), Some(32768000));
-        assert_eq!(kb_field(meminfo, "MemAvailable"), Some(20000000));
-        assert_eq!(kb_field("VmRSS:\t   1234 kB\n", "VmRSS"), Some(1234));
-        let stat = "123 (my (app)) S 1 2 3 4 5 6 7 8 9 10 250 50 0 0 20 0 1 0 5 6 7";
-        assert_eq!(parse_stat_cpu_secs(stat), 3.0);
-        assert_eq!(
-            parse_loadavg("0.50 1.25 2.00 1/200 999\n"),
-            [0.5, 1.25, 2.0]
-        );
-        let (m, n) = parse_cpuinfo(
-            "processor\t: 0\nmodel name\t: Intel(R) Core(TM) i9\nprocessor\t: 1\nmodel name\t: Intel(R) Core(TM) i9\n",
-        );
-        assert_eq!(m.as_deref(), Some("Intel(R) Core(TM) i9"));
-        assert_eq!(n, 2);
-    }
-
-    #[test]
-    fn reads_gpus_from_sysfs_layout() {
+    fn settings_default_off_and_roundtrip() {
         let d = tempfile::tempdir().unwrap();
-        for (card, v, dev) in [("card0", "0x1002", "0x744c"), ("card1", "0x8086", "0xa780")] {
-            let p = d.path().join(card).join("device");
-            fs::create_dir_all(&p).unwrap();
-            fs::write(p.join("vendor"), format!("{v}\n")).unwrap();
-            fs::write(p.join("device"), format!("{dev}\n")).unwrap();
+        let p = d.path().join("atlas/crash-reporting.toml");
+        assert!(!Settings::load_from(&p).enabled);
+        Settings { enabled: true }.save_to(&p).unwrap();
+        assert!(Settings::load_from(&p).enabled);
+        fs::write(&p, "enabled = false\n").unwrap();
+        assert!(!Settings::load_from(&p).enabled);
+        fs::write(&p, "enabled = maybe\n").unwrap();
+        assert!(!Settings::load_from(&p).enabled);
+    }
+
+    #[test]
+    fn dsn_parsing() {
+        let e = Endpoint::parse("https://abc123@glitch.example.net/7").unwrap();
+        assert_eq!(
+            e,
+            Endpoint {
+                key: "abc123".into(),
+                store_url: "https://glitch.example.net/api/7/store/".into()
+            }
+        );
+        let e = Endpoint::parse("https://k@host:8000/sub/path/3").unwrap();
+        assert_eq!(e.store_url, "https://host:8000/sub/path/api/3/store/");
+        for bad in [
+            "",
+            "ftp://k@h/1",
+            "https://host/1",
+            "https://k@host",
+            "https://k@host/",
+            "https://k@ho st/1",
+            "https://-x@h/1;rm",
+        ] {
+            assert!(
+                Endpoint::parse(bad).is_none() || bad == "https://-x@h/1;rm" && false,
+                "{bad:?}"
+            );
         }
-        // connectors are not GPUs and carry no device dir
-        fs::create_dir_all(d.path().join("card0-DP-1")).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.toml");
+        fs::write(&p, "# comment\ndsn = \"\"  # none\n").unwrap();
+        assert!(Endpoint::load_from(&p).is_none());
+        fs::write(&p, "dsn = \"https://k@h.example/2\"\n").unwrap();
+        assert!(Endpoint::load_from(&p).is_some());
+    }
+
+    #[test]
+    fn payload_has_sentry_shape() {
+        let r = report(
+            "#0  0x00007f1 raise (libc.so.6 + 0x9a)\n#1  0x00007f2 main (plasmashell + 0x10)\n",
+        );
+        let p = r.payload();
+        assert_eq!(p["event_id"], r.event_id);
+        assert!(p["release"].as_str().unwrap().starts_with("atlasos@"));
+        assert_eq!(p["tags"]["app"], "net.eterneon.atlas.updater");
+        assert_eq!(p["tags"]["category"], "Atlas app");
+        assert_eq!(p["tags"]["report_type"], "panic");
+        assert_eq!(p["user"]["id"], r.crash_id);
+        assert!(p["contexts"]["os"].is_object() && p["contexts"]["gpu"].is_object());
+        let frames = &p["exception"]["values"][0]["stacktrace"]["frames"];
+        assert_eq!(frames.as_array().unwrap().len(), 2);
+        // Sentry wants the oldest call first
+        assert_eq!(frames[0]["function"], "main");
+        assert_eq!(frames[1]["function"], "raise");
+        assert_eq!(frames[1]["instruction_addr"], "0x00007f1");
+        assert_eq!(frames[1]["package"], "libc.so.6");
+        // deterministic: shown payload == sent payload
         assert_eq!(
-            read_gpus(d.path()),
-            ["AMD [1002:744c]", "Intel [8086:a780]"]
+            serde_json::to_vec(&r.payload()).unwrap(),
+            serde_json::to_vec(&r.payload()).unwrap()
         );
     }
 
     #[test]
-    fn write_pending_mark_sent_and_discard() {
+    fn rust_backtrace_frames() {
+        let f = parse_frames(
+            "   0: std::panicking::begin\n             at /rustc/x.rs:1\n   1: app::main\n",
+        );
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[1]["function"], "std::panicking::begin");
+    }
+
+    #[test]
+    fn categories() {
+        assert_eq!(category_of("/usr/bin/plasmashell"), "Plasma");
+        assert_eq!(category_of("plasma-discover"), "Plasma");
+        assert_eq!(category_of("/usr/bin/kwin_wayland"), "KWin");
+        assert_eq!(category_of("net.eterneon.atlas.updater"), "Atlas app");
+        assert_eq!(category_of("/usr/bin/firefox"), "other");
+    }
+
+    #[test]
+    fn pci_ids_and_gpu_from_sysfs() {
+        let ids = "# comment\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t744c  Navi 31 [Radeon RX 7900 XT/7900 XTX]\n\t\t1002 0e3a  sub\n8086  Intel Corporation\n\ta780  Raptor Lake-S GT1\n";
+        assert_eq!(
+            pci_name(ids, "0x1002", "0x744C").unwrap(),
+            "Navi 31 [Radeon RX 7900 XT/7900 XTX]"
+        );
+        assert_eq!(
+            pci_name(ids, "0x8086", "0xa780").unwrap(),
+            "Raptor Lake-S GT1"
+        );
+        assert!(pci_name(ids, "0x1002", "0xffff").is_none());
         let d = tempfile::tempdir().unwrap();
-        let dir = d.path().join("atlas/app/crashes");
-        let mut r = build_report(&app(), "panic", "boom", None, "bt", &scrubber());
-        r.time = "2026-10-02T10:00:00Z".into();
-        let p = write_report(&dir, &r).unwrap();
+        let dev = d.path().join("drm/card0/device");
+        fs::create_dir_all(&dev).unwrap();
+        fs::write(dev.join("vendor"), "0x1002\n").unwrap();
+        fs::write(dev.join("device"), "0x744c\n").unwrap();
+        fs::create_dir_all(d.path().join("drm/card0-DP-1")).unwrap();
+        fs::create_dir_all(d.path().join("drivers/amdgpu")).unwrap();
+        std::os::unix::fs::symlink("../../../drivers/amdgpu", dev.join("driver")).unwrap();
+        fs::create_dir_all(d.path().join("module/amdgpu")).unwrap();
+        fs::write(d.path().join("module/amdgpu/version"), "6.1\n").unwrap();
+        let (n, drv, ver) = read_gpu(&d.path().join("drm"), ids, &d.path().join("module"));
+        assert_eq!(
+            (n.as_deref(), drv.as_deref(), ver.as_deref()),
+            (
+                Some("Navi 31 [Radeon RX 7900 XT/7900 XTX]"),
+                Some("amdgpu"),
+                Some("6.1")
+            )
+        );
+        let (n, _, _) = read_gpu(&d.path().join("drm"), "", &d.path().join("module"));
+        assert_eq!(n.as_deref(), Some("1002:744c"));
+    }
+
+    #[test]
+    fn coredump_entry_uses_only_allowed_fields() {
+        let entry = json!({
+            "MESSAGE_ID": COREDUMP_MESSAGE_ID,
+            "COREDUMP_TIMESTAMP": "1790000000000000",
+            "COREDUMP_EXE": "/usr/bin/plasmashell",
+            "COREDUMP_COMM": "plasmashell",
+            "COREDUMP_SIGNAL_NAME": "SIGSEGV",
+            "COREDUMP_CMDLINE": "plasmashell --user /home/zach/secret",
+            "COREDUMP_ENVIRON": "HOME=/home/zach",
+            "COREDUMP_CWD": "/home/zach",
+            "MESSAGE": "Process 1 (plasmashell) of user 1000 dumped core.\n\nStack trace of thread 1:\n#0  0x00007f1 raise (libc.so.6 + 0x9a)\n#1  0x00007f2 foo (/home/zach/lib.so + 0x1)"
+        });
+        let (ts, r) = coredump_report(&entry, &sc(), |exe| {
+            (exe == "/usr/bin/plasmashell").then(|| "plasma-workspace 6.8.0-1.fc44".to_string())
+        })
+        .unwrap();
+        assert_eq!(ts, 1_790_000_000_000_000);
+        assert_eq!(r.report_type, "coredump");
+        assert_eq!(r.category, "Plasma");
+        assert_eq!(
+            r.app_version.as_deref(),
+            Some("plasma-workspace 6.8.0-1.fc44")
+        );
+        assert_eq!(r.message, "plasmashell crashed with SIGSEGV");
+        assert!(r.stacktrace.starts_with("Stack trace of thread 1:"));
+        assert!(r.stacktrace.contains("/home/USER/lib.so"));
+        let all = serde_json::to_string(&r).unwrap();
+        assert!(!all.contains("secret") && !all.contains("zach") && !all.contains("Process 1"));
+        assert_eq!(r.time, "2026-09-21T14:13:20Z");
+    }
+
+    #[test]
+    fn rotating_id_is_stable_then_replaced_after_30_days() {
+        let d = tempfile::tempdir().unwrap();
+        let t0 = SystemTime::now();
+        let a = crash_id_in(d.path(), t0);
+        assert_eq!(a.len(), 32);
+        assert_eq!(
+            crash_id_in(d.path(), t0 + Duration::from_secs(29 * 86_400)),
+            a
+        );
+        let b = crash_id_in(d.path(), t0 + Duration::from_secs(31 * 86_400));
+        assert_ne!(a, b);
+        assert_eq!(
+            fs::metadata(d.path().join("crash-id"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            !fs::read_to_string(d.path().join("crash-id"))
+                .unwrap()
+                .contains("machine")
+        );
+    }
+
+    #[test]
+    fn pending_sent_and_prune() {
+        let d = tempfile::tempdir().unwrap();
+        let pend = d.path().join("pending");
+        let r = report("");
+        let p = write_report(&pend, &r).unwrap();
         assert_eq!(
             fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(
-            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        // same second again does not overwrite
-        let p2 = write_report(&dir, &r).unwrap();
-        assert_ne!(p, p2);
-        let got = pending_in(&dir);
+        assert_ne!(p, write_report(&pend, &r).unwrap());
+        let got = read_reports(&pend);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].crash.message, "boom");
-        mark_sent(&got[0]).unwrap();
-        assert_eq!(pending_in(&dir).len(), 1);
-        discard(&pending_in(&dir)[0]).unwrap();
-        assert!(pending_in(&dir).is_empty());
-        assert!(pending_in(&d.path().join("none")).is_empty());
+        discard(&got[0]).unwrap();
+        mark_sent(&got[1], Some("srv1".into())).unwrap();
+        assert!(read_reports(&pend).is_empty());
+        let sent = read_reports(&d.path().join("sent"));
+        assert_eq!(sent[0].sent_event_id.as_deref(), Some("srv1"));
+        prune_older_than(&d.path().join("sent"), SENT_KEEP, SystemTime::now());
+        assert_eq!(read_reports(&d.path().join("sent")).len(), 1);
+        prune_older_than(
+            &d.path().join("sent"),
+            SENT_KEEP,
+            SystemTime::now() + Duration::from_secs(91 * 86_400),
+        );
+        assert!(read_reports(&d.path().join("sent")).is_empty());
     }
 
     #[test]
-    fn crash_dir_rejects_odd_app_ids() {
-        assert!(crash_dir("../x").is_none());
-        assert!(crash_dir("").is_none());
-        assert!(crash_dir("a/b").is_none());
-    }
-
-    fn big_report(lines: usize) -> Report {
-        let bt: String = (0..lines)
-            .map(|i| format!("  {i}: some::module::function_{i}\n"))
-            .collect();
-        build_report(
-            &app(),
-            "panic",
-            "it broke & stuff",
-            Some("a.rs:1:1"),
-            &bt,
-            &scrubber(),
-        )
+    fn send_without_endpoint_fails_cleanly() {
+        // the packaged default has an empty dsn, and tests have no /etc config
+        if Endpoint::load().is_none() {
+            let e = send(&report("")).unwrap_err();
+            assert_eq!(e.to_string(), "no endpoint configured");
+        }
     }
 
     #[test]
     fn issue_url_is_prefilled_and_bounded() {
-        let small = github_issue_url(&big_report(3));
+        let bt: String = (0..2000)
+            .map(|i| format!("  {i}: some::function_{i}\n"))
+            .collect();
+        let small = github_issue_url(&report("  0: f\n"), "atlasos-updater");
         assert!(
             small.starts_with(
                 "https://github.com/EternalCoder454/atlasos-updater/issues/new?title="
             )
         );
-        assert!(small.contains("&body="));
-        assert!(small.contains("it%20broke%20%26%20stuff"));
-        assert!(!small.contains("truncated"));
-        let big = github_issue_url(&big_report(2000));
-        assert!(big.len() <= MAX_URL, "{}", big.len());
-        assert!(big.contains("truncated"));
-        assert!(!big.contains(' ') && !big.contains('\n'));
-    }
-
-    #[test]
-    fn send_refuses_empty_or_odd_endpoints() {
-        let r = big_report(1);
-        for bad in ["", "  ", "ftp://x", "--url=x", "file:///etc/passwd"] {
-            let e = send(&r, bad).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
-        }
+        let big = github_issue_url(&report(&bt), "atlasos-updater");
+        assert!(big.len() <= MAX_URL && big.contains("truncated") && !big.contains(' '));
     }
 }

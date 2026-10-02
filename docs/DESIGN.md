@@ -21,6 +21,8 @@ crates/atlas-core/            lib + bin `atlas-system-helper`
   src/helper_client.rs        zbus proxy for the system helper (what apps call)
   src/flatpak.rs              libflatpak wrapper (cargo feature "flatpak")
   src/history.rs              reads /var/lib/atlas-core/history.jsonl
+  src/crash.rs                opt-in crash reports (see Privacy and crash reports)
+  src/helper/                 helper logic: bootc runner, polkit, events.jsonl
   src/bin/atlas-system-helper.rs  (or src/helper/*) the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
 apps/atlas-updater/           the app (CMake + Corrosion, or cxx-qt-build)
@@ -162,13 +164,38 @@ an open system.
 
 ## Privacy and crash reports
 
-Crash reports are the only telemetry. `atlas_core::crash`:
-- saves a report locally when an app crashes (Rust panics; Qt fatal
-  messages through a message handler)
-- the report has the app and OS version, kernel, CPU, RAM and GPU, and
-  CPU and memory use at the time, plus the crash message and backtrace
-- `$HOME` and the username are scrubbed out; there's no hostname,
-  machine-id, network address, serials, file names or environment
-- nothing is sent unless the user chooses: "Report on GitHub" (a prefilled
-  issue), or "Send report" if an endpoint is configured (none by default),
-  and "Show report" displays exactly what would go
+Crash reports are the only telemetry. `atlas_core::crash` (opt-in, off by
+default; when off nothing is collected or written):
+
+- **Settings.** Per user, `~/.config/atlas/crash-reporting.toml`,
+  `enabled = false` (`crash::Settings`). **Endpoint:** a GlitchTip (Sentry
+  compatible) DSN, `dsn = ""` in `/etc/atlas/crash-reporting.toml`, default
+  shipped in `/usr/share/atlas/crash-reporting.toml`. With no DSN `send()`
+  fails with "no endpoint configured".
+- **Sources.** Atlas app Rust panics (`crash::install`, `record_fatal` for Qt
+  fatal messages); systemd-coredump entries of the user's own processes
+  (`collect_coredumps`: journal fields COREDUMP_EXE/COMM/SIGNAL_NAME/
+  TIMESTAMP/PACKAGE_NAME/PACKAGE_VERSION and the stack trace in MESSAGE only,
+  never the core file, command line, environment or working directory);
+  update and rollback events (`collect_events`) from
+  `/var/lib/atlas-core/events.jsonl`, which the helper writes
+  (`update-staged`, `update-failed`, `rollback-requested`, `rollback-failed`,
+  `channel-switched`, `channel-switch-failed`; `record-boot` adds
+  `update-applied`, `rollback-applied`, `automatic-rollback`; greenboot
+  scripts call `atlas-system-helper record-event health-check-failed|
+  health-check-passed`).
+- **Collected, only this.** AtlasOS version, channel and previous version;
+  app name, version and category (Plasma, KWin, Atlas app, other); the stack
+  trace; kernel; GPU model (pci.ids) and driver; uptime; CPU model, RAM total
+  and use; a rotating random ID (new every 30 days; never `/etc/machine-id`),
+  a timestamp and the report type. Never: core dumps, usernames, hostname,
+  MAC/IP addresses, serials, installed apps, file contents, command lines,
+  environment, working directory.
+- **Scrubbing.** `/home/<name>` and `/var/home/<name>` become `.../USER`, the
+  username `USER`, the hostname `HOST`; MAC and IP addresses are removed;
+  panic messages also lose paths into user data.
+- **Consent.** Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/`.
+  The app shows `Report::payload()` (the exact Sentry event JSON that `send()`
+  posts to `{dsn host}/api/{project}/store/`) and only then calls `send()`,
+  which moves the report to `sent/` (kept 90 days). "Don't send" calls
+  `discard()`. "Report on GitHub" opens `github_issue_url()`.

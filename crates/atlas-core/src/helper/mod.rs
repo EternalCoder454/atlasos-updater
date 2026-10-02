@@ -4,9 +4,10 @@
 //! is in [`service`]; everything else here is plain code that unit tests drive
 //! with a fake [`BootcRunner`].
 
+pub mod events;
 pub mod service;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +107,7 @@ impl Op {
 pub struct Core {
     runner: Arc<dyn BootcRunner>,
     busy: AtomicBool,
+    events: Option<PathBuf>,
 }
 
 struct BusyGuard<'a>(&'a AtomicBool);
@@ -121,6 +123,45 @@ impl Core {
         Core {
             runner,
             busy: AtomicBool::new(false),
+            events: None,
+        }
+    }
+
+    /// Also record update and rollback events to this file.
+    pub fn with_events(mut self, path: PathBuf) -> Self {
+        self.events = Some(path);
+        self
+    }
+
+    fn event(&self, event: &str, version: Option<String>, error: Option<&str>) {
+        if let Some(p) = &self.events {
+            let _ = events::append(p, &events::Event::new(event, version, error));
+        }
+    }
+
+    /// Record the outcome of the operations that change the system.
+    fn record_outcome(&self, op: &Op, result: &Result<String, HelperError>) {
+        let (ok, fail) = match op {
+            Op::Upgrade => ("update-staged", "update-failed"),
+            Op::Rollback => ("rollback-requested", "rollback-failed"),
+            Op::SwitchChannel(_) => ("channel-switched", "channel-switch-failed"),
+            _ => return,
+        };
+        match result {
+            Ok(json) => {
+                let staged = Status::from_json(json)
+                    .ok()
+                    .and_then(|s| s.status.staged)
+                    .and_then(|b| b.version().map(str::to_string));
+                match op {
+                    // nothing staged: there was no update, nothing to record
+                    Op::Upgrade if staged.is_none() => {}
+                    Op::Upgrade | Op::Rollback => self.event(ok, staged, None),
+                    _ => self.event(ok, None, None),
+                }
+            }
+            Err(HelperError::Failed(m)) => self.event(fail, None, Some(m)),
+            Err(_) => {}
         }
     }
 
@@ -139,7 +180,9 @@ impl Core {
             return Err(HelperError::Busy("another operation is running".into()));
         }
         let _guard = BusyGuard(&self.busy);
-        self.run_op(op)
+        let result = self.run_op(op);
+        self.record_outcome(op, &result);
+        result
     }
 
     fn run_op(&self, op: &Op) -> Result<String, HelperError> {
@@ -190,8 +233,57 @@ impl Core {
     /// `record-boot`: append the booted image to the history at `path`.
     pub fn record_boot(&self, path: &Path) -> Result<bool, HelperError> {
         let status = self.status()?;
-        history::record_boot(path, &status, &history::now_rfc3339())
-            .map_err(|e| HelperError::Failed(format!("cannot write history: {e}")))
+        let prior = history::read(path).ok().and_then(|h| h.into_iter().next());
+        let wrote = history::record_boot(path, &status, &history::now_rfc3339())
+            .map_err(|e| HelperError::Failed(format!("cannot write history: {e}")))?;
+        if let (true, Some(prior)) = (wrote, prior) {
+            let now = status
+                .status
+                .booted
+                .as_ref()
+                .and_then(|b| b.version().map(str::to_string));
+            self.boot_event(&prior, now);
+        }
+        Ok(wrote)
+    }
+
+    /// `update-applied`, `rollback-applied` or `automatic-rollback`, from the
+    /// versions of the previous and the current boot. An older version
+    /// without a `rollback-requested` since the previous boot is automatic
+    /// (greenboot gave up and ostree went back).
+    fn boot_event(&self, prior: &history::Entry, now: Option<String>) {
+        let (Some(old), Some(new)) = (prior.version.as_deref(), now.as_deref()) else {
+            return;
+        };
+        if new > old {
+            self.event("update-applied", now.clone(), None);
+        } else if new < old {
+            let requested = self.events.as_deref().is_some_and(|p| {
+                events::read(p)
+                    .iter()
+                    .any(|e| e.event == "rollback-requested" && e.time >= prior.first_booted)
+            });
+            self.event(
+                if requested {
+                    "rollback-applied"
+                } else {
+                    "automatic-rollback"
+                },
+                now.clone(),
+                None,
+            );
+        }
+    }
+
+    /// `record-event`: append one of the fixed [`events::CLI_EVENTS`].
+    pub fn record_event(&self, name: &str) -> Result<(), HelperError> {
+        if !events::CLI_EVENTS.contains(&name) {
+            return Err(HelperError::InvalidArgument(format!(
+                "unknown event {name:?}"
+            )));
+        }
+        self.event(name, None, None);
+        Ok(())
     }
 }
 
@@ -400,6 +492,103 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let f = Fake::new(crate::bootc::fixtures::NOT_BOOTC);
         assert!(core(&f).record_boot(&d.path().join("h")).is_err());
+    }
+
+    fn with_ev(f: &Arc<Fake>, d: &tempfile::TempDir) -> Core {
+        Core::new(f.clone()).with_events(d.path().join("events.jsonl"))
+    }
+
+    fn names(d: &tempfile::TempDir) -> Vec<String> {
+        events::read(&d.path().join("events.jsonl"))
+            .into_iter()
+            .map(|e| e.event)
+            .collect()
+    }
+
+    #[test]
+    fn operations_record_events() {
+        let d = tempfile::tempdir().unwrap();
+        let ok = Fake::new(BOOTED_WITH_UPDATE); // has a staged deployment
+        let c = with_ev(&ok, &d);
+        c.execute(&Op::Upgrade).unwrap();
+        c.execute(&Op::Rollback).unwrap();
+        c.execute(&Op::SwitchChannel("testing".into())).unwrap();
+        c.execute(&Op::Status).unwrap();
+        assert_eq!(
+            names(&d),
+            ["update-staged", "rollback-requested", "channel-switched"]
+        );
+        assert_eq!(
+            events::read(&d.path().join("events.jsonl"))[0]
+                .version
+                .as_deref(),
+            Some("44.20261008")
+        );
+        // no staged deployment: nothing was updated
+        let d2 = tempfile::tempdir().unwrap();
+        with_ev(&Fake::new(PLAIN), &d2)
+            .execute(&Op::Upgrade)
+            .unwrap();
+        assert!(names(&d2).is_empty());
+        // failures
+        let d3 = tempfile::tempdir().unwrap();
+        for (what, op) in [("upgrade", Op::Upgrade), ("rollback", Op::Rollback)] {
+            let f = Arc::new(Fake {
+                calls: Mutex::default(),
+                status: PLAIN.into(),
+                fail_on: Some(what),
+            });
+            assert!(with_ev(&f, &d3).execute(&op).is_err());
+        }
+        assert_eq!(names(&d3), ["update-failed", "rollback-failed"]);
+    }
+
+    #[test]
+    fn record_boot_events_update_rollback_and_automatic() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("history.jsonl");
+        let json_for = |v: &str, digest: &str| {
+            BOOTED_WITH_UPDATE
+                .replace("44.20261001", v)
+                .replace(&"1".repeat(64), digest)
+        };
+        let boot = |v: &str, digest: &str| {
+            with_ev(&Fake::new(&json_for(v, digest)), &d)
+                .record_boot(&p)
+                .unwrap()
+        };
+        assert!(boot("44.20261001", &"a".repeat(64))); // first line: no event
+        assert!(names(&d).is_empty());
+        assert!(boot("44.20261008", &"b".repeat(64)));
+        assert_eq!(names(&d), ["update-applied"]);
+        // back to older without a request: automatic
+        assert!(boot("44.20261001", &"a".repeat(64)));
+        assert_eq!(names(&d), ["update-applied", "automatic-rollback"]);
+        // update again, request a rollback, then boot the older one
+        assert!(boot("44.20261008", &"b".repeat(64)));
+        with_ev(&Fake::new(BOOTED_WITH_UPDATE), &d)
+            .execute(&Op::Rollback)
+            .unwrap();
+        assert!(boot("44.20261001", &"a".repeat(64)));
+        assert_eq!(
+            names(&d).last().map(String::as_str),
+            Some("rollback-applied")
+        );
+    }
+
+    #[test]
+    fn record_event_accepts_only_fixed_words() {
+        let d = tempfile::tempdir().unwrap();
+        let c = with_ev(&Fake::new(PLAIN), &d);
+        c.record_event("health-check-failed").unwrap();
+        c.record_event("health-check-passed").unwrap();
+        for bad in ["", "update-staged", "x\ny", "automatic-rollback"] {
+            assert!(matches!(
+                c.record_event(bad),
+                Err(HelperError::InvalidArgument(_))
+            ));
+        }
+        assert_eq!(names(&d), ["health-check-failed", "health-check-passed"]);
     }
 
     #[test]

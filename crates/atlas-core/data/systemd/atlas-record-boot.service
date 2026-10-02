@@ -1,0 +1,14 @@
+[Unit]
+Description=Record the booted AtlasOS image in the update history
+After=local-fs.target
+ConditionPathExists=/usr/bin/bootc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/atlas-system-helper record-boot
+StateDirectory=atlas-core
+# The history must be readable by every user (see the helper, mode 0644).
+# No sandboxing: it runs bootc, which needs the whole system.
+
+[Install]
+WantedBy=multi-user.target
