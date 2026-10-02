@@ -55,6 +55,8 @@ FocusScope {
     Accessible.checked: root.radio && root.checkmark
     Accessible.focusable: root.clickable
     Accessible.onPressAction: if (root.clickable) root.clicked()
+    // Qt lists Toggle first for a checkable row; assistive tools use it to pick a radio.
+    Accessible.onToggleAction: if (root.clickable && root.radio) root.clicked()
 
     Keys.onPressed: event => {
         root.byMouse = false;
