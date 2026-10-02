@@ -435,7 +435,10 @@ impl qobject::Backend {
                     return;
                 }
                 save_schedule(this.rust().fixtures.is_some(), None);
-                if *this.restart_needed() && this.rust().fixtures.is_none() {
+                if *this.restarting() {
+                    // a restart is already in flight: just drop the plan
+                    this.as_mut().clear_schedule_state();
+                } else if *this.restart_needed() && this.rust().fixtures.is_none() {
                     // scheduledAt stays set while the restart is in flight: the
                     // shell must not quit a window-less instance before the
                     // logout call finishes (start_restart clears it after).
@@ -887,7 +890,6 @@ impl qobject::Backend {
         if self.rust().fixtures.is_some() {
             if config::fixture_hold("restart") {
                 // screenshot hook: look like a restart in progress, for good
-                self.as_mut().set_busy_text(q("Restarting…"));
                 self.as_mut().set_restarting(true);
                 return;
             }
@@ -895,14 +897,12 @@ impl qobject::Backend {
                 .set_info_text(q("Developer fixtures: restart skipped."));
             return;
         }
-        self.as_mut().set_busy_text(q("Restarting…"));
         self.as_mut().set_restarting(true);
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         let qt_ok = qt.clone();
         let clear = move |mut obj: Pin<&mut qobject::Backend>| {
             obj.as_mut().set_restarting(false);
-            obj.as_mut().set_busy_text(QString::default());
             if let Some(t) = scheduled
                 && *obj.scheduled_at() == t
             {
@@ -916,8 +916,6 @@ impl qobject::Backend {
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
             obj.as_mut().set_error("restart", q(&text));
-            obj.as_mut().set_restarting(false);
-            obj.as_mut().set_busy_text(QString::default());
             clear(obj.as_mut());
             obj.restart_problem(q(&text));
         };

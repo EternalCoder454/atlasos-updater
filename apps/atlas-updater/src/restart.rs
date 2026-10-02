@@ -7,7 +7,8 @@ pub fn logout_and_reboot() -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    rt.block_on(async {
+    // Plasma may never answer; the caller's "restarting" state must not stick.
+    let call = async {
         let conn = zbus::Connection::session()
             .await
             .map_err(|e| e.to_string())?;
@@ -21,5 +22,10 @@ pub fn logout_and_reboot() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
         Ok(())
-    })
+    };
+    rt.block_on(tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        call,
+    ))
+    .unwrap_or_else(|_| Err("Plasma did not answer the restart request".to_string()))
 }
