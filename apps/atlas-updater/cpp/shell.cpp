@@ -261,7 +261,7 @@ void Shell::onRestartProblem(const QString &text)
     n->setIconName(kAppIcon);
     n->setUrgency(KNotification::HighUrgency);
     auto *open = n->addDefaultAction(tr("Open Atlas Updater"));
-    connect(open, &KNotificationAction::activated, this, [this] { openWindow(); });
+    connect(open, &KNotificationAction::activated, this, [this] { openWindow(QStringLiteral("updates")); });
     n->sendEvent();
 }
 

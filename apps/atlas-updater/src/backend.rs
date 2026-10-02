@@ -910,8 +910,9 @@ impl qobject::Backend {
             }
         };
         let fail = move |mut obj: Pin<&mut qobject::Backend>, e: String| {
-            // Nobody may be looking at a window (scheduled restart in the
-            // tray): tell the user with a notification as well.
+            // The Updates page shows the error; restartProblem also lets the
+            // shell notify when the window is not active (a scheduled
+            // restart in the tray, for example).
             if e == restart::NO_ANSWER {
                 // Plasma may still act on the request: say so, no notification.
                 obj.as_mut().set_error("restart", q(&e));
