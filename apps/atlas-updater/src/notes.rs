@@ -92,7 +92,7 @@ pub fn render(md: &str) -> String {
     let mut stack: Vec<&'static str> = Vec::new();
     // Open links: whether each one was written as <a>.
     let mut links: Vec<bool> = Vec::new();
-    let mut open =
+    let open =
         |out: &mut String, stack: &mut Vec<&'static str>, o: &'static str, c: &'static str| {
             if stack.len() < MAX_DEPTH {
                 out.push_str(o);
