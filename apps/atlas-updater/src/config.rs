@@ -104,7 +104,14 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     }
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_len = match mo {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=12).contains(&mo) || !(1..=month_len).contains(&d) || h > 23 || mi > 59 || sec > 60 {
         return None;
     }
     let mut rest = &s[19..];
@@ -189,6 +196,15 @@ mod tests {
             Some(1_790_913_600)
         );
         assert_eq!(parse_rfc3339("2000-02-29T00:00:00Z"), Some(951_782_400));
+        for bad in [
+            "2026-02-29T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad}");
+        }
+        assert!(parse_rfc3339("2024-02-29T00:00:00Z").is_some());
         for bad in [
             "",
             "tomorrow",
