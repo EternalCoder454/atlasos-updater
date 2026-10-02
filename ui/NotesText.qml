@@ -24,7 +24,7 @@ Text {
 
     text: "<style>" + css + "</style>" + body
     Accessible.role: Accessible.StaticText
-    Accessible.name: root.plain.length > 0 ? root.plain : root.body
+    Accessible.name: root.plain.replace(/^\s*What(?:'|\u2019)?s new[^\n]*\n?/i, "")
     textFormat: Text.RichText
     wrapMode: Text.Wrap
     color: Kirigami.Theme.textColor

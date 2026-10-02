@@ -24,7 +24,9 @@ AtlasPage {
     // Errors from these operations belong to the hero; the others (apps, crash
     // reports) stay in the banner at the top.
     readonly property bool heroError: ["check", "download", "restart", "rollback", "cancelRollback", "switch", "status", "timer"].indexOf(page.backend.errorOp) >= 0
-    readonly property bool retryable: ["check", "status", "timer", "download"].indexOf(page.backend.errorOp) >= 0
+    readonly property bool retryable: ["check", "status", "download"].indexOf(page.backend.errorOp) >= 0
+    // A failed download is not retried over a queued rollback.
+    readonly property bool canRetry: page.hasError && page.retryable && !(page.backend.errorOp === "download" && page.rollbackQueued)
     readonly property bool hasError: page.backend.errorText.length > 0 && page.heroError && (!page.backend.loaded || !page.backend.busy)
     // busyOp is only meaningful together with busy.
     readonly property string busyOp: page.backend.busy ? page.backend.busyOp : ""
@@ -36,6 +38,18 @@ AtlasPage {
     // Something is waiting for a restart (an update, a switch or a go back).
     readonly property bool restartReady: page.backend.hasStaged || page.backend.restartNeeded || page.rollbackQueued
     readonly property bool checking: (!page.backend.loaded && !page.hasError) || page.busyOp === "check"
+
+    function retry() {
+        if (page.backend.errorOp === "download") {
+            page.backend.downloadUpdate();
+        } else if (!page.backend.loaded) {
+            // refreshStatus is silent: clear the old error first.
+            page.backend.dismissMessages();
+            page.backend.refreshStatus();
+        } else {
+            page.backend.checkForUpdate();
+        }
+    }
 
     function version(v, date) {
         return date.length > 0 ? qsTr("%1  (%2)").arg(v).arg(Dates.longDate(date)) : v;
@@ -212,6 +226,9 @@ AtlasPage {
             if (page.hasError) {
                 return page.backend.errorText;
             }
+            if (page.backend.restarting === true) {
+                return qsTr("Saving your session…");
+            }
             if (page.checking || page.downloading || page.working) {
                 return page.backend.busyText;
             }
@@ -262,22 +279,21 @@ AtlasPage {
             enabled: !page.backend.busy
             onClicked: page.backend.downloadUpdate()
         }
+        // One primary pill at most: with a restart waiting, Try again is secondary.
         PrimaryButton {
             text: qsTr("Try again")
-            visible: page.hasError && page.retryable
-            onClicked: {
-                if (page.backend.errorOp === "download") {
-                    page.backend.downloadUpdate();
-                } else if (!page.backend.loaded) {
-                    page.backend.refreshStatus();
-                } else {
-                    page.backend.checkForUpdate();
-                }
-            }
+            visible: page.canRetry && !page.restartReady
+            onClicked: page.retry()
+        }
+        SecondaryButton {
+            text: qsTr("Try again")
+            visible: page.canRetry && page.restartReady
+            onClicked: page.retry()
         }
         SecondaryButton {
             text: qsTr("Dismiss")
-            visible: page.hasError && !page.retryable
+            Accessible.name: qsTr("Dismiss error")
+            visible: page.hasError && !page.canRetry
             onClicked: page.backend.dismissMessages()
         }
         SecondaryButton {

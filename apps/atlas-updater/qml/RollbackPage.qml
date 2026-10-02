@@ -53,18 +53,19 @@ AtlasPage {
     StatusHero {
         Layout.topMargin: Kirigami.Units.gridUnit
         visible: page.queued
-        iconName: "edit-undo"
-        headline: qsTr("Ready to go back to %1").arg(page.target)
-        subtitle: qsTr("The next restart starts that version. Your files and settings stay as they are.")
+        iconName: page.backend.restarting ? "view-refresh" : "edit-undo"
+        busy: page.backend.restarting === true
+        headline: page.backend.restarting ? qsTr("Restarting…") : qsTr("Ready to go back to %1").arg(page.target)
+        subtitle: page.backend.restarting ? qsTr("Saving your session…") : qsTr("The next restart starts that version. Your files and settings stay as they are.")
 
         PrimaryButton {
             text: qsTr("Restart now")
-            enabled: !page.backend.busy
+            enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
             text: qsTr("Don't go back")
-            enabled: !page.backend.busy
+            enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.cancelRollback()
         }
     }
@@ -78,13 +79,13 @@ AtlasPage {
 
         PrimaryButton {
             text: page.backend.rollbackDate.length > 0 ? qsTr("Go back to %1 (%2)").arg(page.backend.rollbackVersion).arg(Dates.shortDate(page.backend.rollbackDate)) : qsTr("Go back to %1").arg(page.backend.rollbackVersion)
-            enabled: !page.backend.busy
+            enabled: !page.backend.busy && !page.backend.restarting
             onClicked: confirm.open()
         }
         SecondaryButton {
             text: qsTr("Restart to update")
             visible: page.backend.restartNeeded
-            enabled: !page.backend.busy
+            enabled: !page.backend.busy && !page.backend.restarting
             onClicked: page.backend.restartNow()
         }
     }
