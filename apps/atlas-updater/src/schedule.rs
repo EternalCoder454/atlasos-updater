@@ -36,10 +36,12 @@ pub struct Schedule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Poll,
-    RestartWarning,
-    RestartDue,
+    /// The restart scheduled for this Unix time is 5 minutes away.
+    RestartWarning(i64),
+    /// The restart scheduled for this Unix time is due.
+    RestartDue(i64),
     /// The time passed while we could not run (sleep, clock jump).
-    RestartMissed,
+    RestartMissed(i64),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,12 +73,23 @@ fn step(now: i64, t: i64, warned: bool) -> Step {
 }
 
 impl Schedule {
+    /// The user picked `at` (or cleared it). No warning when the time is
+    /// already close: the user just chose it.
     pub fn set_restart(&self, at: Option<i64>) {
+        self.set(at, at.is_some_and(|t| t - unix_now() <= WARN_BEFORE_SECS));
+    }
+
+    /// A time saved by an earlier run: nobody just chose it, so a time that is
+    /// already inside the warning window is warned about at once.
+    pub fn restore_restart(&self, at: i64) {
+        self.set(Some(at), false);
+    }
+
+    fn set(&self, at: Option<i64>, warned: bool) {
         let (m, cv) = &*self.inner;
         let mut s = m.lock().unwrap();
         s.restart_at = at;
-        // No warning when the user picks a time that is already close.
-        s.warned = at.is_some_and(|t| t - unix_now() <= WARN_BEFORE_SECS);
+        s.warned = warned;
         cv.notify_all();
     }
 
@@ -102,15 +115,15 @@ impl Schedule {
                 match step(now, t, guard.warned) {
                     Step::Due => {
                         guard.restart_at = None;
-                        fired = Some(Event::RestartDue);
+                        fired = Some(Event::RestartDue(t));
                     }
                     Step::Missed => {
                         guard.restart_at = None;
-                        fired = Some(Event::RestartMissed);
+                        fired = Some(Event::RestartMissed(t));
                     }
                     Step::Warn => {
                         guard.warned = true;
-                        fired = Some(Event::RestartWarning);
+                        fired = Some(Event::RestartWarning(t));
                     }
                     Step::Wait(until) => {
                         wait = wait
@@ -159,11 +172,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let s2 = s.clone();
         let h = std::thread::spawn(move || s2.run(move |e| tx.send(e).unwrap()));
-        s.set_restart(Some(unix_now() + 1));
+        let at = unix_now() + 1;
+        s.set_restart(Some(at));
         // Within the warning window already: no warning, just the restart.
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            Event::RestartDue
+            Event::RestartDue(at)
         );
         s.stop();
         h.join().unwrap();
@@ -176,10 +190,28 @@ mod tests {
         let s2 = s.clone();
         let h = std::thread::spawn(move || s2.run(move |e| tx.send(e).unwrap()));
         // 5 minutes and 2 seconds out: the warning is 2 s away.
-        s.set_restart(Some(unix_now() + WARN_BEFORE_SECS + 2));
+        let at = unix_now() + WARN_BEFORE_SECS + 2;
+        s.set_restart(Some(at));
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(6)).unwrap(),
-            Event::RestartWarning
+            Event::RestartWarning(at)
+        );
+        s.set_restart(None);
+        s.stop();
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_restored_time_inside_the_window_still_warns() {
+        let s = Schedule::default();
+        let (tx, rx) = mpsc::channel();
+        let s2 = s.clone();
+        let h = std::thread::spawn(move || s2.run(move |e| tx.send(e).unwrap()));
+        let at = unix_now() + 120;
+        s.restore_restart(at);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Event::RestartWarning(at)
         );
         s.set_restart(None);
         s.stop();

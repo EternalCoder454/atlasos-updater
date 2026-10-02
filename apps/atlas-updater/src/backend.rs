@@ -238,6 +238,9 @@ pub struct BackendRust {
     fixtures: Option<PathBuf>,
     schedule: Schedule,
     started: bool,
+    /// Bumped whenever the pending list changes by another route, so a
+    /// slower `load_reports` result is not shown over it.
+    reports_gen: u64,
     status_inflight: bool,
     view: View,
     pending: Vec<Report>,
@@ -270,6 +273,12 @@ fn q(s: &str) -> QString {
     QString::from(s)
 }
 
+fn timer_failed(mut obj: Pin<&mut qobject::Backend>) {
+    obj.as_mut().set_error_text(q(
+        "Atlas Updater could not start its background timer. Update checks and scheduled restarts will not run until it is reopened.",
+    ));
+}
+
 impl qobject::Backend {
     pub fn start(mut self: Pin<&mut Self>) {
         if self.rust().started {
@@ -289,21 +298,30 @@ impl qobject::Backend {
             // restart the machine unexpectedly at login.
             if at > schedule::unix_now() {
                 self.as_mut().set_scheduled_at(at);
-                schedule.set_restart(Some(at));
+                schedule.restore_restart(at);
             } else {
                 rc::set(RC_RESTART, "ScheduledAt", None);
             }
         }
         let qt = self.qt_thread();
         let sched = schedule.clone();
-        let _ = std::thread::Builder::new()
+        let qt_run = qt.clone();
+        let started = std::thread::Builder::new()
             .name("atlas-schedule".into())
             .stack_size(256 * 1024)
             .spawn(move || {
-                sched.run(move |ev| {
-                    let _ = qt.queue(move |obj| obj.on_event(ev));
+                let ended = guarded(|| {
+                    sched.run(move |ev| {
+                        let _ = qt_run.queue(move |obj| obj.on_event(ev));
+                    })
                 });
+                if ended.is_none() {
+                    let _ = qt.queue(timer_failed);
+                }
             });
+        if started.is_err() {
+            let _ = self.qt_thread().queue(timer_failed);
+        }
         // Crash reports are opt-in: read the setting, and only when on look for new ones.
         let on = match &self.rust().fixtures {
             Some(d) => config::read_fixture(d, "crash-enabled").is_some(),
@@ -323,20 +341,36 @@ impl qobject::Backend {
     }
 
     fn on_event(self: Pin<&mut Self>, ev: Event) {
+        // An event can sit in the queue while the user cancels or picks
+        // another time: act only if it is still the scheduled one.
+        let current = |this: &Self, t: i64| *this.scheduled_at() == t;
         match ev {
             Event::Poll => self.refresh_status(),
-            Event::RestartWarning => {
-                self.restart_soon();
-            }
-            Event::RestartDue => {
-                let mut this = self;
-                this.as_mut().clear_schedule_state();
-                if *this.restart_needed() {
-                    this.restart_now();
+            Event::RestartWarning(t) => {
+                if current(&self, t) {
+                    self.restart_soon();
                 }
             }
-            Event::RestartMissed => {
+            Event::RestartDue(t) => {
                 let mut this = self;
+                if !current(&this, t) {
+                    return;
+                }
+                rc::set(RC_RESTART, "ScheduledAt", None);
+                if *this.restart_needed() && this.rust().fixtures.is_none() {
+                    // scheduledAt stays set while the restart is in flight: the
+                    // shell must not quit a window-less instance before the
+                    // logout call finishes. A failure clears it (restart_now).
+                    this.restart_now();
+                } else {
+                    this.as_mut().clear_schedule_state();
+                }
+            }
+            Event::RestartMissed(t) => {
+                let mut this = self;
+                if !current(&this, t) {
+                    return;
+                }
                 this.as_mut().clear_schedule_state();
                 let text = "The scheduled restart did not happen because the computer was asleep at that time. The update is still waiting. Restart when you are ready.";
                 this.as_mut().set_info_text(q(text));
@@ -721,6 +755,7 @@ impl qobject::Backend {
                 "Could not restart the computer: {e}. The update is still waiting. Restart it yourself when you are ready."
             );
             obj.as_mut().set_error_text(q(&text));
+            obj.as_mut().clear_schedule_state();
             obj.restart_problem(q(&text));
         };
         if !spawn_named("atlas-restart", move || {
@@ -777,7 +812,9 @@ impl qobject::Backend {
         }
     }
 
-    pub fn load_reports(self: Pin<&mut Self>) {
+    pub fn load_reports(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().reports_gen += 1;
+        let gen_now = self.rust().reports_gen;
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
         spawn_named("atlas-reports", move || {
@@ -795,7 +832,7 @@ impl qobject::Backend {
             .unwrap_or_default();
             let _ = qt.queue(move |obj| {
                 // Switched off while we were reading: show nothing.
-                if *obj.crash_enabled() {
+                if *obj.crash_enabled() && obj.rust().reports_gen == gen_now {
                     obj.reports_loaded(reports, has_server);
                 }
             });
@@ -922,15 +959,20 @@ impl qobject::Backend {
         }
     }
 
-    pub fn discard_report(self: Pin<&mut Self>, event_id: &QString) {
+    pub fn discard_report(mut self: Pin<&mut Self>, event_id: &QString) {
         if *self.busy() {
             return; // a send is running: do not change the list under it
         }
         let id = event_id.to_string();
         if let Some(r) = self.rust().pending.iter().find(|r| r.event_id == id)
             && self.rust().fixtures.is_none()
+            && let Err(e) = atlas_core::crash::discard(r)
+            && e.kind() != std::io::ErrorKind::NotFound
         {
-            let _ = atlas_core::crash::discard(r);
+            // Still on disk: keep it listed rather than let it come back later.
+            self.as_mut()
+                .set_error_text(q(&format!("Could not delete the crash report: {e}")));
+            return;
         }
         self.drop_pending(&id);
     }
@@ -939,6 +981,7 @@ impl qobject::Backend {
     fn drop_pending(self: Pin<&mut Self>, id: &str) {
         let mut this = self;
         let has_server = *this.crash_has_server();
+        this.as_mut().rust_mut().reports_gen += 1;
         let mut list = this.rust().pending.clone();
         list.retain(|r| r.event_id != id);
         this.as_mut().reports_loaded(list, has_server);

@@ -265,9 +265,16 @@ void Shell::onScheduleChanged()
     if (!scheduled && m_restartSoon) {
         m_restartSoon->close();
     }
-    // Non-tray mode stays alive for a scheduled restart only.
+    // Non-tray mode stays alive for a scheduled restart only. A restart that is
+    // running keeps scheduledAt set until it fails, so this is the end of a
+    // cancel, a missed time or a failure: leave a moment for its notification
+    // to be sent, then quit if nothing has been scheduled or opened since.
     if (!scheduled && !m_trayMode && !m_engine) {
-        QCoreApplication::quit();
+        QTimer::singleShot(10000, this, [this] {
+            if (m_backend->property("scheduledAt").toLongLong() <= 0 && !m_trayMode && !m_engine) {
+                QCoreApplication::quit();
+            }
+        });
     }
 }
 
