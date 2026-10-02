@@ -33,6 +33,7 @@ target_compile_definitions(atlas-updater-app PRIVATE ATLAS_UPDATER_VERSION="${PR
 
 # qmlcachegen compiles every QML/JS file to C++ at build time; the app reads
 # no .qml from disk at run time.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../ui atlas-ui)
 set_source_files_properties(qml/dates.js PROPERTIES QT_QML_SKIP_QMLLINT TRUE)
 qt_add_qml_module(atlas-updater-app
     URI net.eterneon.atlas.updater
@@ -45,7 +46,7 @@ qt_add_qml_module(atlas-updater-app
 )
 
 target_link_libraries(atlas-updater-app PRIVATE
-    atlas_updater PkgConfig::FLATPAK
+    atlas_updater PkgConfig::FLATPAK atlas-ui atlas-uiplugin
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets
     KF6::Notifications KF6::StatusNotifierItem KF6::DBusAddons)
 

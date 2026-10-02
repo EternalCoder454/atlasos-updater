@@ -2,8 +2,9 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import Atlas.Ui
 
-Kirigami.ScrollablePage {
+AtlasPage {
     id: page
 
     required property var backend
@@ -11,17 +12,19 @@ Kirigami.ScrollablePage {
     title: qsTr("About")
 
     ColumnLayout {
-        spacing: Kirigami.Units.largeSpacing
+        Layout.fillWidth: true
+        Layout.topMargin: Kirigami.Units.gridUnit
+        spacing: Kirigami.Units.smallSpacing
 
         Kirigami.Icon {
             Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: Kirigami.Units.gridUnit
             source: "net.eterneon.atlas.updater"
-            Layout.preferredWidth: Kirigami.Units.iconSizes.enormous
-            Layout.preferredHeight: Kirigami.Units.iconSizes.enormous
+            Layout.preferredWidth: Math.round(Kirigami.Units.gridUnit * 5)
+            Layout.preferredHeight: Layout.preferredWidth
         }
         Kirigami.Heading {
             Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: Kirigami.Units.smallSpacing
             text: qsTr("Atlas Updater")
         }
         QQC2.Label {
@@ -30,34 +33,28 @@ Kirigami.ScrollablePage {
             text: qsTr("Version %1").arg(Qt.application.version)
         }
         QQC2.Label {
-            Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.Wrap
+            opacity: 0.7
             text: qsTr("Updates for AtlasOS: see what's new, go back, and pick a channel.")
         }
-        Kirigami.Separator {
-            Layout.fillWidth: true
+    }
+
+    Section {
+        title: qsTr("Privacy")
+        footer: qsTr("Atlas Updater collects nothing. Crash reports are off unless you turn them on. Each report is shown to you before it's sent.")
+        SectionRow {
+            title: qsTr("Licence")
+            value: qsTr("MIT")
         }
-        Kirigami.Heading {
-            level: 3
-            text: qsTr("Privacy")
+        SectionRow {
+            title: qsTr("Made by")
+            value: qsTr("Eterneon")
         }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: qsTr("Atlas Updater collects nothing. Crash reports are off unless you turn them on. Each report is shown to you before it's sent.")
-        }
-        QQC2.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            opacity: 0.7
-            text: qsTr("Released under the MIT licence. Made by Eterneon.")
-        }
-        QQC2.Button {
-            Layout.alignment: Qt.AlignHCenter
-            text: qsTr("Project page")
-            icon.name: "internet-services"
+        SectionRow {
+            title: qsTr("Project page")
+            chevron: true
             onClicked: Qt.openUrlExternally("https://github.com/EternalCoder454/AtlasOS")
         }
     }

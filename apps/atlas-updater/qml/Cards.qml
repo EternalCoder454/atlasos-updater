@@ -2,42 +2,74 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
+import Atlas.Ui
 
 // Messages every page shows at the top: errors in plain language, results.
 ColumnLayout {
     id: root
 
     required property var backend
+    // The Updates page shows the error in its hero instead.
+    property bool showError: true
 
     spacing: Kirigami.Units.smallSpacing
 
-    Kirigami.InlineMessage {
+    component Banner: Rectangle {
+        id: banner
+        property string message
+        property color tint
+        property string iconName
+        property bool dismissable: true
         Layout.fillWidth: true
-        type: Kirigami.MessageType.Error
-        text: root.backend.errorText
-        visible: text.length > 0
-        actions: [
-            Kirigami.Action {
-                text: qsTr("Dismiss")
-                onTriggered: root.backend.dismissMessages()
+        visible: message.length > 0
+        implicitHeight: bannerRow.implicitHeight + Kirigami.Units.largeSpacing * 2
+        radius: 10
+        color: Qt.alpha(tint, 0.14)
+        border.width: 1
+        border.color: Qt.alpha(tint, 0.35)
+        RowLayout {
+            id: bannerRow
+            anchors.fill: parent
+            anchors.margins: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.largeSpacing
+            Kirigami.Icon {
+                source: banner.iconName
+                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
             }
-        ]
+            QQC2.Label {
+                Layout.fillWidth: true
+                text: banner.message
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+            }
+            SecondaryButton {
+                visible: banner.dismissable
+                text: qsTr("Dismiss")
+                onClicked: root.backend.dismissMessages()
+            }
+        }
     }
-    Kirigami.InlineMessage {
-        Layout.fillWidth: true
-        type: Kirigami.MessageType.Positive
-        text: root.backend.infoText
-        visible: text.length > 0
-        actions: [
-            Kirigami.Action {
-                text: qsTr("Dismiss")
-                onTriggered: root.backend.dismissMessages()
-            }
-        ]
+
+    Banner {
+        message: root.backend.fixturesActive ? qsTr("Developer test data: this is not your real system.") : ""
+        tint: Kirigami.Theme.neutralTextColor
+        iconName: "dialog-information"
+        dismissable: false
+    }
+    Banner {
+        message: root.showError ? root.backend.errorText : ""
+        tint: Kirigami.Theme.negativeTextColor
+        iconName: "dialog-error"
+    }
+    Banner {
+        message: root.backend.infoText
+        tint: Kirigami.Theme.highlightColor
+        iconName: "dialog-information"
     }
     RowLayout {
         Layout.fillWidth: true
-        visible: root.backend.busy
+        visible: root.backend.busy && root.showError
         spacing: Kirigami.Units.largeSpacing
         QQC2.BusyIndicator {
             running: root.backend.busy
@@ -46,6 +78,7 @@ ColumnLayout {
             Layout.fillWidth: true
             text: root.backend.busyText
             wrapMode: Text.Wrap
+            textFormat: Text.PlainText
         }
     }
 }

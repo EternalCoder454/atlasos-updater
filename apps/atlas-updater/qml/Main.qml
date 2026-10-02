@@ -1,9 +1,12 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import Atlas.Ui
 
-Kirigami.ApplicationWindow {
+QQC2.ApplicationWindow {
     id: root
 
     // Both come from Shell::openWindow() (setInitialProperties).
@@ -11,20 +14,18 @@ Kirigami.ApplicationWindow {
     required property string startPage
 
     title: qsTr("Atlas Updater")
-    width: Kirigami.Units.gridUnit * 48
-    height: Kirigami.Units.gridUnit * 36
-    minimumWidth: Kirigami.Units.gridUnit * 22
-    minimumHeight: Kirigami.Units.gridUnit * 20
+    width: Kirigami.Units.gridUnit * 52
+    height: Kirigami.Units.gridUnit * 38
+    minimumWidth: Kirigami.Units.gridUnit * 24
+    minimumHeight: Kirigami.Units.gridUnit * 24
+    visible: true
+    color: Kirigami.Theme.backgroundColor
 
     property string currentPage: ""
+    // Icons only when the window is narrow.
+    readonly property bool compact: width < Kirigami.Units.gridUnit * 38
 
-    function showPage(name) {
-        if (name === currentPage) {
-            return;
-        }
-        currentPage = name;
-        pageStack.clear();
-        var c = {
+    readonly property var pages: ({
             "updates": updatesPage,
             "rollback": rollbackPage,
             "channel": channelPage,
@@ -33,64 +34,137 @@ Kirigami.ApplicationWindow {
             "reports": reportsPage,
             "sent": sentPage,
             "about": aboutPage
-        }[name];
-        pageStack.push(c ? c : updatesPage);
+        })
+
+    function showPage(name) {
+        if (name === currentPage) {
+            return;
+        }
+        var c = pages[name] ? pages[name] : updatesPage;
+        currentPage = pages[name] ? name : "updates";
+        if (stack.depth === 0) {
+            stack.push(c, {}, QQC2.StackView.Immediate);
+        } else {
+            stack.replace(c);
+        }
     }
 
-    globalDrawer: Kirigami.GlobalDrawer {
-        id: drawer
-        title: qsTr("Atlas Updater")
-        titleIcon: "net.eterneon.atlas.updater"
-        isMenu: false
-        collapsible: true
-        collapsed: false
-        modal: false
-        showHeaderWhenCollapsed: false
+    component NavItem: SidebarItem {
+        required property string page
+        Layout.fillWidth: true
+        compact: root.compact
+        selected: root.currentPage === page || (page === "settings" && root.currentPage === "sent")
+        QQC2.ToolTip.visible: compact && hovered
+        QQC2.ToolTip.text: text
+        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+        onClicked: root.showPage(page)
+    }
 
-        actions: [
-            Kirigami.Action {
-                text: qsTr("Updates")
-                icon.name: "update-none"
-                checked: root.currentPage === "updates"
-                onTriggered: root.showPage("updates")
-            },
-            Kirigami.Action {
-                text: qsTr("Go back")
-                icon.name: "edit-undo"
-                checked: root.currentPage === "rollback"
-                onTriggered: root.showPage("rollback")
-            },
-            Kirigami.Action {
-                text: qsTr("Channel")
-                icon.name: "network-wireless-hotspot"
-                checked: root.currentPage === "channel"
-                onTriggered: root.showPage("channel")
-            },
-            Kirigami.Action {
-                text: qsTr("History")
-                icon.name: "view-history"
-                checked: root.currentPage === "history"
-                onTriggered: root.showPage("history")
-            },
-            Kirigami.Action {
-                text: qsTr("Settings")
-                icon.name: "configure"
-                checked: root.currentPage === "settings"
-                onTriggered: root.showPage("settings")
-            },
-            Kirigami.Action {
-                text: qsTr("Sent reports")
-                icon.name: "mail-sent"
-                checked: root.currentPage === "sent"
-                onTriggered: root.showPage("sent")
-            },
-            Kirigami.Action {
-                text: qsTr("About")
-                icon.name: "help-about"
-                checked: root.currentPage === "about"
-                onTriggered: root.showPage("about")
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        Rectangle {
+            id: sidebar
+            Layout.fillHeight: true
+            Layout.preferredWidth: root.compact ? Kirigami.Units.gridUnit * 3.6 : Kirigami.Units.gridUnit * 12.5
+            color: Qt.tint(Kirigami.Theme.backgroundColor, Qt.alpha(Kirigami.Theme.highlightColor, 0.07))
+
+            Behavior on Layout.preferredWidth {
+                NumberAnimation {
+                    duration: Kirigami.Units.shortDuration
+                    easing.type: Easing.OutCubic
+                }
             }
-        ]
+
+            Rectangle {
+                anchors.right: parent.right
+                height: parent.height
+                width: 1
+                color: Qt.alpha(Kirigami.Theme.textColor, 0.12)
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.largeSpacing
+                anchors.rightMargin: Kirigami.Units.largeSpacing + 1
+                anchors.topMargin: Kirigami.Units.gridUnit
+                spacing: 2
+
+                NavItem {
+                    page: "updates"
+                    text: qsTr("Updates")
+                    icon.name: "update-none"
+                }
+                NavItem {
+                    page: "rollback"
+                    text: qsTr("Go back")
+                    icon.name: "edit-undo"
+                }
+                NavItem {
+                    page: "channel"
+                    text: qsTr("Channel")
+                    icon.name: "network-wireless-hotspot"
+                }
+                NavItem {
+                    page: "history"
+                    text: qsTr("History")
+                    icon.name: "view-history"
+                }
+                Item {
+                    Layout.fillHeight: true
+                }
+                NavItem {
+                    page: "settings"
+                    text: qsTr("Settings")
+                    icon.name: "configure"
+                }
+                NavItem {
+                    page: "reports"
+                    text: qsTr("Crash reports")
+                    icon.name: "emblem-important"
+                }
+                NavItem {
+                    page: "about"
+                    text: qsTr("About")
+                    icon.name: "help-about"
+                }
+            }
+        }
+
+        QQC2.StackView {
+            id: stack
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+
+            replaceEnter: Transition {
+                ParallelAnimation {
+                    NumberAnimation {
+                        property: "opacity"
+                        from: 0
+                        to: 1
+                        duration: Kirigami.Units.longDuration
+                        easing.type: Easing.OutCubic
+                    }
+                    NumberAnimation {
+                        property: "y"
+                        from: Kirigami.Units.gridUnit
+                        to: 0
+                        duration: Kirigami.Units.longDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
+            }
+            replaceExit: Transition {
+                NumberAnimation {
+                    property: "opacity"
+                    from: 1
+                    to: 0
+                    duration: Kirigami.Units.shortDuration
+                }
+            }
+        }
     }
 
     Component {
@@ -122,12 +196,15 @@ Kirigami.ApplicationWindow {
         id: settingsPage
         SettingsPage {
             backend: root.backend
+            onOpenReports: root.showPage("reports")
+            onOpenSent: root.showPage("sent")
         }
     }
     Component {
         id: reportsPage
         ReportsPage {
             backend: root.backend
+            onOpenSent: root.showPage("sent")
         }
     }
     Component {

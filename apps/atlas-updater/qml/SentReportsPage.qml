@@ -4,9 +4,10 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import Atlas.Ui
 import "dates.js" as Dates
 
-Kirigami.ScrollablePage {
+AtlasPage {
     id: page
 
     required property var backend
@@ -17,18 +18,22 @@ Kirigami.ScrollablePage {
 
     Component.onCompleted: backend.loadSentReports()
 
-    Kirigami.Dialog {
+    ConfirmDialog {
         id: payloadDialog
         property string payload: ""
         title: qsTr("What was sent")
-        standardButtons: Kirigami.Dialog.Close
-        preferredWidth: Kirigami.Units.gridUnit * 32
-        preferredHeight: Kirigami.Units.gridUnit * 24
+        acceptText: qsTr("Close")
+        showReject: false
+        width: Math.min(parent.width - Kirigami.Units.gridUnit * 2, Kirigami.Units.gridUnit * 36)
+
         QQC2.ScrollView {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 18
             QQC2.TextArea {
                 readOnly: true
                 text: payloadDialog.payload
                 font.family: "monospace"
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
                 wrapMode: TextEdit.NoWrap
                 Accessible.name: qsTr("Sent data")
             }
@@ -36,37 +41,28 @@ Kirigami.ScrollablePage {
     }
 
     Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - Kirigami.Units.gridUnit * 4
+        Layout.fillWidth: true
+        Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.sent.length === 0
         icon.name: "mail-sent"
         text: qsTr("No reports sent")
         explanation: qsTr("Reports you send are listed here for 90 days.")
     }
 
-    ListView {
-        model: page.sent
-        delegate: QQC2.ItemDelegate {
-            id: row
-            required property var modelData
-            width: ListView.view.width
-            onClicked: {
-                payloadDialog.payload = row.modelData.payload;
-                payloadDialog.open();
-            }
-            contentItem: ColumnLayout {
-                spacing: 0
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    text: row.modelData.appName + " " + row.modelData.appVersion
-                    elide: Text.ElideRight
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                    elide: Text.ElideRight
-                    text: Dates.longDate(row.modelData.time) + " · AtlasOS " + row.modelData.atlasosVersion + (row.modelData.sentEventId ? " · " + qsTr("event %1").arg(row.modelData.sentEventId) : "")
+    Section {
+        visible: page.sent.length > 0
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+        Repeater {
+            model: page.sent
+            delegate: SectionRow {
+                id: row
+                required property var modelData
+                title: row.modelData.appName + " " + row.modelData.appVersion
+                subtitle: Dates.longDate(row.modelData.time) + " · AtlasOS " + row.modelData.atlasosVersion + (row.modelData.sentEventId ? " · " + qsTr("event %1").arg(row.modelData.sentEventId) : "")
+                chevron: true
+                onClicked: {
+                    payloadDialog.payload = row.modelData.payload;
+                    payloadDialog.open();
                 }
             }
         }

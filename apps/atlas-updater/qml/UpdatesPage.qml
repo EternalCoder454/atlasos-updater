@@ -4,9 +4,10 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import Atlas.Ui
 import "dates.js" as Dates
 
-Kirigami.ScrollablePage {
+AtlasPage {
     id: page
 
     required property var backend
@@ -16,6 +17,9 @@ Kirigami.ScrollablePage {
     title: qsTr("Updates")
 
     readonly property var apps: page.backend.appsJson.length > 0 ? JSON.parse(page.backend.appsJson) : []
+    readonly property bool hasError: page.backend.errorText.length > 0 && (!page.backend.loaded || !page.backend.busy)
+    readonly property bool downloading: page.backend.busy && page.backend.updateAvailable && !page.backend.hasStaged
+    readonly property bool checking: (!page.backend.loaded && !page.hasError) || (page.backend.busy && !page.downloading)
 
     function version(v, date) {
         return date.length > 0 ? qsTr("%1  (%2)").arg(v).arg(Dates.longDate(date)) : v;
@@ -37,376 +41,276 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PromptDialog {
+    ConfirmDialog {
         id: scheduleDialog
         title: qsTr("Restart later")
-        standardButtons: Kirigami.Dialog.NoButton
-        customFooterActions: [
-            Kirigami.Action {
-                text: qsTr("Schedule restart")
-                icon.name: "appointment-new"
-                onTriggered: {
-                    var d = new Date();
-                    if (dayBox.currentIndex === 1) {
-                        d.setDate(d.getDate() + 1);
-                    }
-                    d.setHours(hourSpin.value, minuteSpin.value, 0, 0);
-                    page.backend.scheduleRestart(Math.floor(d.getTime() / 1000));
-                    scheduleDialog.close();
-                }
-            },
-            Kirigami.Action {
-                text: qsTr("Cancel")
-                icon.name: "dialog-cancel"
-                onTriggered: scheduleDialog.close()
+        text: qsTr("Atlas Updater restarts your computer at this time. You get a notification 5 minutes before, and apps get to save their work first.")
+        acceptText: qsTr("Schedule restart")
+        onAccepted: {
+            var d = new Date();
+            if (dayBox.currentIndex === 1) {
+                d.setDate(d.getDate() + 1);
             }
-        ]
-        onOpened: {
+            d.setHours(hourSpin.value, minuteSpin.value, 0, 0);
+            page.backend.scheduleRestart(Math.floor(d.getTime() / 1000));
+        }
+        onAboutToShow: {
             var d = new Date(Date.now() + 60 * 60 * 1000);
             dayBox.currentIndex = d.getDate() !== new Date().getDate() ? 1 : 0;
             hourSpin.value = d.getHours();
             minuteSpin.value = 0;
         }
 
-        ColumnLayout {
+        RowLayout {
             spacing: Kirigami.Units.largeSpacing
-            QQC2.Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: qsTr("Atlas Updater restarts your computer at this time. You get a notification 5 minutes before, and apps get to save their work first.")
+            QQC2.ComboBox {
+                id: dayBox
+                model: [qsTr("Today"), qsTr("Tomorrow")]
+                Accessible.name: qsTr("Day")
             }
-            Kirigami.FormLayout {
-                Layout.fillWidth: true
-                QQC2.ComboBox {
-                    id: dayBox
-                    Kirigami.FormData.label: qsTr("Day:")
-                    model: [qsTr("Today"), qsTr("Tomorrow")]
-                    Accessible.name: qsTr("Day")
-                }
-                RowLayout {
-                    Kirigami.FormData.label: qsTr("Time:")
-                    QQC2.SpinBox {
-                        id: hourSpin
-                        from: 0
-                        to: 23
-                        editable: true
-                        Accessible.name: qsTr("Hour")
-                        textFromValue: v => (v < 10 ? "0" : "") + v
-                    }
-                    QQC2.Label {
-                        text: ":"
-                    }
-                    QQC2.SpinBox {
-                        id: minuteSpin
-                        from: 0
-                        to: 59
-                        stepSize: 5
-                        editable: true
-                        Accessible.name: qsTr("Minute")
-                        textFromValue: v => (v < 10 ? "0" : "") + v
+            QQC2.SpinBox {
+                id: hourSpin
+                from: 0
+                to: 23
+                editable: true
+                Accessible.name: qsTr("Hour")
+                textFromValue: v => (v < 10 ? "0" : "") + v
+            }
+            QQC2.Label {
+                text: ":"
+            }
+            QQC2.SpinBox {
+                id: minuteSpin
+                from: 0
+                to: 59
+                stepSize: 5
+                editable: true
+                Accessible.name: qsTr("Minute")
+                textFromValue: v => (v < 10 ? "0" : "") + v
+            }
+        }
+    }
+
+    Cards {
+        Layout.fillWidth: true
+        backend: page.backend
+        showError: false
+    }
+
+    // A crash report is waiting.
+    SecondaryButton {
+        Layout.alignment: Qt.AlignLeft
+        visible: page.backend.reportsCount > 0
+        text: qsTr("A crash report is waiting. Review it")
+        icon.name: "emblem-important"
+        onClicked: page.openReports()
+    }
+
+    // ---- the system ----
+    StatusHero {
+        Layout.topMargin: Kirigami.Units.gridUnit
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+        busy: page.checking || page.downloading
+        tint: page.hasError ? Kirigami.Theme.negativeTextColor : (page.backend.hasStaged ? Kirigami.Theme.highlightColor : (page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor))
+        iconName: {
+            if (page.hasError) {
+                return "dialog-error";
+            }
+            if (page.checking) {
+                return "view-refresh";
+            }
+            if (page.downloading) {
+                return "download";
+            }
+            if (page.backend.hasStaged) {
+                return "system-reboot";
+            }
+            if (page.backend.updateAvailable) {
+                return "update-medium";
+            }
+            return "checkmark";
+        }
+        headline: {
+            if (page.hasError) {
+                return page.backend.loaded ? qsTr("Could not check for updates") : qsTr("Could not read the system state");
+            }
+            if (!page.backend.loaded) {
+                return qsTr("Reading the system state…");
+            }
+            if (page.checking) {
+                return qsTr("Checking for updates…");
+            }
+            if (page.downloading) {
+                return qsTr("Downloading %1…").arg(page.backend.availableVersion);
+            }
+            if (page.backend.hasStaged) {
+                return qsTr("Restart to finish updating");
+            }
+            if (page.backend.updateAvailable) {
+                return qsTr("AtlasOS %1 is available").arg(page.backend.availableVersion);
+            }
+            return qsTr("AtlasOS is up to date");
+        }
+        subtitle: {
+            if (page.hasError) {
+                return page.backend.errorText;
+            }
+            if (page.checking || page.downloading) {
+                return page.backend.busyText;
+            }
+            if (page.backend.hasStaged) {
+                return page.backend.scheduledAt > 0 ? qsTr("Version %1 is ready. Restart scheduled for %2.").arg(page.backend.stagedVersion).arg(Dates.shortDateTime(page.backend.scheduledAt)) : qsTr("Version %1 is downloaded and waits for a restart.").arg(page.backend.stagedVersion);
+            }
+            if (page.backend.updateAvailable) {
+                return qsTr("It can be downloaded now. You are on %1.").arg(page.backend.currentVersion);
+            }
+            return qsTr("Version %1. Updates download in the background.").arg(page.backend.currentVersion);
+        }
+
+        PrimaryButton {
+            text: qsTr("Restart to update")
+            visible: page.backend.hasStaged || page.backend.restartNeeded
+            enabled: !page.backend.busy
+            onClicked: page.backend.restartNow()
+        }
+        MenuButton {
+            text: qsTr("Restart later…")
+            visible: page.backend.restartNeeded && page.backend.scheduledAt === 0
+            QQC2.MenuItem {
+                text: qsTr("Choose a time…")
+                onTriggered: scheduleDialog.open()
+            }
+        }
+        SecondaryButton {
+            text: qsTr("Cancel scheduled restart")
+            visible: page.backend.scheduledAt > 0
+            onClicked: page.backend.cancelRestart()
+        }
+        PrimaryButton {
+            text: qsTr("Download update")
+            visible: page.backend.updateAvailable && !page.backend.hasStaged
+            enabled: !page.backend.busy
+            onClicked: page.backend.downloadUpdate()
+        }
+        PrimaryButton {
+            text: qsTr("Try again")
+            visible: page.hasError
+            onClicked: page.backend.checkForUpdate()
+        }
+        SecondaryButton {
+            text: qsTr("Check for updates")
+            visible: !page.hasError && !page.backend.hasStaged && !page.backend.restartNeeded
+            enabled: !page.backend.busy
+            onClicked: page.backend.checkForUpdate()
+        }
+    }
+
+    // ---- release notes ----
+    Section {
+        title: qsTr("What's new in %1").arg(page.backend.notesVersion)
+        visible: page.backend.notesState !== "none" && page.backend.notesState !== ""
+
+        SectionRow {
+            visible: page.backend.notesState === "loading"
+            title: qsTr("Loading release notes…")
+        }
+        SectionRow {
+            visible: page.backend.notesState === "missing"
+            title: qsTr("No release notes for this version")
+        }
+        SectionRow {
+            visible: page.backend.notesState === "error"
+            title: qsTr("Could not load the release notes")
+            subtitle: page.backend.notesError.length > 0 ? page.backend.notesError : qsTr("Check your internet connection.")
+            SecondaryButton {
+                text: qsTr("Try again")
+                onClicked: page.backend.loadNotes()
+            }
+        }
+        Item {
+            visible: page.backend.notesState === "ready"
+            Layout.fillWidth: true
+            implicitHeight: notes.implicitHeight + Kirigami.Units.largeSpacing * 2
+            NotesText {
+                id: notes
+                anchors.fill: parent
+                anchors.margins: Kirigami.Units.largeSpacing
+                markdown: page.backend.notesText
+                onLinkClicked: link => {
+                    if (page.backend.isSafeLink(link)) {
+                        Qt.openUrlExternally(link);
                     }
                 }
             }
         }
     }
 
-    ColumnLayout {
-        spacing: Kirigami.Units.largeSpacing
-
-        Kirigami.InlineMessage {
-            Layout.fillWidth: true
-            type: Kirigami.MessageType.Information
-            visible: page.backend.reportsCount > 0
-            text: qsTr("A crash report is waiting. You can review it, and nothing is sent unless you say so.")
-            actions: [
-                Kirigami.Action {
-                    text: qsTr("Review report")
-                    icon.name: "tools-report-bug"
-                    onTriggered: page.openReports()
-                }
-            ]
+    // ---- versions ----
+    Section {
+        title: qsTr("Versions")
+        SectionRow {
+            title: qsTr("Current")
+            value: page.backend.loaded ? page.version(page.backend.currentVersion, page.backend.currentDate) : "…"
         }
-
-        Cards {
-            Layout.fillWidth: true
-            backend: page.backend
+        SectionRow {
+            title: qsTr("Ready to install")
+            value: page.backend.hasStaged ? page.version(page.backend.stagedVersion, page.backend.stagedDate) : (page.backend.updateAvailable ? qsTr("%1, not downloaded yet").arg(page.backend.availableVersion) : qsTr("Nothing waiting"))
         }
+        SectionRow {
+            title: qsTr("Previous")
+            value: page.backend.hasRollback ? page.version(page.backend.rollbackVersion, page.backend.rollbackDate) : qsTr("None")
+        }
+    }
 
-        // ---- the system ----
-        Kirigami.AbstractCard {
-            Layout.fillWidth: true
-            contentItem: ColumnLayout {
-                spacing: Kirigami.Units.largeSpacing
+    // ---- flatpak apps ----
+    Section {
+        title: qsTr("App updates")
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
 
-                RowLayout {
-                    spacing: Kirigami.Units.largeSpacing
-                    Kirigami.Icon {
-                        source: page.backend.hasStaged ? "update-high" : (page.backend.updateAvailable ? "update-medium" : "update-none")
-                        Layout.preferredWidth: Kirigami.Units.iconSizes.huge
-                        Layout.preferredHeight: Kirigami.Units.iconSizes.huge
-                    }
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Kirigami.Heading {
-                            Layout.fillWidth: true
-                            level: 2
-                            wrapMode: Text.Wrap
-                            text: {
-                                if (!page.backend.loaded) {
-                                    return qsTr("Reading the system state…");
-                                }
-                                if (page.backend.hasStaged) {
-                                    return qsTr("Restart to finish updating");
-                                }
-                                if (page.backend.updateAvailable) {
-                                    return qsTr("An update is available");
-                                }
-                                return qsTr("Your system is up to date");
-                            }
-                        }
-                        QQC2.Label {
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            opacity: 0.7
-                            visible: page.backend.loaded
-                            text: {
-                                if (page.backend.hasStaged) {
-                                    return qsTr("Version %1 is downloaded and waits for a restart.").arg(page.backend.stagedVersion);
-                                }
-                                if (page.backend.updateAvailable) {
-                                    return qsTr("Version %1 can be downloaded now.").arg(page.backend.availableVersion);
-                                }
-                                return qsTr("Updates download in the background. Check now if you like.");
-                            }
-                        }
-                    }
-                }
-
-                Kirigami.FormLayout {
-                    Layout.fillWidth: true
-                    wideMode: true
-                    QQC2.Label {
-                        Kirigami.FormData.label: qsTr("Current:")
-                        text: page.backend.loaded ? page.version(page.backend.currentVersion, page.backend.currentDate) : "…"
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-                    QQC2.Label {
-                        Kirigami.FormData.label: qsTr("Ready to install:")
-                        text: page.backend.hasStaged ? page.version(page.backend.stagedVersion, page.backend.stagedDate) : (page.backend.updateAvailable ? qsTr("%1, not downloaded yet").arg(page.backend.availableVersion) : qsTr("Nothing waiting"))
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-                    QQC2.Label {
-                        Kirigami.FormData.label: qsTr("Previous:")
-                        text: page.backend.hasRollback ? page.version(page.backend.rollbackVersion, page.backend.rollbackDate) : qsTr("None")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-                }
-
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-                    QQC2.Button {
-                        text: qsTr("Restart to update")
-                        icon.name: "system-reboot"
-                        visible: page.backend.restartNeeded
-                        highlighted: true
-                        enabled: !page.backend.busy
-                        onClicked: page.backend.restartNow()
-                    }
-                    QQC2.Button {
-                        text: qsTr("Restart later…")
-                        icon.name: "chronometer"
-                        visible: page.backend.restartNeeded && page.backend.scheduledAt === 0
-                        onClicked: scheduleDialog.open()
-                    }
-                    QQC2.Button {
-                        text: qsTr("Download update")
-                        icon.name: "download"
-                        visible: page.backend.updateAvailable && !page.backend.hasStaged
-                        highlighted: true
-                        enabled: !page.backend.busy
-                        onClicked: page.backend.downloadUpdate()
-                    }
-                    QQC2.Button {
-                        text: qsTr("Check for updates")
-                        icon.name: "view-refresh"
-                        enabled: !page.backend.busy
-                        onClicked: page.backend.checkForUpdate()
-                    }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: page.backend.scheduledAt > 0
-                    spacing: Kirigami.Units.largeSpacing
-                    Kirigami.Icon {
-                        source: "chronometer"
-                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                    }
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: qsTr("Restart scheduled for %1").arg(Dates.shortDateTime(page.backend.scheduledAt))
-                    }
-                    QQC2.Button {
-                        text: qsTr("Cancel scheduled restart")
-                        icon.name: "dialog-cancel"
-                        onClicked: page.backend.cancelRestart()
-                    }
-                }
+        SectionRow {
+            visible: page.backend.appsBusy
+            title: page.backend.appsStatus
+            QQC2.BusyIndicator {
+                running: page.backend.appsBusy
+                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                implicitHeight: implicitWidth
             }
         }
-
-        // ---- release notes ----
-        Kirigami.AbstractCard {
-            Layout.fillWidth: true
-            visible: page.backend.notesState !== "none" && page.backend.notesState !== ""
-            header: Kirigami.Heading {
-                level: 3
-                text: qsTr("What's new in %1").arg(page.backend.notesVersion)
-                wrapMode: Text.Wrap
-            }
-            contentItem: ColumnLayout {
-                spacing: Kirigami.Units.smallSpacing
-                RowLayout {
-                    visible: page.backend.notesState === "loading"
-                    QQC2.BusyIndicator {
-                        running: page.backend.notesState === "loading"
-                    }
-                    QQC2.Label {
-                        text: qsTr("Loading release notes…")
-                    }
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    visible: page.backend.notesState === "missing"
-                    wrapMode: Text.Wrap
-                    text: qsTr("No release notes for this version")
-                    opacity: 0.7
-                }
-                RowLayout {
-                    visible: page.backend.notesState === "error"
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: qsTr("Could not load the release notes. Check your internet connection.")
-                    }
-                    QQC2.Button {
-                        text: qsTr("Try again")
-                        icon.name: "view-refresh"
-                        onClicked: {
-                            page.backend.loadNotes();
-                        }
-                    }
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    visible: page.backend.notesState === "ready"
-                    text: page.backend.notesText
-                    textFormat: Text.MarkdownText
-                    wrapMode: Text.Wrap
-                    onLinkActivated: link => Qt.openUrlExternally(link)
-                }
+        SectionRow {
+            visible: page.backend.appsError.length > 0
+            iconName: "dialog-error"
+            title: page.backend.appsError
+        }
+        SectionRow {
+            visible: !page.backend.appsBusy && page.apps.length === 0 && page.backend.appsError.length === 0
+            iconName: "checkmark"
+            title: qsTr("All apps are up to date.")
+        }
+        Repeater {
+            model: page.apps
+            delegate: SectionRow {
+                id: appRow
+                required property var modelData
+                iconName: appRow.modelData.icon ? appRow.modelData.icon : (appRow.modelData.runtime ? "preferences-system-plugin" : "applications-all")
+                title: appRow.modelData.name
+                subtitle: (appRow.modelData.runtime ? qsTr("Runtime") : qsTr("App")) + " · " + appRow.modelData.branch + " · " + (appRow.modelData.system ? qsTr("System") : qsTr("User"))
+                value: appRow.modelData.size_text
             }
         }
-
-        // ---- flatpak apps ----
-        Kirigami.AbstractCard {
-            Layout.fillWidth: true
-            Layout.bottomMargin: Kirigami.Units.largeSpacing
-            header: Kirigami.Heading {
-                level: 3
-                text: qsTr("App updates")
-            }
-            contentItem: ColumnLayout {
-                spacing: Kirigami.Units.smallSpacing
-
-                RowLayout {
-                    visible: page.backend.appsBusy
-                    spacing: Kirigami.Units.largeSpacing
-                    QQC2.BusyIndicator {
-                        running: page.backend.appsBusy
-                    }
-                    QQC2.Label {
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: page.backend.appsStatus
-                    }
-                }
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    type: Kirigami.MessageType.Error
-                    visible: page.backend.appsError.length > 0
-                    text: page.backend.appsError
-                }
-                QQC2.Label {
-                    Layout.fillWidth: true
-                    visible: !page.backend.appsBusy && page.apps.length === 0 && page.backend.appsError.length === 0
-                    text: qsTr("All apps are up to date.")
-                    opacity: 0.7
-                }
-                Repeater {
-                    model: page.apps
-                    delegate: QQC2.ItemDelegate {
-                        id: appRow
-                        required property var modelData
-                        Layout.fillWidth: true
-                        hoverEnabled: false
-                        down: false
-                        text: appRow.modelData.name
-                        icon.name: appRow.modelData.runtime ? "preferences-system-plugin" : "applications-all"
-                        contentItem: RowLayout {
-                            spacing: Kirigami.Units.largeSpacing
-                            Kirigami.Icon {
-                                source: appRow.icon.name
-                                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 0
-                                QQC2.Label {
-                                    Layout.fillWidth: true
-                                    text: appRow.modelData.name
-                                    elide: Text.ElideRight
-                                }
-                                QQC2.Label {
-                                    Layout.fillWidth: true
-                                    opacity: 0.7
-                                    font: Kirigami.Theme.smallFont
-                                    elide: Text.ElideRight
-                                    text: (appRow.modelData.runtime ? qsTr("Runtime") : qsTr("App")) + " · " + appRow.modelData.branch + " · " + (appRow.modelData.system ? qsTr("System") : qsTr("User"))
-                                }
-                            }
-                            QQC2.Label {
-                                text: appRow.modelData.size_text
-                                opacity: 0.7
-                            }
-                        }
-                    }
-                }
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-                    QQC2.Button {
-                        text: qsTr("Update apps")
-                        icon.name: "update-high"
-                        visible: page.apps.length > 0
-                        enabled: !page.backend.appsBusy
-                        onClicked: page.backend.updateApps()
-                    }
-                    QQC2.Button {
-                        text: qsTr("Check for app updates")
-                        icon.name: "view-refresh"
-                        enabled: !page.backend.appsBusy
-                        onClicked: page.backend.checkApps()
-                    }
-                }
+        SectionRow {
+            title: qsTr("Check for app updates")
+            Accessible.name: qsTr("Check for app updates")
+            clickable: !page.backend.appsBusy
+            chevron: true
+            onClicked: page.backend.checkApps()
+        }
+        SectionRow {
+            visible: page.apps.length > 0
+            title: qsTr("%n app(s) can be updated", "", page.apps.length)
+            SecondaryButton {
+                text: qsTr("Update apps")
+                enabled: !page.backend.appsBusy
+                onClicked: page.backend.updateApps()
             }
         }
     }
