@@ -103,33 +103,50 @@ pub fn is_safe_link(link: &str) -> bool {
     parse_https(link).is_some()
 }
 
+/// Last labels that are file extensions or names of tools, not top-level
+/// domains in practice: `README.md`, `Node.js`, `main.rs`.
+const FILE_TAILS: &[&str] = &[
+    "md", "js", "ts", "rs", "py", "rb", "go", "c", "h", "cc", "cpp", "hpp", "sh", "txt", "json",
+    "toml", "yaml", "yml", "xml", "html", "htm", "css", "csv", "log", "conf", "cfg", "ini", "lock",
+    "rpm", "deb", "zip", "gz", "xz", "bz2", "tar", "tgz", "iso", "img", "png", "jpg", "jpeg",
+    "gif", "svg", "pdf", "doc", "docx", "odt", "so", "a", "o", "rlib", "service", "desktop",
+    "patch", "diff", "pl", "php", "java", "kt", "lua", "mjs", "cjs", "jsx", "tsx",
+];
+
 /// The host a link's text claims, when the text looks like a URL or a domain
-/// (`https://bank.com/login`, `www.bank.com`, `bank.com`).
+/// (`https://bank.com/login`, `www.bank.com`, `bank.com`). Hidden characters
+/// and one trailing dot are dropped first, and so is a leading `www.`.
 fn text_host(text: &str) -> Option<String> {
-    let t = text.trim();
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !is_hidden(*c) || c.is_whitespace())
+        .collect();
+    let t = cleaned.trim();
     if t.is_empty() || t.chars().any(char::is_whitespace) {
         return None;
     }
-    let t = ["https://", "http://", "ftp://"]
-        .iter()
-        .find_map(|p| {
-            t.get(..p.len())
-                .filter(|h| h.eq_ignore_ascii_case(p))
-                .map(|_| &t[p.len()..])
-        })
-        .unwrap_or(t);
+    let scheme = ["https://", "http://", "ftp://"].iter().find_map(|p| {
+        t.get(..p.len())
+            .filter(|h| h.eq_ignore_ascii_case(p))
+            .map(|_| &t[p.len()..])
+    });
+    let t = scheme.unwrap_or(t);
     let auth = &t[..t.find(['/', '?', '#']).unwrap_or(t.len())];
     let auth = auth.rsplit('@').next().unwrap_or(auth);
     let host = auth.split(':').next().unwrap_or(auth).to_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    let host = host.strip_prefix("www.").unwrap_or(host);
     let labels: Vec<&str> = host.split('.').collect();
     let last = labels.last()?;
-    (labels.len() >= 2
+    let shaped = labels.len() >= 2
         && labels
             .iter()
             .all(|l| !l.is_empty() && l.chars().all(|c| c.is_alphanumeric() || c == '-'))
-        && last.chars().count() >= 2
-        && last.chars().all(char::is_alphabetic))
-    .then_some(host)
+        && (2..=24).contains(&last.chars().count())
+        && last.chars().all(char::is_alphabetic);
+    // a bare name needs a TLD-like tail; with a scheme or `www.` it is a site
+    let claims_site = scheme.is_some() || t.to_lowercase().starts_with("www.");
+    (shaped && (claims_site || !FILE_TAILS.contains(last))).then(|| host.to_string())
 }
 
 fn escape(s: &str, out: &mut String) {
@@ -207,7 +224,9 @@ pub fn render(md: &str) -> String {
                         out.push_str("</a>");
                         // Text that names another site than the link goes to:
                         // show where it really goes.
-                        if text_host(&text).is_some_and(|t| t != host) {
+                        if text_host(&text)
+                            .is_some_and(|t| t != host.strip_prefix("www.").unwrap_or(&host))
+                        {
                             out.push_str(" (");
                             escape(&host, &mut out);
                             out.push(')');
@@ -478,6 +497,27 @@ mod tests {
         ] {
             assert!(!render(md).contains("</a> ("), "{md}");
         }
+        // evasions: a trailing dot and hidden characters in the text
+        for md in [
+            "[bank.com.](https://evil.example/)",
+            "[bank\u{200b}.com](https://evil.example/)",
+            "[bank\u{ad}.com](https://evil.example/)",
+            "[b\u{202e}ank.com](https://evil.example/)",
+        ] {
+            assert!(render(md).contains("</a> (evil.example)"), "{md}");
+        }
+        // file and tool names are not sites; www. is not a different site
+        for md in [
+            "[README.md](https://github.com/x)",
+            "[Node.js](https://nodejs.org)",
+            "[main.rs](https://example.com/)",
+            "[www.bank.com](https://bank.com/)",
+            "[bank.com](https://www.bank.com/)",
+        ] {
+            assert!(!render(md).contains("</a> ("), "{md}");
+        }
+        // but a scheme or www. makes even a file-like tail a site name
+        assert!(render("[www.evil.md](https://x.example/)").contains("(x.example)"));
         // text of a link that is not a link stays plain, no host added
         assert_eq!(
             render("[bank.com](http://evil.example)").trim(),
