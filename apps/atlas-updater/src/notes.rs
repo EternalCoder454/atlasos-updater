@@ -48,121 +48,194 @@ impl FetchError {
     }
 }
 
-/// Only `https://` links are safe to open from release notes.
-pub fn is_safe_link(link: &str) -> bool {
-    let l = link.trim();
-    l.len() > 8 && l[..8].eq_ignore_ascii_case("https://") && !l.chars().any(char::is_control)
+fn starts_https(s: &[char]) -> bool {
+    s.len() > 8
+        && s[..8]
+            .iter()
+            .zip("https://".chars())
+            .all(|(a, b)| a.eq_ignore_ascii_case(&b))
 }
 
-/// Release notes are untrusted text. Drop images (Qt would fetch them when
-/// the notes are shown) and HTML tags, and turn every link that is not
-/// `https://` into its plain text.
-pub fn sanitize(md: &str) -> String {
-    let chars: Vec<char> = md.chars().collect();
-    let mut out = String::with_capacity(md.len());
-    let mut i = 0;
-    // `]` index matching the `[` at `open`, if any (one line, nesting counted).
-    let close_of = |open: usize| -> Option<usize> {
-        let mut depth = 0;
-        for (j, &c) in chars.iter().enumerate().skip(open) {
-            match c {
-                '\n' => return None,
-                '[' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(j);
-                    }
+/// Only `https://` links are safe to open from release notes. Never panics
+/// (it runs on the GUI thread).
+pub fn is_safe_link(link: &str) -> bool {
+    let l: Vec<char> = link.trim().chars().take(4096).collect();
+    starts_https(&l) && !l.iter().any(|c| c.is_control())
+}
+
+/// Longest line we look at; the rest of a longer line is cut.
+const MAX_LINE: usize = 4000;
+/// Longest tag we recognize.
+const MAX_TAG: usize = 300;
+/// HTML Qt may render without loading anything or hiding the text.
+const PLAIN_TAGS: &[&str] = &[
+    "b", "i", "em", "strong", "code", "pre", "br", "p", "ul", "ol", "li", "h1", "h2", "h3", "h4",
+    "h5", "h6", "blockquote", "kbd", "sub", "sup", "s", "del", "hr", "details", "summary", "tt",
+    "u", "strike",
+];
+
+struct Out {
+    s: String,
+    /// Backslashes right before the end (an odd count escapes the next char).
+    bs: usize,
+    last: Option<char>,
+}
+
+impl Out {
+    fn push(&mut self, c: char) {
+        self.bs = if c == '\\' { self.bs + 1 } else { 0 };
+        self.last = Some(c);
+        self.s.push(c);
+    }
+}
+
+/// For each index, the next position at or after it holding `c` (`n` if none).
+fn next_of(chars: &[char], c: char) -> Vec<usize> {
+    let n = chars.len();
+    let mut v = vec![n; n + 1];
+    for i in (0..n).rev() {
+        v[i] = if chars[i] == c { i } else { v[i + 1] };
+    }
+    v
+}
+
+fn tag_is_plain(inner: &[char]) -> bool {
+    let inner = inner.strip_prefix(&['/']).unwrap_or(inner);
+    let name: String = inner
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let rest: String = inner[name.len()..].iter().collect();
+    PLAIN_TAGS.contains(&name.as_str()) && matches!(rest.trim(), "" | "/")
+}
+
+/// Index of the `[` of a link reference definition (`[label]: dest`) at the
+/// start of the line (after quote and list markers) whose destination is not
+/// https. Such a definition could point a later `[text]` at any URL.
+fn unsafe_definition(chars: &[char]) -> Option<usize> {
+    let n = chars.len();
+    let mut k = 0;
+    loop {
+        while k < n && chars[k] == ' ' {
+            k += 1;
+        }
+        match chars.get(k) {
+            Some('>') => k += 1,
+            Some('-' | '*' | '+') if chars.get(k + 1) == Some(&' ') => k += 2,
+            Some(d) if d.is_ascii_digit() => {
+                let mut j = k;
+                while j < n && chars[j].is_ascii_digit() {
+                    j += 1;
                 }
-                _ => {}
-            }
-        }
-        None
-    };
-    // `(...)` right after `at`: the index of its `)` and the target text.
-    let target_after = |at: usize| -> Option<(usize, String)> {
-        if chars.get(at + 1) != Some(&'(') {
-            return None;
-        }
-        let mut depth = 0;
-        for j in at + 1..chars.len() {
-            match chars[j] {
-                '\n' => return None,
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let inner: String = chars[at + 2..j].iter().collect();
-                        let url = inner.split_whitespace().next().unwrap_or("").to_string();
-                        return Some((j, url));
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    };
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '!'
-            && chars.get(i + 1) == Some(&'[')
-            && let Some(close) = close_of(i + 1)
-        {
-            i = match target_after(close) {
-                Some((end, _)) => end + 1,
-                // `![alt][ref]`: drop the reference part too
-                None if chars.get(close + 1) == Some(&'[') => {
-                    close_of(close + 1).map_or(close + 1, |e| e + 1)
-                }
-                None => close + 1,
-            };
-            continue;
-        }
-        if c == '['
-            && let Some(close) = close_of(i)
-        {
-            let text: String = sanitize(&chars[i + 1..close].iter().collect::<String>());
-            if let Some((end, url)) = target_after(close) {
-                if is_safe_link(&url) {
-                    out.push_str(&format!("[{text}]({url})"));
+                if matches!(chars.get(j), Some('.' | ')')) && chars.get(j + 1) == Some(&' ') {
+                    k = j + 2;
                 } else {
-                    out.push_str(&text);
+                    break;
                 }
-                i = end + 1;
+            }
+            _ => break,
+        }
+    }
+    if chars.get(k) != Some(&'[') {
+        return None;
+    }
+    let close = (k + 1..n).find(|&i| chars[i] == ']')?;
+    if chars.get(close + 1) != Some(&':') {
+        return None;
+    }
+    let mut j = close + 2;
+    while j < n && chars[j] == ' ' {
+        j += 1;
+    }
+    let dest: Vec<char> = chars[j..]
+        .iter()
+        .take_while(|c| !c.is_whitespace())
+        .copied()
+        .collect();
+    (!starts_https(&dest)).then_some(k)
+}
+
+fn sanitize_line(line: &str) -> String {
+    let mut chars: Vec<char> = line.chars().take(MAX_LINE + 1).collect();
+    let cut = chars.len() > MAX_LINE;
+    chars.truncate(MAX_LINE);
+    let n = chars.len();
+    let next_gt = next_of(&chars, '>');
+    let next_paren = next_of(&chars, ')');
+    let escape_def = unsafe_definition(&chars);
+    let mut o = Out { s: String::with_capacity(n), bs: 0, last: None };
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if escape_def == Some(i) {
+            o.push('\\');
+        }
+        match c {
+            // No `![` ever survives, so no Markdown image can be formed
+            // (however the brackets are nested or split over lines).
+            '[' if o.last == Some('!') => {
+                i += 1;
                 continue;
             }
-            // `[text][ref]` and `[ref]: url` forms: text only
-            if chars.get(close + 1) == Some(&'[') {
-                out.push_str(&text);
-                i = close_of(close + 1).map_or(close + 1, |e| e + 1);
-                continue;
+            // A link whose target is not https loses its target.
+            ']' if chars.get(i + 1) == Some(&'(') => {
+                let mut j = i + 2;
+                while j < n && chars[j] == ' ' {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'<') {
+                    j += 1;
+                }
+                if !starts_https(&chars[j.min(n)..]) {
+                    o.push(']');
+                    if next_paren[i + 2] < n {
+                        i = next_paren[i + 2] + 1;
+                    } else {
+                        o.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
             }
-        }
-        if c == '<'
-            && chars
-                .get(i + 1)
-                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/' || *n == '!')
-            && let Some(rel) = chars[i..].iter().position(|&x| x == '>')
-        {
-            let tag: String = chars[i + 1..i + rel].iter().collect();
-            // `<https://...>` autolinks stay; any other tag goes
-            if is_safe_link(&tag) && !tag.contains(char::is_whitespace) {
-                out.push_str(&format!("<{tag}>"));
+            '<' if o.bs % 2 == 0 => {
+                let gt = next_gt[i];
+                if gt < n && gt - i <= MAX_TAG {
+                    let inner = &chars[i + 1..gt];
+                    let comment = inner.len() >= 5
+                        && inner.starts_with(&['!', '-', '-'])
+                        && inner.ends_with(&['-', '-']);
+                    if comment {
+                        i = gt + 1;
+                        continue;
+                    }
+                    let autolink =
+                        starts_https(inner) && !inner.iter().any(|c| c.is_whitespace() || *c == '<');
+                    if autolink || tag_is_plain(inner) {
+                        o.push('<');
+                        i += 1;
+                        continue;
+                    }
+                }
+                // Not a tag we trust: show it as text.
+                o.push('\\');
             }
-            i += rel + 1;
-            continue;
+            _ => {}
         }
-        out.push(c);
+        o.push(c);
         i += 1;
     }
-    // reference definitions `[x]: http://...` would still resolve; drop them
-    out.lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !(t.starts_with('[') && t.contains("]:"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    if cut {
+        o.s.push('…');
+    }
+    o.s
+}
+
+/// Release notes are untrusted text. Nothing in the result can make Qt load
+/// a resource: no Markdown image survives, no HTML except plain formatting
+/// tags, and links keep only `https://` targets. Linear time and no recursion.
+pub fn sanitize(md: &str) -> String {
+    md.lines().map(sanitize_line).collect::<Vec<_>>().join("\n")
 }
 
 /// Pulls `.body` out of a GitHub release JSON document.
@@ -247,20 +320,80 @@ mod tests {
     }
 
     #[test]
-    fn images_html_and_unsafe_links_are_removed() {
-        let md = "Hi ![pixel](http://t.example/p.png) there\n![x][r]\n<img src=\"http://t/p\"> ok\n[good](https://example.org/a \"t\") [bad](file:///etc/passwd) [worse](javascript:x)\n<https://example.org> <http://plain.example>\n[r]: http://t.example/p.png";
-        let out = sanitize(md);
+    fn images_never_survive() {
+        for md in [
+            "Hi ![pixel](http://t.example/p.png) there",
+            "![x][r]\n\n[r]: http://t.example/p.png",
+            "![alt\nmore](http://t.example/p.png)",
+            "![a`[`](http://t.example/p.png)",
+            "!![[a](http://t.example/p.png)",
+            "![![a](b)](c)",
+        ] {
+            let out = sanitize(md);
+            assert!(!out.contains("!["), "{md:?} -> {out:?}");
+            assert!(!out.contains("](http://") && !out.contains("\n[r]:"), "{md:?} -> {out:?}");
+        }
+        assert_eq!(sanitize("Hi ![pixel](http://t.example/p.png) there"), "Hi !pixel] there");
+    }
+
+    #[test]
+    fn unsafe_link_targets_are_dropped_and_https_kept() {
         assert_eq!(
-            out,
-            "Hi  there\n\n ok\n[good](https://example.org/a) bad worse\n<https://example.org> "
+            sanitize("[good](https://example.org/a) [bad](file:///etc/passwd) [worse](javascript:x)"),
+            "[good](https://example.org/a) [bad] [worse]"
         );
-        assert!(!out.contains("http://") && !out.contains("img"));
-        assert!(
-            is_safe_link("https://x.example/a")
-                && !is_safe_link("http://x")
-                && !is_safe_link("file:///x")
-                && !is_safe_link("HTTPS:// ")
-        );
+        assert_eq!(sanitize("[a\nb](javascript:x)"), "[a\nb]");
+        assert_eq!(sanitize("[open](  <HTTPS://e.org>)"), "[open](  <HTTPS://e.org>)");
+        assert_eq!(sanitize("[x](nope"), "[x] (nope");
+    }
+
+    #[test]
+    fn html_is_neutralized_without_eating_text() {
+        assert_eq!(sanitize("<img src=\"http://t/p\"> ok"), "\\<img src=\"http://t/p\"> ok");
+        assert_eq!(sanitize("a <b>bold</b> <br/>"), "a <b>bold</b> <br/>");
+        assert_eq!(sanitize("Vec<String> and width <height later -> x"), "Vec\\<String> and width \\<height later -> x");
+        assert_eq!(sanitize("x <!-- hidden --> y"), "x  y");
+        assert_eq!(sanitize("<https://example.org> <javascript:x>"), "<https://example.org> \\<javascript:x>");
+        // already escaped by the author: no second backslash
+        assert_eq!(sanitize("\\<img src=x>"), "\\<img src=x>");
+        assert_eq!(sanitize("<a href=\"http://x\">t</a>"), "\\<a href=\"http://x\">t\\</a>");
+    }
+
+    #[test]
+    fn reference_definitions() {
+        assert_eq!(sanitize("[Security]: fixed X"), "\\[Security]: fixed X");
+        assert_eq!(sanitize("> [r]: http://t.example/p"), "> \\[r]: http://t.example/p");
+        assert_eq!(sanitize("- 1. [r]:\nhttp://t.example"), "- 1. [r]:\nhttp://t.example".replacen("[r]", "\\[r]", 1));
+        assert_eq!(sanitize("[r]: https://ok.example/x"), "[r]: https://ok.example/x");
+    }
+
+    #[test]
+    fn hostile_input_is_linear_and_does_not_panic() {
+        let t = std::time::Instant::now();
+        for md in [
+            "[".repeat(2_000_000),
+            "![".repeat(1_000_000),
+            "<a ".repeat(600_000),
+            "](".repeat(1_000_000),
+            "[[[[]]]](x)".repeat(100_000),
+            "é".repeat(2_000_000),
+        ] {
+            let _ = sanitize(&md);
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(10));
+        let long = format!("{}\nnext", "a".repeat(10_000));
+        let out = sanitize(&long);
+        assert!(out.ends_with("…\nnext"));
+    }
+
+    #[test]
+    fn safe_link_check() {
+        assert!(is_safe_link("https://x.example/a") && is_safe_link(" HTTPS://x.example "));
+        assert!(!is_safe_link("http://x") && !is_safe_link("file:///x") && !is_safe_link("HTTPS:// "));
+        // byte 8 inside a multibyte char must not panic
+        assert!(!is_safe_link("docs/été") && !is_safe_link("[x](docs/été)"));
+        assert!(!is_safe_link("https://x\u{0}y"));
+        assert!(!is_safe_link(""));
     }
 
     #[test]
