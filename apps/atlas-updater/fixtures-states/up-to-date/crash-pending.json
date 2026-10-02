@@ -1,0 +1,24 @@
+[
+ {
+  "schema": 1,
+  "event_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  "report_type": "coredump",
+  "time": "2026-10-02T09:15:00Z",
+  "crash_id": "f00dfeedcafe0123",
+  "atlasos_version": "44.20261001",
+  "channel": "stable",
+  "previous_version": "44.20260924",
+  "app_name": "kwin_wayland",
+  "app_version": "6.7.5",
+  "category": "KWin",
+  "message": "Process 1234 (kwin_wayland) of user 1000 dumped core (SIGSEGV)",
+  "stacktrace": "#0  0x00007f1 in KWin::Workspace::update () from libkwin.so.6\n#1  0x00007f2 in QObject::event (QObject*, QEvent*) from libQt6Core.so.6\n#2  0x00007f3 in QCoreApplication::notify () from libQt6Core.so.6",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "gpu": "AMD Radeon RX 7900 XTX",
+  "gpu_driver": "amdgpu",
+  "uptime_secs": 11520,
+  "cpu_model": "Intel Core i9-14900KF",
+  "ram_total_kb": 32000000,
+  "mem_used_kb": 11000000
+ }
+]

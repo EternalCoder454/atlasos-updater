@@ -1,0 +1,61 @@
+{
+ "apiVersion": "org.containers.bootc/v1",
+ "kind": "BootcHost",
+ "metadata": {
+  "name": "host"
+ },
+ "spec": {
+  "image": {
+   "image": "ghcr.io/eternalcoder454/atlasos:stable",
+   "transport": "registry"
+  },
+  "bootOrder": "default"
+ },
+ "status": {
+  "staged": null,
+  "booted": {
+   "image": {
+    "image": {
+     "image": "ghcr.io/eternalcoder454/atlasos:stable",
+     "transport": "registry"
+    },
+    "architecture": "amd64",
+    "version": "44.20261001",
+    "timestamp": "2026-10-01T04:12:09Z",
+    "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+   },
+   "cachedUpdate": null,
+   "incompatible": false,
+   "pinned": false,
+   "store": "ostreeContainer",
+   "ostree": {
+    "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "deploySerial": 0,
+    "stateroot": "default"
+   }
+  },
+  "rollback": {
+   "image": {
+    "image": {
+     "image": "ghcr.io/eternalcoder454/atlasos:stable",
+     "transport": "registry"
+    },
+    "architecture": "amd64",
+    "version": "44.20260924",
+    "timestamp": "2026-09-24T04:09:30Z",
+    "imageDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "cachedUpdate": null,
+   "incompatible": false,
+   "pinned": false,
+   "store": "ostreeContainer",
+   "ostree": {
+    "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "deploySerial": 0,
+    "stateroot": "default"
+   }
+  },
+  "rollbackQueued": false,
+  "type": "bootcHost"
+ }
+}
