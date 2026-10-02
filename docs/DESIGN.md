@@ -131,9 +131,13 @@ Screens:
 - **Updates**:
   - Current, staged and rollback versions, each with its date (from
     `status.booted/staged/rollback.image.{version,timestamp}`).
-  - A "Check for updates" button (`CheckForUpdate`; the result is in
-    `status.booted.cachedUpdate`), and "Download update" (`Upgrade`) when an
-    update is found but not staged.
+  - A "Check for updates" button (`CheckForUpdate`), and "Download update"
+    (`Upgrade`) when an update is found but not staged. bootc records the
+    result as the `cachedUpdate` of the entry whose commit the image's ostree
+    ref points to (the image pulled last; after a rollback, the rollback
+    entry), so the booted entry's can be stale: `Status::available_update`
+    reads the ref heads from `/ostree/repo/refs/heads/ostree/container/image`
+    and picks that entry.
   - Release notes of the new version as Markdown, from
     `release_notes_url` with `{version}` filled in (default
     `https://api.github.com/repos/EternalCoder454/AtlasOS/releases/tags/{version}`,

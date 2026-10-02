@@ -148,7 +148,7 @@ impl HelperClient {
     }
 
     /// `bootc upgrade --check`; a found update shows in
-    /// `status.booted.cached_update`.
+    /// [`Status::available_update`].
     pub async fn check_for_update(&self) -> Result<Status> {
         self.call(|p| async move { p.check_for_update().await })
             .await
@@ -179,5 +179,7 @@ impl HelperClient {
 }
 
 fn parse(json: String) -> Result<bootc::Status> {
-    Status::from_json(&json).map_err(Error::Parse)
+    let mut st = Status::from_json(&json).map_err(Error::Parse)?;
+    st.image_ref_heads = bootc::image_ref_heads(std::path::Path::new(bootc::IMAGE_REFS_DIR));
+    Ok(st)
 }

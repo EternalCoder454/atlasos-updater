@@ -16,7 +16,8 @@ pub struct View {
     pub current: Slot,
     pub staged: Slot,
     pub rollback: Slot,
-    /// `booted.cachedUpdate` when it is not staged yet.
+    /// [`Status::available_update`]: the newest image a check found, when it
+    /// is neither booted nor staged.
     pub available: Slot,
     /// `stable`, `testing`, or empty for a custom ref.
     pub channel: String,
@@ -54,22 +55,17 @@ fn slot(e: Option<&BootEntry>) -> Slot {
 
 pub fn from_status(st: &Status) -> View {
     let booted = st.status.booted.as_ref();
-    let available = if st.update_available() {
-        let c = booted.and_then(|b| b.cached_update.as_ref());
-        match c {
-            Some(c) => Slot {
-                present: true,
-                version: c
-                    .version
-                    .clone()
-                    .unwrap_or_else(|| short_digest(&c.image_digest)),
-                date: c.timestamp.clone().unwrap_or_default(),
-                digest: c.image_digest.clone(),
-            },
-            None => Slot::default(),
-        }
-    } else {
-        Slot::default()
+    let available = match st.available_update() {
+        Some(c) => Slot {
+            present: true,
+            version: c
+                .version
+                .clone()
+                .unwrap_or_else(|| short_digest(&c.image_digest)),
+            date: c.timestamp.clone().unwrap_or_default(),
+            digest: c.image_digest.clone(),
+        },
+        None => Slot::default(),
     };
     let rollback = slot(st.status.rollback.as_ref());
     let queued = st.status.rollback_queued;

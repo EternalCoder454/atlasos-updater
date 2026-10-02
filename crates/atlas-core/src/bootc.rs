@@ -5,6 +5,7 @@
 //! default, so a newer bootc does not break the parser.
 
 use std::fmt;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,43 @@ pub struct Status {
     pub spec: Spec,
     #[serde(default)]
     pub status: HostStatus,
+    /// Commits the ostree image refs point to (see [`image_ref_heads`]). Not
+    /// part of bootc's JSON: the caller fills it in, and without it
+    /// [`Status::latest_image`] falls back to the booted entry.
+    #[serde(skip)]
+    pub image_ref_heads: Vec<String>,
+}
+
+/// Where ostree-ext keeps one ref per container image reference
+/// (`ostree/container/image/<escaped reference>`), each pointing to the
+/// commit of the image last pulled for it. Readable without root.
+pub const IMAGE_REFS_DIR: &str = "/ostree/repo/refs/heads/ostree/container/image";
+
+/// The commit checksums of the image refs under `dir`. Empty when they can't
+/// be read (not an ostree system, a test).
+pub fn image_ref_heads(dir: &Path) -> Vec<String> {
+    let mut heads = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(e.path()),
+                Ok(t) if t.is_file() => {
+                    if let Ok(text) = std::fs::read_to_string(e.path()) {
+                        let c = text.trim();
+                        if !c.is_empty() {
+                            heads.push(c.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    heads
 }
 
 /// The desired state (`spec`).
@@ -193,6 +231,11 @@ const TRANSPORTS: &[&str] = &[
 ];
 
 impl ImageReference {
+    /// The same image and transport (the signature policy is not compared).
+    pub fn same_image(&self, other: &ImageReference) -> bool {
+        self.image == other.image && self.transport_or_default() == other.transport_or_default()
+    }
+
     /// The transport, `registry` when not given.
     pub fn transport_or_default(&self) -> &str {
         self.transport.as_deref().unwrap_or("registry")
@@ -274,22 +317,57 @@ impl Status {
         self.status.staged.is_some()
     }
 
-    /// True when `upgrade --check` found an update that is not staged yet:
-    /// the booted entry has a `cachedUpdate` whose digest differs from the
-    /// staged one.
-    pub fn update_available(&self) -> bool {
-        let Some(cached) = self
-            .status
-            .booted
-            .as_ref()
-            .and_then(|b| b.cached_update.as_ref())
-        else {
-            return false;
-        };
-        match self.status.staged.as_ref().and_then(|s| s.digest()) {
-            Some(d) => d != cached.image_digest,
-            None => true,
+    /// The newest image of the tracked reference this system knows of.
+    ///
+    /// `upgrade --check` records what it found as a `cachedUpdate` on the
+    /// commit the image's ostree ref points to: the image pulled last. That is
+    /// the staged entry, else usually the booted one, but after a rollback the
+    /// rollback entry, while the booted entry keeps a stale `cachedUpdate`
+    /// from an older check (bootc 1.16). So: the `cachedUpdate` of the entry
+    /// holding the ref's commit, or that entry's own image when it has none
+    /// (the registry has nothing newer). Without ref heads, or when no entry
+    /// holds the commit, the booted entry's `cachedUpdate`.
+    pub fn latest_image(&self) -> Option<&ImageStatus> {
+        let s = &self.status;
+        let head = [s.staged.as_ref(), s.booted.as_ref(), s.rollback.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|e| {
+                let Some(img) = e.image.as_ref() else {
+                    return false;
+                };
+                let at_head = e.ostree.as_ref().is_some_and(|o| {
+                    !o.checksum.is_empty() && self.image_ref_heads.contains(&o.checksum)
+                });
+                at_head
+                    && self
+                        .spec
+                        .image
+                        .as_ref()
+                        .is_none_or(|spec| img.image.same_image(spec))
+            });
+        match head {
+            Some(e) => e.cached_update.as_ref().or(e.image.as_ref()),
+            None => s.booted.as_ref().and_then(|b| b.cached_update.as_ref()),
         }
+    }
+
+    /// [`Status::latest_image`] when it is neither the booted nor the staged
+    /// image: an update `upgrade --check` found that is not staged yet. It can
+    /// be the rollback image (the version the user went back from).
+    pub fn available_update(&self) -> Option<&ImageStatus> {
+        let latest = self.latest_image()?;
+        let d = latest.image_digest.as_str();
+        let is = |e: Option<&BootEntry>| e.and_then(BootEntry::digest) == Some(d);
+        if d.is_empty() || is(self.status.booted.as_ref()) || is(self.status.staged.as_ref()) {
+            return None;
+        }
+        Some(latest)
+    }
+
+    /// True when [`Status::available_update`] has one.
+    pub fn update_available(&self) -> bool {
+        self.available_update().is_some()
     }
 }
 
@@ -311,6 +389,152 @@ mod tests {
             transport: transport.map(Into::into),
             signature: None,
         }
+    }
+
+    const SPEC: &str = r#"{"image":"ghcr.io/e/atlasos:stable","transport":"registry"}"#;
+
+    fn img(version: &str, digest: &str) -> String {
+        format!(
+            r#"{{"image":{SPEC},"version":"{version}","timestamp":"2026-10-01T00:00:00Z","imageDigest":"{digest}"}}"#
+        )
+    }
+
+    /// An entry with an image, a commit and an optional cachedUpdate.
+    fn entry(version: &str, digest: &str, csum: &str, cached: Option<(&str, &str)>) -> String {
+        let cached = cached.map_or("null".to_string(), |(v, d)| img(v, d));
+        format!(
+            r#"{{"image":{},"cachedUpdate":{cached},"ostree":{{"checksum":"{csum}","deploySerial":0,"stateroot":"default"}}}}"#,
+            img(version, digest)
+        )
+    }
+
+    fn host(staged: &str, booted: &str, rollback: &str, heads: &[&str]) -> Status {
+        let json = format!(
+            r#"{{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","spec":{{"image":{SPEC}}},
+               "status":{{"staged":{staged},"booted":{booted},"rollback":{rollback},"rollbackQueued":false,"type":"bootcHost"}}}}"#
+        );
+        let mut s = Status::from_json(&json).unwrap();
+        s.image_ref_heads = heads.iter().map(|h| h.to_string()).collect();
+        s
+    }
+
+    fn latest(s: &Status) -> Option<&str> {
+        s.latest_image().map(|i| i.image_digest.as_str())
+    }
+
+    fn available(s: &Status) -> Option<&str> {
+        s.available_update().map(|i| i.image_digest.as_str())
+    }
+
+    #[test]
+    fn after_going_back_the_check_result_is_on_the_rollback_entry() {
+        // Booted I keeps a stale cachedUpdate (the image it went back from);
+        // the check put the new image on the rollback entry, the ref's head.
+        let s = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", Some(("44.99", "sha256:old"))),
+            &entry(
+                "44.99",
+                "sha256:bad",
+                "c-bad",
+                Some(("44.25", "sha256:new")),
+            ),
+            &["c-bad"],
+        );
+        assert_eq!(latest(&s), Some("sha256:new"));
+        assert_eq!(available(&s), Some("sha256:new"));
+    }
+
+    #[test]
+    fn after_a_rollback_with_nothing_newer_the_latest_is_the_rollback_image() {
+        let s = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", Some(("44.99", "sha256:old"))),
+            &entry("44.99", "sha256:bad", "c-bad", None),
+            &["c-bad"],
+        );
+        assert_eq!(latest(&s), Some("sha256:bad"));
+        // Offered as the version the user went back from, not the stale one.
+        assert_eq!(available(&s), Some("sha256:bad"));
+    }
+
+    #[test]
+    fn booted_at_the_head_uses_its_own_check_result() {
+        let up = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", Some(("44.25", "sha256:new"))),
+            &entry("44.23", "sha256:h", "c-h", Some(("44.30", "sha256:stale"))),
+            &["c-i"],
+        );
+        assert_eq!(available(&up), Some("sha256:new"));
+        let none = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", None),
+            "null",
+            &["c-i"],
+        );
+        assert_eq!(latest(&none), Some("sha256:i"));
+        assert_eq!(available(&none), None);
+        assert!(!none.update_available());
+    }
+
+    #[test]
+    fn a_staged_update_is_not_offered_again() {
+        let s = host(
+            &entry("44.25", "sha256:new", "c-new", None),
+            &entry("44.24", "sha256:i", "c-i", Some(("44.25", "sha256:new"))),
+            "null",
+            &["c-new"],
+        );
+        assert_eq!(available(&s), None);
+        let newer = host(
+            &entry(
+                "44.25",
+                "sha256:new",
+                "c-new",
+                Some(("44.26", "sha256:newer")),
+            ),
+            &entry("44.24", "sha256:i", "c-i", Some(("44.25", "sha256:new"))),
+            "null",
+            &["c-new"],
+        );
+        assert_eq!(available(&newer), Some("sha256:newer"));
+    }
+
+    #[test]
+    fn without_a_matching_head_the_booted_cached_update_is_used() {
+        let booted = entry("44.24", "sha256:i", "c-i", Some(("44.25", "sha256:new")));
+        let rollback = entry("44.23", "sha256:h", "c-h", Some(("44.30", "sha256:x")));
+        for heads in [&[][..], &["c-elsewhere"][..]] {
+            let s = host("null", &booted, &rollback, heads);
+            assert_eq!(available(&s), Some("sha256:new"));
+        }
+    }
+
+    #[test]
+    fn a_head_of_another_image_reference_is_ignored() {
+        let other = entry("44.30", "sha256:t", "c-t", Some(("44.31", "sha256:t2")))
+            .replace("atlasos:stable", "atlasos:testing");
+        let s = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", Some(("44.25", "sha256:new"))),
+            &other,
+            &["c-t"],
+        );
+        assert_eq!(available(&s), Some("sha256:new"));
+    }
+
+    #[test]
+    fn reads_image_ref_heads_from_nested_ref_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("oci_3A__2F_var/mnt/reg");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("x_3A_stable"), "abc123\n").unwrap();
+        std::fs::write(dir.path().join("ghcr.io_2F_e_3A_testing"), "def456\n").unwrap();
+        let mut heads = image_ref_heads(dir.path());
+        heads.sort();
+        assert_eq!(heads, ["abc123", "def456"]);
+        assert!(image_ref_heads(&dir.path().join("missing")).is_empty());
     }
 
     #[test]
