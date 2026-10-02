@@ -531,8 +531,15 @@ impl Scrubber {
     /// `/home/<name>` and `/var/home/<name>` become `.../USER`, user names
     /// `USER`, host names `HOST`; MAC and IP addresses, interface names with
     /// a MAC, and machine/boot IDs go.
+    ///
+    /// The text is normalized to NFC first (the result stays NFC), so a name
+    /// typed with combining marks still matches. Remaining limits: case
+    /// folding is per character, so `ß` does not match `SS`, and `İ` only
+    /// matches itself.
     pub fn scrub(&self, s: &str) -> String {
-        let mut out = scrub_homes(s);
+        use unicode_normalization::UnicodeNormalization;
+        let s: String = s.nfc().collect();
+        let mut out = scrub_homes(&s);
         for h in &self.homes {
             out = out.replace(h.as_str(), "/home/USER");
         }
@@ -587,7 +594,8 @@ fn replace_ci(s: &str, needle: &str, with: &str) -> String {
             _ => c,
         }
     }
-    let pat: Vec<char> = needle.chars().map(fold).collect();
+    use unicode_normalization::UnicodeNormalization;
+    let pat: Vec<char> = needle.nfc().map(fold).collect();
     if pat.is_empty() {
         return s.to_string();
     }
@@ -602,7 +610,12 @@ fn replace_ci(s: &str, needle: &str, with: &str) -> String {
             .eq(pat.iter().copied())
         {
             let (at, end) = (byte_at(p), byte_at(p + pat.len()));
-            let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
+            // a combining mark belongs to the letter before it
+            let letter = |c: Option<char>| {
+                c.is_some_and(|c| {
+                    c.is_alphabetic() || unicode_normalization::char::is_combining_mark(c)
+                })
+            };
             let whole = !letter(s[..at].chars().next_back()) && !letter(s[end..].chars().next());
             out.push_str(&s[pos..at]);
             out.push_str(if whole { with } else { &s[at..end] });
@@ -1732,6 +1745,10 @@ fn advance_event_marker(m: EventMarker, time: &str) -> EventMarker {
 /// Events (in file order) after the marker. Events dated after `now` (clock
 /// skew) wait until their time has come, so they cannot push the marker into
 /// the future and hide later ones.
+///
+/// Events from a time when reporting was off are never collected: opting in
+/// again starts the marker at "now" (see `reset_markers`), so what happened
+/// while the user had it off is not reported afterwards.
 fn pick_events<'a>(
     events: &'a [crate::helper::events::Event],
     marker: &EventMarker,
@@ -2494,6 +2511,18 @@ mod tests {
             s.scrub("zach1 backup-zach2024.tar zachary"),
             "USER1 backup-USER2024.tar zachary"
         );
+    }
+
+    #[test]
+    fn decomposed_text_and_marks_after_a_name() {
+        let s = Scrubber::new(&["Zoë", "İvan"], &[], &[]);
+        // the same name typed with a combining diaeresis
+        assert_eq!(s.scrub("Zoe\u{308} wrote"), "USER wrote");
+        assert_eq!(s.scrub("ZOE\u{308}"), "USER");
+        // a mark right after a match is part of the letter run
+        let plain = Scrubber::new(&["zach"], &[], &[]);
+        assert_eq!(plain.scrub("zache\u{301}"), "zaché"); // another word
+        assert_eq!(s.scrub("İvan and İVAN"), "USER and USER");
     }
 
     #[test]
