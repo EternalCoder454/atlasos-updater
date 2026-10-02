@@ -1514,6 +1514,10 @@ pub fn collect_coredumps(since_micros: Option<u64>) -> Vec<Report> {
             continue;
         };
         let Some(d) = reports_dir() else { break };
+        // opted out while collecting: write nothing more
+        if !Settings::load().enabled {
+            break;
+        }
         let mut r = report;
         match write_report(&d.join("pending"), &r) {
             Ok(path) => r.path = Some(path),
@@ -1541,22 +1545,53 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
         return Vec::new();
     }
     prune_sent();
-    let Some(marker) = last_seen_path("events-last") else {
-        return Vec::new();
-    };
-    let stored = fs::read_to_string(&marker)
-        .ok()
-        .map(|t| parse_event_marker(&t))
-        .filter(|m| !m.0.is_empty());
-    let Some(start) = since.map(|s| (s.to_string(), 0)).or(stored) else {
-        reset_markers();
+    let (Some(marker), Some(d)) = (last_seen_path("events-last"), reports_dir()) else {
         return Vec::new();
     };
     let events = crate::helper::events::read(Path::new(crate::helper::events::DEFAULT_PATH));
     let scrubber = Scrubber::from_env();
+    let enabled = || Settings::load().enabled;
+    match collect_events_in(
+        &events,
+        &marker,
+        &d.join("pending"),
+        &scrubber,
+        &now_rfc3339(),
+        since,
+        &enabled,
+    ) {
+        Some(out) => out,
+        None => {
+            reset_markers(); // first run: only events from now on
+            Vec::new()
+        }
+    }
+}
+
+/// The work of [`collect_events`] with every input given: `None` when there is
+/// no marker yet (and no `since`). `enabled` is asked again right before each
+/// report is written, so turning reporting off mid-run writes nothing more.
+///
+/// A marker without a count (written by an older version) means "the events
+/// at that time were taken": they are counted from `events`. `since` is
+/// inclusive: events at exactly that time are collected.
+fn collect_events_in(
+    events: &[crate::helper::events::Event],
+    marker: &Path,
+    pending: &Path,
+    scrubber: &Scrubber,
+    now: &str,
+    since: Option<&str>,
+    enabled: &dyn Fn() -> bool,
+) -> Option<Vec<Report>> {
+    let stored = fs::read_to_string(marker)
+        .ok()
+        .map(|t| parse_event_marker(&t, events))
+        .filter(|m| !m.0.is_empty());
+    let start = since.map(|s| (s.to_string(), 0)).or(stored)?;
     let mut marker_now = start.clone();
     let mut out = Vec::new();
-    for e in pick_events(&events, &start, &now_rfc3339()) {
+    for e in pick_events(events, &start, now) {
         let name = scrubber.scrub_message(&e.event);
         let version = e.version.as_deref().map(|v| scrubber.scrub_message(v));
         let mut msg = name.clone();
@@ -1573,7 +1608,7 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
             message: &msg,
             stacktrace: "",
         };
-        let Ok(mut r) = build_report(&crash, &scrubber, Some(&e.time)) else {
+        let Ok(mut r) = build_report(&crash, scrubber, Some(&e.time)) else {
             // can never be built (a damaged line): skip it for good
             marker_now = advance_event_marker(marker_now, &e.time);
             continue;
@@ -1582,8 +1617,10 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
         if r.atlasos_version.is_none() {
             r.atlasos_version = version;
         }
-        let Some(d) = reports_dir() else { break };
-        match write_report(&d.join("pending"), &r) {
+        if !enabled() {
+            break;
+        }
+        match write_report(pending, &r) {
             Ok(path) => r.path = Some(path),
             // A line that can never be written (bad time): skip it for good.
             Err(e2) if e2.kind() == io::ErrorKind::InvalidInput => {
@@ -1598,12 +1635,12 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
     }
     if marker_now != start {
         let _ = write_private(
-            &marker,
+            marker,
             format!("{} {}", marker_now.0, marker_now.1).as_bytes(),
             true,
         );
     }
-    out
+    Some(out)
 }
 
 /// The events marker: the time of the last collected event and how many events
@@ -1611,10 +1648,14 @@ pub fn collect_events(since: Option<&str>) -> Vec<Report> {
 /// another one in the same second later).
 type EventMarker = (String, usize);
 
-fn parse_event_marker(text: &str) -> EventMarker {
+fn parse_event_marker(text: &str, events: &[crate::helper::events::Event]) -> EventMarker {
     let mut it = text.split_whitespace();
     let time = it.next().unwrap_or("").to_string();
-    let n = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    // no count: an older marker; those events were already taken
+    let n = it
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| events.iter().filter(|e| e.time == time).count());
     (time, n)
 }
 
@@ -2495,12 +2536,52 @@ mod tests {
         log.push(ev("2027-01-01T00:00:00Z"));
         assert_eq!(pick_events(&log, &(t.to_string(), 2), now).len(), 0);
         assert_eq!(
-            parse_event_marker("2026-10-02T10:00:00Z 3"),
+            parse_event_marker("2026-10-02T10:00:00Z 3", &log),
             (t.to_string(), 3)
         );
+        // a marker without a count: the events at that time were taken
+        let at_t = log.iter().filter(|e| e.time == t).count();
         assert_eq!(
-            parse_event_marker("2026-10-02T10:00:00Z"),
-            (t.to_string(), 0)
+            parse_event_marker("2026-10-02T10:00:00Z", &log),
+            (t.to_string(), at_t)
+        );
+    }
+
+    #[test]
+    fn a_bad_event_does_not_block_later_ones_and_off_writes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let (marker, pending) = (d.path().join("events-last"), d.path().join("pending"));
+        let sc = Scrubber::new(&[], &[], &[]);
+        let now = "2026-10-02T12:00:00Z";
+        let log = vec![
+            ev("2026-10-02T10:00:00Z"),
+            ev("2026-10-02T10:00:01Z#"), // can never be written
+            ev("2026-10-02T10:00:02Z"),
+        ];
+        fs::write(&marker, "2026-10-02T09:00:00Z 0").unwrap();
+        let on = || true;
+        let out = collect_events_in(&log, &marker, &pending, &sc, now, None, &on).unwrap();
+        assert_eq!(out.len(), 2, "the bad one is skipped, both good ones kept");
+        let m = fs::read_to_string(&marker).unwrap();
+        assert!(m.starts_with("2026-10-02T10:00:02Z"), "{m}");
+        // nothing is collected twice
+        let again = collect_events_in(&log, &marker, &pending, &sc, now, None, &on).unwrap();
+        assert!(again.is_empty());
+        // switched off meanwhile: nothing is written and the marker stays
+        fs::write(&marker, "2026-10-02T09:00:00Z 0").unwrap();
+        let before = fs::read_dir(&pending).unwrap().count();
+        let off = || false;
+        let none = collect_events_in(&log, &marker, &pending, &sc, now, None, &off).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(fs::read_dir(&pending).unwrap().count(), before);
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "2026-10-02T09:00:00Z 0"
+        );
+        // no marker and no `since`: the caller starts one
+        assert!(
+            collect_events_in(&log, &d.path().join("none"), &pending, &sc, now, None, &on)
+                .is_none()
         );
     }
 
