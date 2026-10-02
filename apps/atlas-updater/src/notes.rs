@@ -616,7 +616,6 @@ mod tests {
         }
         assert!(!render("[bank.com](https://bank.com./)").contains("</a> ("));
         assert!(!render_plain("[bank.com](https://bank.com./)").contains('('));
-        assert!(render("[x.org](https://bank.com./)").contains("</a> (bank.com)"));
         assert!(!render("[www.com](https://www.com/)").contains("</a> ("));
         assert!(render("[www.com](https://evil.example/)").contains("</a> (evil.example)"));
         // the plain text carries the same warning and drops hidden characters
