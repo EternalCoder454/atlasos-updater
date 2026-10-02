@@ -389,8 +389,6 @@ impl Core {
     ) {
         let (ok, fail) = match op {
             Op::Upgrade => ("update-staged", "update-failed"),
-            Op::Rollback => ("rollback-requested", "rollback-failed"),
-            Op::CancelRollback => ("rollback-cancelled", "rollback-failed"),
             Op::SwitchChannel(_) => ("channel-switched", "channel-switch-failed"),
             _ => return,
         };
@@ -408,15 +406,11 @@ impl Core {
                             self.event(ok, version, None);
                         }
                     }
-                    Op::Rollback => self.event(ok, version, None),
-                    Op::CancelRollback => self.event(ok, None, None),
                     _ => self.event(ok, None, None),
                 }
             }
-            // A bootc stopped at shutdown is not a failed update, and a
-            // refusal that ran nothing is not a failed rollback.
-            Err(HelperError::Failed(m))
-                if m == INTERRUPTED || m == ROLLBACK_ALREADY_QUEUED || m == NO_ROLLBACK_QUEUED => {}
+            // A bootc stopped at shutdown is not a failed update.
+            Err(HelperError::Failed(m)) if m == INTERRUPTED => {}
             Err(HelperError::Failed(m)) => self.event(fail, None, Some(m)),
             Err(_) => {}
         }
@@ -449,7 +443,10 @@ impl Core {
             .and_then(|b| b.digest().map(str::to_string));
         let result = self.run_op(op);
         self.invalidate_status();
-        self.record_outcome(op, before.as_deref(), &result);
+        // (the rollback operations record their own events)
+        if !matches!(op, Op::Rollback | Op::CancelRollback) {
+            self.record_outcome(op, before.as_deref(), &result);
+        }
         result
     }
 
@@ -463,20 +460,7 @@ impl Core {
                 // stages only: never --apply
                 self.bootc(&["upgrade"])?;
             }
-            // `bootc rollback` toggles: with one queued, a second call cancels
-            // it. So the two operations check the state first.
-            Op::Rollback => {
-                if self.status()?.status.rollback_queued {
-                    return Err(HelperError::Failed(ROLLBACK_ALREADY_QUEUED.into()));
-                }
-                self.bootc(&["rollback"])?;
-            }
-            Op::CancelRollback => {
-                if !self.status()?.status.rollback_queued {
-                    return Err(HelperError::Failed(NO_ROLLBACK_QUEUED.into()));
-                }
-                self.bootc(&["rollback"])?;
-            }
+            Op::Rollback | Op::CancelRollback => return self.toggle_rollback(op),
             Op::SwitchChannel(channel) => {
                 let current = self.status()?;
                 let booted = current.booted_ref().ok_or_else(|| {
@@ -505,6 +489,47 @@ impl Core {
         self.status_json()
     }
 
+    /// `bootc rollback` toggles: with one queued, a second call cancels it. So
+    /// Rollback and CancelRollback read the state first and refuse the wrong
+    /// one. They record their own events: a refusal or a failed read before
+    /// anything ran records nothing, and once bootc has changed the state the
+    /// event is recorded even if the final status read then fails.
+    fn toggle_rollback(&self, op: &Op) -> Result<String, HelperError> {
+        let cancel = *op == Op::CancelRollback;
+        let queued = self.status()?.status.rollback_queued;
+        if queued && !cancel {
+            return Err(HelperError::Failed(ROLLBACK_ALREADY_QUEUED.into()));
+        }
+        if !queued && cancel {
+            return Err(HelperError::Failed(NO_ROLLBACK_QUEUED.into()));
+        }
+        let (ok, fail) = if cancel {
+            ("rollback-cancelled", "rollback-failed")
+        } else {
+            ("rollback-requested", "rollback-failed")
+        };
+        match self.bootc(&["rollback"]) {
+            Err(HelperError::Failed(m)) if m == INTERRUPTED => {
+                return Err(HelperError::Failed(m));
+            }
+            Err(HelperError::Failed(m)) => {
+                self.event(fail, None, Some(&m));
+                return Err(HelperError::Failed(m));
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+        let res = self.status_json();
+        let version = (!cancel)
+            .then(|| {
+                let st = Status::from_json(res.as_ref().ok()?).ok()?;
+                st.status.staged?.version().map(str::to_string)
+            })
+            .flatten();
+        self.event(ok, version, None);
+        res
+    }
+
     /// Forget the cached status (an operation started or ended). Never waits
     /// for a running status.
     fn invalidate_status(&self) {
@@ -515,7 +540,10 @@ impl Core {
 
     /// `bootc status --json`: one process at a time, its result (an error too)
     /// shared for 2 s. Callers that arrive meanwhile wait for it, up to
-    /// [`MAX_STATUS_WAITERS`]; the lock is not held while bootc runs.
+    /// [`MAX_STATUS_WAITERS`] (then `Busy`); the lock is not held while bootc
+    /// runs, and a changing operation drops the entry (`invalidate_status`).
+    /// Only the `Status` call goes through here: the reads an operation makes
+    /// for itself (`status`, `status_json`) always run bootc.
     fn cached_status(&self) -> Result<String, HelperError> {
         let cache = &self.status_cache;
         let mut st = lock(&cache.state);
@@ -991,6 +1019,47 @@ mod tests {
         let mut v: serde_json::Value = serde_json::from_str(PLAIN).unwrap();
         v["status"]["rollbackQueued"] = true.into();
         v.to_string()
+    }
+
+    /// bootc whose `status` fails from the `fail_status_from`-th call on.
+    struct StatusBreaks {
+        calls: Mutex<usize>,
+        fail_status_from: usize,
+    }
+    impl BootcRunner for StatusBreaks {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            if args[0] != "status" {
+                return Ok(String::new());
+            }
+            let mut n = self.calls.lock().unwrap();
+            *n += 1;
+            if *n >= self.fail_status_from {
+                Err("status broke".into())
+            } else {
+                Ok(PLAIN.into())
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_events_follow_what_actually_happened() {
+        let d = tempfile::tempdir().unwrap();
+        let ev = |r| Core::new(r).with_events(d.path().join("events.jsonl"));
+        // the pre-check cannot read the state: nothing ran, nothing recorded
+        let c = ev(Arc::new(StatusBreaks {
+            calls: Mutex::new(0),
+            fail_status_from: 1,
+        }));
+        assert!(c.execute(&Op::Rollback).is_err());
+        assert!(c.execute(&Op::CancelRollback).is_err());
+        assert!(names(&d).is_empty());
+        // the rollback ran, then the final status read failed: still recorded
+        let c = ev(Arc::new(StatusBreaks {
+            calls: Mutex::new(0),
+            fail_status_from: 2,
+        }));
+        assert!(c.execute(&Op::Rollback).is_err());
+        assert_eq!(names(&d), ["rollback-requested"]);
     }
 
     #[test]
