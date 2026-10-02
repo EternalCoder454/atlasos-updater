@@ -1056,8 +1056,12 @@ impl qobject::Backend {
             let first = guarded(|| {
                 let mut new = atlas_core::crash::collect_coredumps(None);
                 new.extend(atlas_core::crash::collect_events(None));
-                new.first()
-                    .map(|r| (r.app_name.clone(), r.report_type.clone()))
+                new.first().map(|r| {
+                    (
+                        crate::crash::display_name(&r.app_name).to_string(),
+                        r.report_type.clone(),
+                    )
+                })
             })
             .flatten();
             let _ = qt.queue(move |mut obj| {

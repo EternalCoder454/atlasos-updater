@@ -69,4 +69,32 @@ Item {
             }
         }
     }
+
+    // A plain ScrollView doesn't follow keyboard focus: tabbing to a control
+    // below the fold would leave it off screen. Scroll just enough to show it.
+    function ensureVisible(item: Item) {
+        const flick = scroll.contentItem as Flickable;
+        if (!item || !flick)
+            return;
+        for (let p = item.parent; p !== col; p = p.parent) {
+            if (!p)
+                return;
+        }
+        const margin = Kirigami.Units.largeSpacing;
+        const r = item.mapToItem(flick.contentItem, 0, 0, item.width, item.height);
+        const maxY = Math.max(0, flick.contentHeight - flick.height);
+        if (r.y - margin < flick.contentY)
+            flick.contentY = Math.max(0, r.y - margin);
+        else if (r.y + r.height + margin > flick.contentY + flick.height)
+            // Keep the top in view when the item is taller than the page.
+            flick.contentY = Math.min(maxY, r.y - margin, r.y + r.height + margin - flick.height);
+    }
+
+    Connections {
+        target: root.Window.window
+        enabled: root.visible
+        function onActiveFocusItemChanged() {
+            root.ensureVisible(root.Window.activeFocusItem);
+        }
+    }
 }

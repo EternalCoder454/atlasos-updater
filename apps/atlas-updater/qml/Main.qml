@@ -25,6 +25,9 @@ QQC2.ApplicationWindow {
     LayoutMirroring.childrenInherit: true
 
     property string currentPage: ""
+    // The sidebar item a sub-page belongs to: Sent reports opens from both
+    // Settings and Crash reports, and keeps the one it came from selected.
+    property string sentFrom: "reports"
     // When the app list was last checked, so revisiting Updates does not run a
     // Flatpak check every time.
     property double lastAppsCheck: 0
@@ -45,6 +48,9 @@ QQC2.ApplicationWindow {
     function showPage(name) {
         if (name === currentPage) {
             return;
+        }
+        if (name === "sent" && (currentPage === "settings" || currentPage === "reports")) {
+            sentFrom = currentPage;
         }
         var c = pages[name] ? pages[name] : updatesPage;
         currentPage = pages[name] ? name : "updates";
@@ -70,7 +76,7 @@ QQC2.ApplicationWindow {
         required property string page
         Layout.fillWidth: true
         compact: root.compact
-        selected: root.currentPage === page || (page === "settings" && root.currentPage === "sent")
+        selected: root.currentPage === page || (root.currentPage === "sent" && page === root.sentFrom)
         QQC2.ToolTip.visible: compact && hovered
         QQC2.ToolTip.text: text
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
