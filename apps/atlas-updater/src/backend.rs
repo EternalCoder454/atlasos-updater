@@ -29,6 +29,12 @@ pub mod qobject {
         #[qproperty(QString, available_date, cxx_name = "availableDate")]
         #[qproperty(QString, channel, cxx_name = "channel")]
         #[qproperty(bool, restart_needed, cxx_name = "restartNeeded")]
+        /// A rollback is queued for the next restart.
+        #[qproperty(bool, rollback_queued, cxx_name = "rollbackQueued")]
+        /// The version the queued rollback goes back to (empty if none).
+        #[qproperty(QString, rollback_target, cxx_name = "rollbackTarget")]
+        /// The available image is the one the user went back from.
+        #[qproperty(bool, available_is_rollback, cxx_name = "availableIsRollback")]
         #[qproperty(QString, notes_state, cxx_name = "notesState")]
         #[qproperty(QString, notes_text, cxx_name = "notesText")]
         #[qproperty(QString, notes_version, cxx_name = "notesVersion")]
@@ -92,6 +98,10 @@ pub mod qobject {
         fn download_update(self: Pin<&mut Backend>);
         #[qinvokable]
         fn rollback(self: Pin<&mut Backend>);
+        /// Cancel a queued rollback (nothing is changed if none is queued).
+        #[qinvokable]
+        #[cxx_name = "cancelRollback"]
+        fn cancel_rollback(self: Pin<&mut Backend>);
         #[qinvokable]
         #[cxx_name = "switchChannel"]
         fn switch_channel(self: Pin<&mut Backend>, channel: &QString);
@@ -215,6 +225,9 @@ pub struct BackendRust {
     available_date: QString,
     channel: QString,
     restart_needed: bool,
+    rollback_queued: bool,
+    rollback_target: QString,
+    available_is_rollback: bool,
     notes_state: QString,
     notes_text: QString,
     notes_version: QString,
@@ -398,6 +411,9 @@ impl qobject::Backend {
     pub fn rollback(self: Pin<&mut Self>) {
         self.spawn_op(Op::Rollback, true);
     }
+    pub fn cancel_rollback(self: Pin<&mut Self>) {
+        self.spawn_op(Op::CancelRollback, true);
+    }
     pub fn switch_channel(self: Pin<&mut Self>, channel: &QString) {
         match channel.to_string().parse::<Channel>() {
             Ok(c) => self.spawn_op(Op::Switch(c), true),
@@ -473,6 +489,7 @@ impl qobject::Backend {
                         Op::Rollback => {
                             "Done. Restart to go back to the previous version.".to_string()
                         }
+                        Op::CancelRollback => "The rollback was cancelled.".to_string(),
                         Op::Switch(c) => format!("Switched to the {c} channel. Restart to finish."),
                         Op::Status => String::new(),
                     };
@@ -485,6 +502,7 @@ impl qobject::Backend {
                         Op::Check => "check for updates",
                         Op::Upgrade => "download updates",
                         Op::Rollback => "roll back the update",
+                        Op::CancelRollback => "cancel the rollback",
                         Op::Switch(_) => "switch channels",
                         Op::Status => "read the update state",
                     };
@@ -520,6 +538,10 @@ impl qobject::Backend {
         self.as_mut().set_available_date(q(&v.available.date));
         self.as_mut().set_channel(q(&v.channel));
         self.as_mut().set_restart_needed(v.restart_needed);
+        self.as_mut().set_rollback_queued(v.rollback_queued);
+        self.as_mut().set_rollback_target(q(&v.rollback_target));
+        self.as_mut()
+            .set_available_is_rollback(v.available_is_rollback);
         let staged = v.staged.clone();
         // Tell the user once per staged image, even across restarts of the tray.
         if staged.present

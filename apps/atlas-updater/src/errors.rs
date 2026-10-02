@@ -28,6 +28,13 @@ pub fn friendly(e: &Error) -> OpError {
             HelperErrorKind::InvalidArgument => OpError::Message(
                 "The system helper turned the request down. This is a bug in Atlas Updater.".into(),
             ),
+            // the helper's own plain refusals (nothing was run)
+            HelperErrorKind::Failed
+                if message == atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED
+                    || message == atlas_core::helper_client::NO_ROLLBACK_QUEUED =>
+            {
+                OpError::Message(message.clone())
+            }
             HelperErrorKind::Failed => {
                 let detail = tail(message, 4);
                 if detail.is_empty() {
@@ -87,6 +94,18 @@ mod tests {
         let t = denied_text("check for updates");
         assert!(t.starts_with("You aren't allowed to check for updates from this session"));
         assert!(t.contains("Nothing was changed"));
+    }
+
+    #[test]
+    fn rollback_refusals_are_shown_plainly() {
+        let e = Error::Helper {
+            kind: HelperErrorKind::Failed,
+            message: atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED.into(),
+        };
+        assert_eq!(
+            friendly(&e),
+            OpError::Message(atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED.into())
+        );
     }
 
     #[test]

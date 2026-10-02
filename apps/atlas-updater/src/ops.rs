@@ -14,6 +14,7 @@ pub enum Op {
     Check,
     Upgrade,
     Rollback,
+    CancelRollback,
     Switch(Channel),
 }
 
@@ -24,6 +25,7 @@ impl Op {
             Op::Check => "Checking for updates…",
             Op::Upgrade => "Downloading the update…",
             Op::Rollback => "Going back to the previous version…",
+            Op::CancelRollback => "Cancelling the rollback…",
             Op::Switch(_) => "Switching channel…",
         }
     }
@@ -49,6 +51,7 @@ pub fn run(op: &Op, fixtures: Option<&Path>) -> Result<Status, OpError> {
             Op::Check => client.check_for_update().await,
             Op::Upgrade => client.upgrade().await,
             Op::Rollback => client.rollback().await,
+            Op::CancelRollback => client.cancel_rollback().await,
             Op::Switch(c) => client.switch_channel(*c).await,
         };
         st.map_err(|e| errors::friendly(&e))
@@ -62,6 +65,7 @@ fn fixture_status(op: &Op, dir: &Path) -> Result<Status, OpError> {
         Op::Status | Op::Check => "status.json",
         Op::Upgrade => "status-after-upgrade.json",
         Op::Rollback => "status-after-rollback.json",
+        Op::CancelRollback => "status-after-cancel-rollback.json",
         Op::Switch(_) => "status-after-switch.json",
     };
     let text = config::read_fixture(dir, name)

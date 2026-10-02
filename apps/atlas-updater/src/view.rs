@@ -22,6 +22,13 @@ pub struct View {
     pub channel: String,
     /// A restart will switch to something new (staged, or a queued rollback).
     pub restart_needed: bool,
+    /// A rollback is queued for the next restart.
+    pub rollback_queued: bool,
+    /// The version a queued rollback goes back to (empty when none is queued).
+    pub rollback_target: String,
+    /// The available image is the one the rollback deployment holds: the
+    /// version the user went back from.
+    pub available_is_rollback: bool,
 }
 
 fn short_digest(d: &str) -> String {
@@ -64,10 +71,22 @@ pub fn from_status(st: &Status) -> View {
     } else {
         Slot::default()
     };
+    let rollback = slot(st.status.rollback.as_ref());
+    let queued = st.status.rollback_queued;
     View {
+        available_is_rollback: available.present
+            && rollback.present
+            && !available.digest.is_empty()
+            && available.digest == rollback.digest,
+        rollback_queued: queued,
+        rollback_target: if queued {
+            rollback.version.clone()
+        } else {
+            String::new()
+        },
         current: slot(booted),
         staged: slot(st.status.staged.as_ref()),
-        rollback: slot(st.status.rollback.as_ref()),
+        rollback,
         available,
         channel: st.channel().map(|c| c.to_string()).unwrap_or_default(),
         restart_needed: st.has_staged() || st.status.rollback_queued,
@@ -115,6 +134,35 @@ mod tests {
         let v = from_status(&build(cached, "null"));
         assert_eq!(v.available.version, "44.20261009");
         assert!(!v.restart_needed);
+    }
+
+    #[test]
+    fn a_queued_rollback_and_the_image_we_went_back_from() {
+        let json = r#"{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost",
+          "spec":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"}},
+          "status":{
+            "booted":{"image":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.1","imageDigest":"sha256:aaa"},
+                      "cachedUpdate":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.2","imageDigest":"sha256:bbb"}},
+            "staged": null,
+            "rollback":{"image":{"image":{"image":"ghcr.io/e/atlasos:stable","transport":"registry"},
+                      "version":"44.2","imageDigest":"sha256:bbb"}},
+            "rollbackQueued": QUEUED, "type":"bootcHost"}}"#;
+        let v = from_status(&st(&json.replace("QUEUED", "false")));
+        assert!(v.available_is_rollback && !v.rollback_queued);
+        assert_eq!(v.rollback_target, "");
+        let v = from_status(&st(&json.replace("QUEUED", "true")));
+        assert!(v.rollback_queued && v.restart_needed);
+        assert_eq!(v.rollback_target, "44.2");
+        // a different newest image is just an update
+        let other = json.replace("QUEUED", "false").replacen(
+            "\"imageDigest\":\"sha256:bbb\"",
+            "\"imageDigest\":\"sha256:ccc\"",
+            1,
+        );
+        let v = from_status(&st(&other));
+        assert!(!v.available_is_rollback);
     }
 
     #[test]
