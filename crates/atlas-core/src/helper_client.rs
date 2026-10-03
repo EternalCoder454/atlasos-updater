@@ -5,8 +5,12 @@
 //! image and can take minutes.
 
 use std::fmt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::bootc::{self, Channel, Status};
+use crate::progress::Progress;
+use zbus::export::futures_core::Stream;
 
 pub const BUS_NAME: &str = "net.eterneon.atlas.SystemHelper";
 pub const OBJECT_PATH: &str = "/net/eterneon/atlas/SystemHelper";
@@ -38,6 +42,10 @@ pub trait SystemHelper1 {
     fn rollback(&self) -> zbus::Result<String>;
     fn cancel_rollback(&self) -> zbus::Result<String>;
     fn switch_channel(&self, channel: &str) -> zbus::Result<String>;
+
+    /// JSON of the current progress while an upgrade or switch runs, else "".
+    #[zbus(property)]
+    fn progress(&self) -> zbus::Result<String>;
 }
 
 /// The helper's error names (`net.eterneon.atlas.Error.*`).
@@ -176,6 +184,52 @@ impl HelperClient {
         self.call(|p| async move { p.switch_channel(channel.as_str()).await })
             .await
     }
+}
+
+impl HelperClient {
+    /// The progress of the running upgrade or switch, `None` when nothing runs.
+    pub async fn progress(&self) -> Result<Option<Progress>> {
+        parse_progress(&self.proxy.progress().await?)
+    }
+
+    /// Every change of the progress; `None` when it goes back to nothing.
+    /// Items that cannot be read are skipped. Ends when the stream is dropped
+    /// or the connection closes.
+    pub async fn progress_changes(&self) -> Result<impl Stream<Item = Option<Progress>> + use<>> {
+        let mut changes = self.proxy.receive_progress_changed().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(c) =
+                std::future::poll_fn(|cx| Pin::new(&mut changes).poll_next(cx)).await
+            {
+                let Ok(json) = c.get().await else { continue };
+                let Ok(p) = parse_progress(&json) else {
+                    continue;
+                };
+                if tx.send(p).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(ProgressStream(rx))
+    }
+}
+
+struct ProgressStream(tokio::sync::mpsc::UnboundedReceiver<Option<Progress>>);
+
+impl Stream for ProgressStream {
+    type Item = Option<Progress>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx)
+    }
+}
+
+fn parse_progress(json: &str) -> Result<Option<Progress>> {
+    if json.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(json).map(Some).map_err(Error::Parse)
 }
 
 fn parse(json: String) -> Result<bootc::Status> {

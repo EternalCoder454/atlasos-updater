@@ -6,6 +6,7 @@
 
 pub mod events;
 pub mod layered;
+pub mod live;
 pub mod service;
 
 use std::cmp::Ordering as Cmp;
@@ -24,6 +25,8 @@ use crate::helper_client::{
     NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED, STATE_UNREAD, STATE_UNREAD_CANCEL,
 };
 use crate::history;
+use crate::progress::{BootcParser, RpmOstreeParser};
+use live::{ProgressCell, ProgressSink};
 
 /// bootc is always run by absolute path, and so are rpm-ostree and skopeo,
 /// which stand in for it on a system with local rpm-ostree changes (see
@@ -65,6 +68,17 @@ pub trait BootcRunner: Send + Sync + 'static {
     fn skopeo(&self, _args: &[&str]) -> Result<String, String> {
         Err("skopeo is not available".into())
     }
+
+    /// [`run`](Self::run) for `upgrade` and `switch`, reporting progress to
+    /// `sink` while it runs. A runner that has none just runs.
+    fn run_progress(&self, args: &[&str], _sink: &ProgressSink) -> Result<String, String> {
+        self.run(args)
+    }
+
+    /// [`rpm_ostree`](Self::rpm_ostree) for `upgrade` and `rebase`, likewise.
+    fn rpm_ostree_progress(&self, args: &[&str], _sink: &ProgressSink) -> Result<String, String> {
+        self.rpm_ostree(args)
+    }
 }
 
 /// The real runner: `/usr/bin/bootc` (and rpm-ostree, skopeo) with a cleared
@@ -77,6 +91,26 @@ impl BootcRunner for SystemBootc {
         let short = matches!(args, ["status", ..] | ["upgrade", "--check"]);
         let timeout = if short { SHORT_TIMEOUT } else { LONG_TIMEOUT };
         run_limited(Path::new(BOOTC), args, timeout, OUTPUT_CAP)
+    }
+
+    fn run_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
+        run_with(
+            Path::new(BOOTC),
+            args,
+            LONG_TIMEOUT,
+            OUTPUT_CAP,
+            Feed::BootcFd(sink.clone()),
+        )
+    }
+
+    fn rpm_ostree_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
+        run_with(
+            Path::new(RPM_OSTREE),
+            args,
+            LONG_TIMEOUT,
+            OUTPUT_CAP,
+            Feed::Stdout(sink.clone()),
+        )
     }
 
     fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
@@ -135,11 +169,21 @@ struct Captured {
 
 /// Read `r` into `buf`, keeping at most `cap` bytes; the rest is drained so
 /// the child never blocks on a full pipe. Sends on `done` at the end.
-fn read_capped(mut r: impl Read, cap: usize, buf: Arc<Mutex<Captured>>, done: mpsc::Sender<()>) {
+/// `tap` sees every chunk read, capped or not.
+fn read_capped(
+    mut r: impl Read,
+    cap: usize,
+    buf: Arc<Mutex<Captured>>,
+    done: mpsc::Sender<()>,
+    mut tap: Option<Tap>,
+) {
     let mut chunk = [0u8; 16 * 1024];
     while let Ok(n) = r.read(&mut chunk) {
         if n == 0 {
             break;
+        }
+        if let Some(t) = tap.as_mut() {
+            t(&chunk[..n]);
         }
         let mut b = lock(&buf);
         let room = cap.saturating_sub(b.data.len());
@@ -162,8 +206,79 @@ fn run_limited(
     timeout: Duration,
     cap: usize,
 ) -> Result<String, String> {
-    let mut child = Command::new(program)
-        .args(args)
+    run_with(program, args, timeout, cap, Feed::None)
+}
+
+/// Sees each chunk of a program's stdout as it arrives.
+type Tap = Box<dyn FnMut(&[u8]) + Send>;
+
+/// Where a running program's progress comes from.
+enum Feed {
+    None,
+    /// bootc: JSON lines on an extra pipe, whose number is the `--progress-fd`
+    /// argument (added to `args`, after the subcommand).
+    BootcFd(ProgressSink),
+    /// rpm-ostree: parsed from stdout as it arrives.
+    Stdout(ProgressSink),
+}
+
+/// [`run_limited`] with progress. Progress is an addition: if the pipe cannot
+/// be made, the program runs without it.
+fn run_with(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    cap: usize,
+    feed: Feed,
+) -> Result<String, String> {
+    let mut cmd = Command::new(program);
+    let mut progress_rx = None;
+    let mut stdout_tap: Option<Tap> = None;
+    let mut fd_arg = String::new();
+    let mut write_end = None;
+    match feed {
+        Feed::None => {}
+        Feed::Stdout(sink) => {
+            let mut parser = RpmOstreeParser::new();
+            stdout_tap = Some(Box::new(move |c: &[u8]| {
+                for p in parser.feed(c) {
+                    sink(p);
+                }
+            }));
+        }
+        Feed::BootcFd(sink) => {
+            if let Ok((r, w)) = std::io::pipe() {
+                use std::os::fd::AsRawFd;
+                let fd = w.as_raw_fd();
+                fd_arg = fd.to_string();
+                // SAFETY: the closure only calls fcntl, which is async-signal-safe.
+                // It clears FD_CLOEXEC on the write end in the child alone, so
+                // no other program the helper starts inherits it.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        let flags = libc::fcntl(fd, libc::F_GETFD);
+                        if flags < 0
+                            || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                write_end = Some(w);
+                progress_rx = Some((r, sink));
+            }
+        }
+    }
+    // `--progress-fd <n>` goes right after the subcommand (a fixed position;
+    // nothing from the D-Bus caller is in it)
+    let mut full: Vec<&str> = args.to_vec();
+    if !fd_arg.is_empty() && !full.is_empty() {
+        full.insert(1, "--progress-fd");
+        full.insert(2, &fd_arg);
+    }
+    let spawned = cmd
+        .args(&full)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin")
         .env("LANG", "C.UTF-8")
@@ -171,8 +286,11 @@ fn run_limited(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
-        .spawn()
-        .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
+        .spawn();
+    // Close our copy of the write end, so the reader sees EOF when the child
+    // (and anything it started) is done. (`cmd` holds the fd number only.)
+    drop(write_end);
+    let mut child = spawned.map_err(|e| format!("cannot run {}: {e}", program.display()))?;
     let pgid = child.id();
     lock(&RUNNING).get_or_insert_with(HashSet::new).insert(pgid);
     // The helper may have started closing between its check and the spawn.
@@ -182,7 +300,15 @@ fn run_limited(
     let name = program
         .file_name()
         .map_or("bootc".into(), |n| n.to_string_lossy());
-    let result = supervise(&mut child, pgid, timeout, cap, &name);
+    let result = supervise(
+        &mut child,
+        pgid,
+        timeout,
+        cap,
+        &name,
+        stdout_tap,
+        progress_rx,
+    );
     if let Some(set) = lock(&RUNNING).as_mut() {
         set.remove(&pgid);
     }
@@ -195,6 +321,8 @@ fn supervise(
     timeout: Duration,
     cap: usize,
     name: &str,
+    stdout_tap: Option<Tap>,
+    progress: Option<(std::io::PipeReader, ProgressSink)>,
 ) -> Result<String, String> {
     let out = child.stdout.take().ok_or("no stdout")?;
     let err = child.stderr.take().ok_or("no stderr")?;
@@ -206,9 +334,28 @@ fn supervise(
     let (err_tx, err_rx) = mpsc::channel();
     {
         let b = out_buf.clone();
-        std::thread::spawn(move || read_capped(out, cap, b, out_tx));
+        std::thread::spawn(move || read_capped(out, cap, b, out_tx, stdout_tap));
         let b = err_buf.clone();
-        std::thread::spawn(move || read_capped(err, cap, b, err_tx));
+        std::thread::spawn(move || read_capped(err, cap, b, err_tx, None));
+    }
+    let (prog_tx, prog_rx) = mpsc::channel();
+    match progress {
+        Some((mut r, sink)) => {
+            std::thread::spawn(move || {
+                let mut parser = BootcParser::new();
+                let mut chunk = [0u8; 8 * 1024];
+                while let Ok(n) = r.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    for p in parser.feed(&chunk[..n]) {
+                        sink(p);
+                    }
+                }
+                let _ = prog_tx.send(());
+            });
+        }
+        None => drop(prog_tx),
     }
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -239,6 +386,12 @@ fn supervise(
     for rx in [&out_rx, &err_rx] {
         let left = end.saturating_duration_since(Instant::now());
         pipes_closed &= rx.recv_timeout(left).is_ok();
+    }
+    // the progress reader too, so no update arrives after the call returns
+    // (no progress pipe: its sender is gone and this returns at once)
+    let left = end.saturating_duration_since(Instant::now());
+    if let Err(mpsc::RecvTimeoutError::Timeout) = prog_rx.recv_timeout(left) {
+        pipes_closed = false;
     }
     if !pipes_closed {
         kill_group(pgid, rustix::process::Signal::KILL);
@@ -349,6 +502,8 @@ pub struct Core {
     update_file: Option<PathBuf>,
     /// `bootc status` shared between callers; see [`Core::cached_status`].
     status_cache: StatusCache,
+    /// The `Progress` property while an upgrade or switch runs.
+    progress: Arc<ProgressCell>,
 }
 
 /// The last `bootc status` result (failures too, so a broken bootc is not
@@ -398,7 +553,18 @@ impl Core {
             events: None,
             update_file: None,
             status_cache: StatusCache::default(),
+            progress: ProgressCell::new(),
         }
+    }
+
+    /// The `Progress` property: JSON of the current progress, `""` when none.
+    pub fn progress_json(&self) -> String {
+        self.progress.current()
+    }
+
+    /// Changes of the `Progress` property (the D-Bus service announces them).
+    pub fn progress_watch(&self) -> tokio::sync::watch::Receiver<String> {
+        self.progress.subscribe()
     }
 
     /// Keep the update check's result on a system with local rpm-ostree
@@ -492,6 +658,19 @@ impl Core {
     }
 
     fn run_op(&self, op: &Op) -> Result<String, HelperError> {
+        // progress is reported for the two operations that download
+        let progress = match op {
+            Op::Upgrade => Some(self.progress.begin("upgrade")),
+            Op::SwitchChannel(_) => Some(self.progress.begin("switch")),
+            _ => None,
+        };
+        let sink = progress.as_ref().map(|(s, _)| s.clone());
+        let result = self.run_op_with(op, sink.as_ref());
+        drop(progress); // clears the property
+        result
+    }
+
+    fn run_op_with(&self, op: &Op, sink: Option<&ProgressSink>) -> Result<String, HelperError> {
         match op {
             Op::Status => {}
             // bootc refuses both on a system with local rpm-ostree changes;
@@ -508,11 +687,11 @@ impl Core {
             }
             Op::Upgrade => {
                 // stages only: never --apply (rpm-ostree: never --reboot)
-                if let Err(e) = self.bootc(&["upgrade"]) {
+                if let Err(e) = self.bootc_progress(&["upgrade"], sink) {
                     let Ok(Some(_)) = self.layered_origin() else {
                         return Err(e);
                     };
-                    self.rpm_ostree(&["upgrade"])?;
+                    self.rpm_ostree_progress(&["upgrade"], sink)?;
                     self.forget_update();
                 }
             }
@@ -523,7 +702,7 @@ impl Core {
                 if let Some(origin) = self.origin_if_layered(&json)? {
                     let target = layered::origin_with_channel(&origin, channel)
                         .map_err(HelperError::InvalidArgument)?;
-                    self.rpm_ostree(&["rebase", &target])?;
+                    self.rpm_ostree_progress(&["rebase", &target], sink)?;
                     self.forget_update();
                     return self.status_json();
                 }
@@ -549,7 +728,7 @@ impl Core {
                     }
                 }
                 args.push(&new.image);
-                self.bootc(&args)?;
+                self.bootc_progress(&args, sink)?;
             }
         }
         self.status_json()
@@ -681,6 +860,30 @@ impl Core {
 
     fn bootc(&self, args: &[&str]) -> Result<String, HelperError> {
         self.runner.run(args).map_err(HelperError::Failed)
+    }
+
+    fn bootc_progress(
+        &self,
+        args: &[&str],
+        sink: Option<&ProgressSink>,
+    ) -> Result<String, HelperError> {
+        match sink {
+            Some(s) => self.runner.run_progress(args, s),
+            None => self.runner.run(args),
+        }
+        .map_err(HelperError::Failed)
+    }
+
+    fn rpm_ostree_progress(
+        &self,
+        args: &[&str],
+        sink: Option<&ProgressSink>,
+    ) -> Result<String, HelperError> {
+        match sink {
+            Some(s) => self.runner.rpm_ostree_progress(args, s),
+            None => self.runner.rpm_ostree(args),
+        }
+        .map_err(HelperError::Failed)
     }
 
     fn rpm_ostree(&self, args: &[&str]) -> Result<String, HelperError> {
@@ -1591,6 +1794,119 @@ mod tests {
         .unwrap();
         assert_eq!(out, "done\n");
         assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+    }
+
+    fn script(d: &tempfile::TempDir, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = d.path().join("fake");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn collector() -> (ProgressSink, Arc<Mutex<Vec<crate::progress::Progress>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        (Arc::new(move |p| lock(&s2).push(p)), seen)
+    }
+
+    #[test]
+    fn bootc_gets_a_progress_pipe_and_its_lines_are_parsed() {
+        let d = tempfile::tempdir().unwrap();
+        // args: upgrade --progress-fd N
+        let prog = script(
+            &d,
+            r#"[ "$1 $2" = "upgrade --progress-fd" ] || exit 3
+eval "echo '{\"type\":\"ProgressBytes\",\"bytes\":5,\"bytesTotal\":10}' >&$3"
+eval "echo '{\"type\":\"ProgressSteps\",\"task\":\"staging\",\"steps\":1,\"stepsTotal\":3,\"description\":\"Deploying Image\"}' >&$3"
+echo out"#,
+        );
+        let (sink, seen) = collector();
+        let out = run_with(
+            &prog,
+            &["upgrade"],
+            Duration::from_secs(10),
+            1024,
+            Feed::BootcFd(sink),
+        );
+        assert_eq!(out.as_deref(), Ok("out\n"));
+        let seen = lock(&seen);
+        assert_eq!(seen.len(), 2);
+        assert_eq!((seen[0].done, seen[0].total), (5, 10));
+        assert_eq!(seen[1].detail, "Deploying Image");
+    }
+
+    #[test]
+    fn rpm_ostree_stdout_is_parsed_while_it_is_still_captured() {
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(
+            &d,
+            "echo 'custom layers needed: 1 (300.0 MB)'\necho 'Writing rpmdb...done'",
+        );
+        let (sink, seen) = collector();
+        let out = run_with(
+            &prog,
+            &["upgrade"],
+            Duration::from_secs(10),
+            1024,
+            Feed::Stdout(sink),
+        )
+        .unwrap();
+        assert!(out.contains("Writing rpmdb"));
+        let seen = lock(&seen);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].total, 300_000_000);
+        assert_eq!(seen[1].stage, "installing");
+    }
+
+    #[test]
+    fn a_child_that_ignores_the_progress_pipe_still_finishes_and_fails_normally() {
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(&d, "echo oops >&2; exit 1");
+        let (sink, seen) = collector();
+        let e = run_with(
+            &prog,
+            &["upgrade"],
+            Duration::from_secs(10),
+            1024,
+            Feed::BootcFd(sink),
+        );
+        assert_eq!(e, Err("oops".into()));
+        assert!(lock(&seen).is_empty());
+    }
+
+    #[test]
+    fn upgrade_and_switch_report_progress_and_clear_it_after() {
+        struct Reporting(Mutex<Vec<String>>);
+        impl BootcRunner for Reporting {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                match args {
+                    ["status", ..] => Ok(PLAIN.into()),
+                    _ => Ok(String::new()),
+                }
+            }
+            fn run_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
+                lock(&self.0).push(args[0].into());
+                sink(crate::progress::Progress {
+                    stage: "downloading".into(),
+                    done: 1,
+                    total: 2,
+                    ..Default::default()
+                });
+                self.run(args)
+            }
+        }
+        let r = Arc::new(Reporting(Mutex::new(Vec::new())));
+        let c = Core::new(r.clone());
+        let rx = c.progress_watch();
+        c.execute(&Op::Upgrade).unwrap();
+        assert_eq!(c.progress_json(), "");
+        // the update was seen while it ran
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*lock(&r.0), ["upgrade"]);
+        // a check does not report
+        c.execute(&Op::CheckForUpdate).unwrap();
+        assert_eq!(*lock(&r.0), ["upgrade"]);
     }
 
     #[test]

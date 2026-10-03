@@ -3,6 +3,7 @@
 //! - [`bootc`]: types for `bootc status --json` and the channel tag rewrite.
 //! - [`helper_client`]: async client for the `atlas-system-helper` D-Bus service.
 //! - [`history`]: the list of versions this machine has booted.
+//! - [`progress`]: the live progress of an update and the parsers behind it.
 //! - `flatpak` (cargo feature `flatpak`): Flatpak update listing and updating.
 //! - [`crash`]: opt-in crash reports, the only telemetry Atlas apps may have.
 //!
@@ -17,3 +18,4 @@ mod fsutil;
 pub mod helper;
 pub mod helper_client;
 pub mod history;
+pub mod progress;

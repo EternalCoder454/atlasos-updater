@@ -202,6 +202,13 @@ async fn authorize(conn: &zbus::Connection, sender: &str, action: &str) -> Resul
 
 #[zbus::interface(name = "net.eterneon.atlas.SystemHelper1")]
 impl Service {
+    /// JSON of the current [`Progress`](crate::progress::Progress) while an
+    /// upgrade or switch runs, `""` otherwise.
+    #[zbus(property)]
+    async fn progress(&self) -> String {
+        self.core.progress_json()
+    }
+
     async fn status(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -265,12 +272,28 @@ pub async fn serve(
     idle_timeout: Duration,
 ) -> zbus::Result<()> {
     let activity = service.activity.clone();
+    let progress = service.core.progress_watch();
     let started = Instant::now();
     let conn = builder
         .name(BUS_NAME)?
         .serve_at(OBJECT_PATH, service)?
         .build()
         .await?;
+    // announce changes of the Progress property, at most ~4 a second
+    let iface = conn
+        .object_server()
+        .interface::<_, Service>(OBJECT_PATH)
+        .await?;
+    let announcer = tokio::spawn(super::live::announce_changes(progress, move || {
+        let iface = iface.clone();
+        async move {
+            let _ = iface
+                .get()
+                .await
+                .progress_changed(iface.signal_emitter())
+                .await;
+        }
+    }));
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let tick = (idle_timeout / 4).max(Duration::from_millis(50));
     let terminated = loop {
@@ -295,6 +318,7 @@ pub async fn serve(
         super::terminate_running();
         activity.wait_drained(Duration::from_secs(10)).await;
     }
+    announcer.abort();
     Ok(())
 }
 

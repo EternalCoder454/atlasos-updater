@@ -83,6 +83,39 @@ Rules:
   60 min upgrade/rollback/switch) and 4 MiB output caps.
 - D-Bus policy: anyone may call the interface (polkit decides). Only root may own the name.
 
+**Progress.** The interface has one read-only property, `Progress` (`s`, not a
+method, so the five-method rule stands): while `Upgrade` or `SwitchChannel`
+runs, the JSON of `atlas_core::progress::Progress`, otherwise `""`.
+
+```json
+{"op":"upgrade","stage":"downloading","done":123,"total":300028591,"detail":""}
+```
+
+- `op` is `upgrade` or `switch`. `stage` is `downloading` (`done` and `total`
+  in bytes) or `installing` (steps); `total` 0 means unknown, so show an
+  indeterminate bar. `detail` is a step name such as `Deploying Image`, or empty.
+- `PropertiesChanged` is sent at most about 4 times a second, but at once on a
+  stage change and when the property goes back to `""` (the operation ended,
+  failed or not). Read it once after connecting (`HelperClient::progress`),
+  then follow `HelperClient::progress_changes`.
+- bootc: `upgrade` and `switch` get `--progress-fd <n>` (right after the
+  subcommand), where `n` is the write end of a pipe the helper made. Its
+  cleared FD_CLOEXEC is set in the child only (`pre_exec`), and the helper
+  closes its own copy after the spawn. The helper parses bootc's JSON lines:
+  `pulling` is the download (bytes done of bytes still needed); `importing` and
+  `staging` are one installing range (steps of both added up).
+- rpm-ostree (`upgrade`, `rebase`): stdout is parsed as it arrives. Download
+  total is the sum of the `ostree chunk layers needed` and `custom layers
+  needed` sizes, done the sum of the layers fetched so far; with nothing
+  needed it goes straight to installing. Installing is the fixed list
+  Checking out tree, Importing rpm-md, Resolving dependencies, Checking out
+  packages, Running scripts, Writing rpmdb, Writing OSTree commit, Staging
+  deployment: `done` is the index of the current step, `total` is 8. Other
+  lines are ignored.
+- Progress is an addition: the output caps, timeouts and interruption
+  handling are the same, nothing from the caller reaches argv, and if the
+  progress pipe can't be made the operation runs without progress.
+
 **Local rpm-ostree changes.** On a system with packages added by
 `rpm-ostree install`, replaced or removed base packages or a regenerated
 initramfs, bootc refuses `upgrade` and `switch` ("Deployment contains local

@@ -23,7 +23,7 @@ flatpak = ["dep:libflatpak"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-# safe killpg (the helper has no unsafe code)
+# safe killpg (the helper's one unsafe block is the pre_exec that hands bootc its progress pipe)
 rustix = { version = "1", default-features = false, features = ["std", "process"] }
 getrandom = "0.3"
 # NFC before name matching, so a decomposed "e\u0308" still matches "\u00eb"
@@ -34,3 +34,5 @@ libflatpak = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# paused time for the progress throttle test
+tokio = { version = "1", features = ["test-util"] }
