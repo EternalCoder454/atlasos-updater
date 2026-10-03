@@ -7,6 +7,8 @@ import org.kde.kirigami as Kirigami
 // Sidebar entry: accent icon plus label, with a rounded selection pill, and
 // optionally a live value on the right ("42%", "1.2 MB/s"). A `sub` entry is
 // indented under a SidebarGroup's header; a `disclosure` entry is that header.
+// A `badge` icon flags something on the entry's page that needs attention:
+// after the label, or on the icon's corner when compact.
 T.AbstractButton {
     id: control
 
@@ -21,13 +23,21 @@ T.AbstractButton {
     // A chevron that turns down when `expanded` (SidebarGroup's header).
     property bool disclosure: false
     property bool expanded: false
+    // An icon name, such as "dialog-warning"; empty for none. Drawn in its
+    // own colours: a tint would fill in the mark inside a status icon.
+    property string badge
+    // What the badge means, for screen readers ("2 problems").
+    property string badgeText
 
     implicitHeight: Math.round(Kirigami.Units.gridUnit * (sub ? 1.8 : 2.1))
     implicitWidth: compact ? implicitHeight + Kirigami.Units.smallSpacing : Kirigami.Units.gridUnit * 10
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
     Accessible.name: control.text
-    Accessible.description: control.disclosure ? (control.expanded ? qsTr("Expanded") : qsTr("Collapsed")) : control.value
+    Accessible.description: {
+        const own = control.disclosure ? (control.expanded ? qsTr("Expanded") : qsTr("Collapsed")) : control.value;
+        return control.badge.length > 0 && control.badgeText.length > 0 ? (own.length > 0 ? own + ", " + control.badgeText : control.badgeText) : own;
+    }
     Accessible.checkable: true
     Accessible.checked: control.selected
     Keys.onReturnPressed: event => {
@@ -66,6 +76,16 @@ T.AbstractButton {
             source: control.icon.name
             isMask: control.tintIcon
             color: Kirigami.Theme.highlightColor
+
+            Kirigami.Icon {
+                visible: control.compact && control.badge.length > 0
+                width: Kirigami.Units.iconSizes.small * 0.75
+                height: width
+                // On the trailing bottom corner, half over the edge.
+                x: control.mirrored ? -width / 3 : parent.width - width * 2 / 3
+                y: parent.height - height * 2 / 3
+                source: control.badge
+            }
         }
         Text {
             visible: !control.compact
@@ -77,6 +97,13 @@ T.AbstractButton {
             textFormat: Text.PlainText
             elide: Text.ElideRight
             color: Kirigami.Theme.textColor
+        }
+        Kirigami.Icon {
+            visible: !control.compact && control.badge.length > 0
+            Layout.rightMargin: control.value.length > 0 || control.disclosure ? 0 : Kirigami.Units.largeSpacing
+            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            source: control.badge
         }
         QQC2.Label {
             visible: !control.compact && control.value.length > 0
