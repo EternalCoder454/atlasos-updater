@@ -1,6 +1,6 @@
 # Atlas.Ui: the shared look of Atlas apps (pill buttons, grouped sections,
-# status hero, sidebar items, live charts). A static QML module compiled ahead
-# of time by qmlcachegen. Use it from an app with:
+# status hero, sidebar items, live charts, usage bars). A static QML module
+# compiled ahead of time by qmlcachegen. Use it from an app with:
 #   add_subdirectory(<path to ui> atlas-ui)
 #   target_link_libraries(<app> PRIVATE atlas-ui atlas-uiplugin)
 # and, in QML, `import Atlas.Ui`.
@@ -23,6 +23,8 @@ qt_add_qml_module(atlas-ui
         ConfirmDialog.qml
         NotesText.qml
         LiveChart.qml
+        UsageBar.qml
+        MiniBars.qml
     SOURCES
         livechart.h livechart.cpp
 )
