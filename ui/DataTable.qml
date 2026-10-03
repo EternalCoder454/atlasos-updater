@@ -23,6 +23,7 @@ import org.kde.kirigami as Kirigami
 //       ]
 //       onActivated: row => ...
 //       onContextMenuRequested: (row, x, y) => menu.popup(...)
+//       onHeaderMenuRequested: (x, y) => columnsMenu.popup(...)
 //   }
 //
 // A column is an object with:
@@ -65,6 +66,9 @@ FocusScope {
 
     signal activated(int row)
     signal contextMenuRequested(int row, real x, real y)
+    // A right click on the header, at x, y in the table: for a menu of
+    // the columns to show.
+    signal headerMenuRequested(real x, real y)
     signal deleteRequested(int row)
     signal toggleRequested(int row)
 
@@ -272,6 +276,20 @@ FocusScope {
                     onClicked: root.sortBy(head.index)
                 }
             }
+        }
+    }
+
+    // Right clicks only, over every column and the space after them; left
+    // clicks go through to the columns' own areas below.
+    MouseArea {
+        x: header.x
+        y: header.y
+        width: header.width
+        height: header.height
+        acceptedButtons: Qt.RightButton
+        onClicked: mouse => {
+            const p = mapToItem(root, mouse.x, mouse.y);
+            root.headerMenuRequested(p.x, p.y);
         }
     }
 
