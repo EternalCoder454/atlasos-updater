@@ -50,8 +50,9 @@ ColumnLayout {
         // content, a section that starts folded (no card to widen it)
         // settles at no room for the title at all.
         Layout.fillWidth: true
-        leftPadding: Kirigami.Units.largeSpacing
-        rightPadding: Kirigami.Units.smallSpacing
+        // The wider space on the title's side, either way round.
+        leftPadding: mirrored ? Kirigami.Units.smallSpacing : Kirigami.Units.largeSpacing
+        rightPadding: mirrored ? Kirigami.Units.largeSpacing : Kirigami.Units.smallSpacing
         topPadding: 2
         bottomPadding: 2
         hoverEnabled: true
@@ -60,7 +61,9 @@ ColumnLayout {
         onClicked: root.foldRequested(!root.folded)
         Accessible.role: Accessible.Button
         Accessible.name: root.title
-        Accessible.description: root.folded ? qsTr("Folded. Press to show.") : qsTr("Press to fold away.")
+        // As SidebarGroup's header says it: QML's Accessible has no
+        // expanded state to set.
+        Accessible.description: root.folded ? qsTr("Collapsed") : qsTr("Expanded")
 
         // Around the title and chevron only, not the whole row.
         background: Rectangle {
