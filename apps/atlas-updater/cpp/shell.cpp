@@ -36,8 +36,9 @@ Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
     m_tray = new KStatusNotifierItem(QStringLiteral("net.eterneon.atlas.updater"), this);
     m_tray->setCategory(KStatusNotifierItem::SystemServices);
     m_tray->setTitle(tr("Atlas Updater"));
-    m_tray->setIconByName(kAppIcon);
-    m_tray->setAttentionIconByName(QStringLiteral("software-update-available"));
+    // Monochrome like the tray's other icons, so they follow light and dark
+    m_tray->setIconByName(QStringLiteral("net.eterneon.atlas.updater-symbolic"));
+    m_tray->setAttentionIconByName(QStringLiteral("net.eterneon.atlas.updater-ready-symbolic"));
     m_tray->setStatus(KStatusNotifierItem::Passive);
 
     auto *menu = m_tray->contextMenu();

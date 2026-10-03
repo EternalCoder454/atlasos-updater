@@ -158,6 +158,8 @@ appstream-util validate-relax --nonet \
 %{_datadir}/knotifications6/atlas-updater.notifyrc
 %{_datadir}/metainfo/net.eterneon.atlas.updater.metainfo.xml
 %{_datadir}/icons/hicolor/scalable/apps/net.eterneon.atlas.updater.svg
+%{_datadir}/icons/hicolor/scalable/status/net.eterneon.atlas.updater-symbolic.svg
+%{_datadir}/icons/hicolor/scalable/status/net.eterneon.atlas.updater-ready-symbolic.svg
 %endif
 
 %changelog

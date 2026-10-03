@@ -61,3 +61,7 @@ install(FILES data/net.eterneon.atlas.updater.metainfo.xml
         DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES data/net.eterneon.atlas.updater.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+# One-colour tray icons, which Plasma paints in the panel's text colour
+install(FILES data/net.eterneon.atlas.updater-symbolic.svg
+              data/net.eterneon.atlas.updater-ready-symbolic.svg
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/status)

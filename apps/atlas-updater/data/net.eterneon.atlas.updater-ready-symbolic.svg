@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- The tray icon while an update waits for a restart: the arrows with a
+       dot in the accent colour, like a badge on a macOS Dock icon. -->
+  <style id="current-color-scheme" type="text/css">.ColorScheme-Text { color:#232629; } .ColorScheme-Highlight { color:#3daee9; }</style>
+  <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="22">
+    <rect width="22" height="22" fill="#fff"/>
+    <circle cx="17" cy="5" r="5" fill="#000"/>
+  </mask>
+  <g mask="url(#cut)">
+  <g class="ColorScheme-Text" transform="translate(3.6 3) scale(0.2222) translate(-33 -28)">
+    <g fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 90.5 50 A 30 30 0 0 0 38 41"/>
+      <path d="M 37.5 78 A 30 30 0 0 0 90 87"/>
+    </g>
+    <g fill="currentColor">
+      <path d="M 95 28 L 95 54 L 69 54 Z" transform="rotate(8 90 48)"/>
+      <path d="M 33 100 L 33 74 L 59 74 Z" transform="rotate(8 38 80)"/>
+    </g>
+  </g>
+  </g>
+  <circle class="ColorScheme-Highlight" cx="17" cy="5" r="3.5" fill="currentColor"/>
+</svg>
