@@ -6,6 +6,18 @@
 # strip=none) and the binaries are shipped as built.
 %global debug_package %{nil}
 
+# --define "_atlas_build_cache <dir>" (packaging/build-rpm.sh passes it when
+# ATLAS_BUILD_CACHE is set) keeps cargo's downloads, cargo's output and the
+# CMake build in <dir>, so a rebuild only compiles what changed.
+%if 0%{?_atlas_build_cache:1}
+%global cargo_target_dir %{_atlas_build_cache}/target
+%global cargo_home %{_atlas_build_cache}/cargo-home
+%global _vpath_builddir %{_atlas_build_cache}/cmake
+%else
+%global cargo_target_dir target
+%global cargo_home %{_builddir}/cargo-home
+%endif
+
 Name:           atlas
 Version:        0.1.0
 Release:        1%{?dist}
@@ -87,7 +99,10 @@ sed -i 's|^members = .*|members = ["crates/atlas-core"]|' Cargo.toml
 # crates from crates.io during %%build. That works in podman and with
 # `rpmbuild` on a networked machine, but not in an offline mock/Koji build;
 # for that, vendor the crates into the source tarball first.
-export CARGO_HOME=%{_builddir}/cargo-home
+export CARGO_HOME=%{cargo_home}
+%if 0%{?_atlas_build_cache:1}
+export CARGO_TARGET_DIR=%{cargo_target_dir}
+%endif
 # Fedora's Rust flags (hardening, build-id, ...), also used by Corrosion's cargo.
 export RUSTFLAGS="%{build_rustflags}"
 export CARGO_PROFILE_RELEASE_STRIP=none
@@ -101,7 +116,7 @@ cargo build --release -p atlas-core --bin atlas-system-helper
 
 %install
 d=crates/atlas-core/data
-install -Dpm0755 target/release/atlas-system-helper %{buildroot}%{_libexecdir}/atlas-system-helper
+install -Dpm0755 %{cargo_target_dir}/release/atlas-system-helper %{buildroot}%{_libexecdir}/atlas-system-helper
 install -Dpm0644 $d/dbus-1/system.d/net.eterneon.atlas.SystemHelper.conf \
     %{buildroot}%{_datadir}/dbus-1/system.d/net.eterneon.atlas.SystemHelper.conf
 install -Dpm0644 $d/dbus-1/system-services/net.eterneon.atlas.SystemHelper.service \

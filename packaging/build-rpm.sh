@@ -3,6 +3,9 @@
 #   packaging/build-rpm.sh <out dir> [rpmbuild options, e.g. --without app]
 # The binary RPMs (no source, no debuginfo) are copied to <out dir>.
 # Cargo needs network access.
+# ATLAS_BUILD_CACHE=<dir> (optional, such as a podman cache mount) keeps cargo's
+# downloads, cargo's output and the CMake build in <dir>, and builds in a fixed
+# place, so the next build only recompiles what changed.
 set -euo pipefail
 
 main() {
@@ -26,7 +29,30 @@ main() {
     done
     dnf -y builddep "${defs[@]}" "$spec" >&2
     
-    top=$(mktemp -d)
+    cache=${ATLAS_BUILD_CACHE:-}
+    if [ -n "$cache" ]; then
+        mkdir -p "$cache"
+        cache=$(cd "$cache" && pwd)
+        case $cache/ in
+            "$src"/*) echo "ATLAS_BUILD_CACHE must be outside the source tree" >&2; exit 1 ;;
+        esac
+        # Cargo's fingerprints include absolute paths, so the build tree must
+        # sit at the same path every time.
+        top=$cache/rpmbuild
+        rm -rf "$top"
+        # Output built with another compiler or Qt can't be trusted (build
+        # scripts don't track system headers): start over when they change.
+        # (rpm -q fails for a package --without app doesn't install.)
+        toolchain=$(rustc -vV
+            rpm -q rust cargo gcc-c++ cmake corrosion qt6-qtbase-devel qt6-qtdeclarative-devel || true)
+        if [ "$(cat "$cache/toolchain" 2>/dev/null)" != "$toolchain" ]; then
+            rm -rf "$cache/target" "$cache/cmake"
+            printf '%s\n' "$toolchain" >"$cache/toolchain"
+        fi
+        rpmopts+=(--define "_atlas_build_cache $cache")
+    else
+        top=$(mktemp -d)
+    fi
     trap 'rm -rf "$top"' EXIT
     mkdir -p "$top"/{SOURCES,BUILD,RPMS,SRPMS,SPECS}
     tar -C "$src" \
