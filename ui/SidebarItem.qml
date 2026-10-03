@@ -85,9 +85,9 @@ T.AbstractButton {
             font.family: Kirigami.Theme.smallFont.family
             font.pointSize: Kirigami.Theme.smallFont.pointSize
             // Figures of one width, so a changing value doesn't jiggle.
-            font.features: {
-                "tnum": 1
-            }
+            font.features: ({
+                    "tnum": 1
+                })
             textFormat: Text.PlainText
             opacity: 0.6
         }
