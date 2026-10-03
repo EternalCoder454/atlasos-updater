@@ -21,7 +21,7 @@ T.Switch {
         // is near the background: a held switch that is on would look off.
         // The palette's active group keeps the accent; the fade below says
         // it's held.
-        color: control.checked ? control.palette.active.highlight : Qt.alpha(Kirigami.Theme.textColor, control.hovered ? 0.28 : 0.2)
+        color: control.checked ? (control.enabled ? Kirigami.Theme.highlightColor : control.palette.active.highlight) : Qt.alpha(Kirigami.Theme.textColor, control.hovered ? 0.28 : 0.2)
         border.width: control.visualFocus ? 2 : 0
         border.color: Qt.alpha(Kirigami.Theme.highlightColor, 0.6)
         opacity: control.enabled ? 1 : 0.45
