@@ -152,6 +152,13 @@ AtlasPage {
         }
     }
 
+    SearchField {
+        id: search
+        Layout.alignment: Qt.AlignRight
+        placeholderText: qsTr("Search Apps")
+        onQueryChanged: table.rebuild()
+    }
+
     // A table with made-up processes. A real app gives it a Rust
     // QAbstractItemModel that sorts itself and moves rows; this one sorts a
     // ListModel in JavaScript.
@@ -180,10 +187,14 @@ AtlasPage {
         function rebuild() {
             const order = table.sortOrder === Qt.AscendingOrder ? 1 : -1;
             const rows = table.names.map((n, i) => ({ name: n[0], icon: n[1], state: i === 5 ? "stopped" : "running", cpu: table.load[i].cpu, memory: table.load[i].memory, depth: 0, expandable: i === 0, expanded: i === 0 && table.groupOpen }));
+            const q = search.query.toLowerCase();
+            if (q) {
+                rows.splice(0, rows.length, ...rows.filter(r => r.name.toLowerCase().includes(q)));
+            }
             rows.sort((a, b) => (a[table.sortRole] < b[table.sortRole] ? -1 : a[table.sortRole] > b[table.sortRole] ? 1 : 0) * order);
             // Firefox's processes, under it while it is open.
             const at = rows.findIndex(r => r.expandable);
-            if (table.groupOpen) {
+            if (table.groupOpen && at >= 0) {
                 rows.splice(at + 1, 0, { name: "Web Content", icon: "", state: "running", cpu: 4.2, memory: 310, depth: 1, expandable: false, expanded: false }, { name: "GPU Process", icon: "", state: "running", cpu: 1.1, memory: 95, depth: 1, expandable: false, expanded: false });
             }
             const current = table.currentIndex >= 0 && table.currentIndex < apps.count ? apps.get(table.currentIndex).name : "";
@@ -196,6 +207,7 @@ AtlasPage {
 
         onSortRoleChanged: rebuild()
         onSortOrderChanged: rebuild()
+        onContextMenuRequested: (row, x, y) => rowMenu.popup(table, x, y)
         onToggleRequested: row => {
             groupOpen = !groupOpen;
             rebuild();
@@ -208,10 +220,34 @@ AtlasPage {
             repeat: true
             onTriggered: {
                 table.load = table.load.map((l, i) => ({ cpu: Math.max(0, Math.min(100, l.cpu + (Math.random() - 0.5) * 12 * (i % 3 + 1))), memory: l.memory }));
-                // Hold the order still under the pointer.
-                if (!table.pointerInside) {
+                // Hold the order still under the pointer, and while the
+                // menu is open on a row.
+                if (!table.pointerInside && !rowMenu.opened) {
                     table.rebuild();
                 }
+            }
+        }
+
+        ContextMenu {
+            id: rowMenu
+            ContextMenuItem {
+                text: qsTr("Details")
+                icon.name: "documentinfo"
+            }
+            ContextMenuItem {
+                text: qsTr("Open File Location")
+                icon.name: "folder-open"
+            }
+            ContextMenuSeparator {}
+            ContextMenuItem {
+                text: qsTr("Stop")
+                icon.name: "media-playback-pause"
+            }
+            ContextMenuItem {
+                text: qsTr("End Task")
+                icon.name: "process-stop"
+                shortcutText: qsTr("Del")
+                destructive: true
             }
         }
 

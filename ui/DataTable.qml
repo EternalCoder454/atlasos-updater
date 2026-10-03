@@ -11,6 +11,8 @@ import org.kde.kirigami as Kirigami
 // model follows them (a Rust QAbstractItemModel that moves rows, not one that
 // resets). While the pointer is over the rows `pointerInside` is true; a live
 // model holds its order still then, so the row under the pointer stays put.
+// Hold it while a context menu opened on a row is up, too: the pointer has
+// left the rows for the menu, but the row it acts on must not move.
 //
 //   DataTable {
 //       model: apps
