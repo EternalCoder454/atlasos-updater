@@ -29,5 +29,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Release notes: small blocking client, run on a worker thread.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 cxx-qt-build = "0.10"

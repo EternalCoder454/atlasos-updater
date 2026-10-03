@@ -39,6 +39,7 @@ QQC2.ApplicationWindow {
             "rollback": rollbackPage,
             "channel": channelPage,
             "history": historyPage,
+            "changelog": changelogPage,
             "settings": settingsPage,
             "reports": reportsPage,
             "sent": sentPage,
@@ -140,6 +141,11 @@ QQC2.ApplicationWindow {
                     text: qsTr("History")
                     icon.name: "view-history"
                 }
+                NavItem {
+                    page: "changelog"
+                    text: qsTr("Changelog")
+                    icon.name: "view-list-text"
+                }
                 Item {
                     Layout.fillHeight: true
                 }
@@ -205,6 +211,7 @@ QQC2.ApplicationWindow {
             lastAppsCheck: root.lastAppsCheck
             onAppsChecked: root.lastAppsCheck = Date.now()
             onOpenReports: root.showPage("reports")
+            onOpenChangelog: root.showPage("changelog")
         }
     }
     Component {
@@ -222,6 +229,12 @@ QQC2.ApplicationWindow {
     Component {
         id: historyPage
         HistoryPage {
+            backend: root.backend
+        }
+    }
+    Component {
+        id: changelogPage
+        ChangelogPage {
             backend: root.backend
         }
     }

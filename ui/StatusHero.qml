@@ -17,6 +17,11 @@ ColumnLayout {
     // 0..1 draws a progress ring; negative means none.
     property real progress: -1
     property color tint: Kirigami.Theme.highlightColor
+    // A thin bar under the subtitle: filled to `progress` (0..1), or a
+    // sliding segment while `progress` is negative.
+    property bool showBar: false
+    // A line under the bar ("120 MB of 300 MB").
+    property string barText
     default property alias actions: actionRow.data
 
     Layout.fillWidth: true
@@ -96,6 +101,59 @@ ColumnLayout {
         wrapMode: Text.Wrap
         opacity: 0.7
         text: root.subtitle
+        textFormat: Text.PlainText
+    }
+    Item {
+        id: bar
+        visible: root.showBar
+        Layout.alignment: Qt.AlignHCenter
+        Layout.topMargin: Kirigami.Units.smallSpacing
+        Layout.preferredWidth: Math.min(root.width, Kirigami.Units.gridUnit * 18)
+        implicitHeight: 6
+        clip: true
+
+        Accessible.role: Accessible.ProgressBar
+        Accessible.name: root.headline
+        Accessible.description: root.barText
+
+        Rectangle {
+            anchors.fill: parent
+            radius: height / 2
+            color: Qt.alpha(root.tint, 0.18)
+        }
+        Rectangle {
+            id: fill
+            readonly property bool known: root.progress >= 0
+            property real slide: 0
+            height: parent.height
+            radius: height / 2
+            color: root.tint
+            width: known ? Math.max(height, parent.width * Math.min(1, root.progress)) : parent.width * 0.3
+            x: known ? 0 : slide
+            Behavior on width {
+                enabled: fill.known
+                NumberAnimation {
+                    duration: Kirigami.Units.longDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+            NumberAnimation on slide {
+                running: bar.visible && !fill.known && Kirigami.Units.longDuration > 0
+                from: -bar.width * 0.3
+                to: bar.width
+                loops: Animation.Infinite
+                duration: Kirigami.Units.veryLongDuration * 3
+                easing.type: Easing.InOutQuad
+            }
+        }
+    }
+    QQC2.Label {
+        Layout.fillWidth: true
+        visible: root.showBar && root.barText.length > 0
+        horizontalAlignment: Text.AlignHCenter
+        font: Kirigami.Theme.smallFont
+        opacity: 0.7
+        text: root.barText
         textFormat: Text.PlainText
     }
     // Actions sit side by side when they fit, and stack when they do not.

@@ -13,6 +13,7 @@ AtlasPage {
     required property var backend
 
     signal openReports
+    signal openChangelog
     signal appsChecked
 
     // Set by Main: when the app list was last checked (ms since the epoch).
@@ -40,6 +41,63 @@ AtlasPage {
     // Something is waiting for a restart (an update, a switch or a go back).
     readonly property bool restartReady: page.backend.hasStaged || page.backend.restartNeeded || page.rollbackQueued
     readonly property bool checking: (!page.backend.loaded && !page.hasError) || page.busyOp === "check"
+    readonly property bool restarting: page.backend.restarting === true
+
+    // The helper's progress while a download (or a channel switch) runs.
+    readonly property string stage: page.downloading || page.busyOp === "switch" ? page.backend.progressStage : ""
+    readonly property real fraction: page.stage.length > 0 && page.backend.progressTotal > 0 ? Math.min(1, page.backend.progressDone / page.backend.progressTotal) : -1
+    readonly property string progressText: {
+        if (page.stage === "downloading") {
+            if (page.fraction >= 0) {
+                return qsTr("%1 of %2 · %3%").arg(page.size(page.backend.progressDone)).arg(page.size(page.backend.progressTotal)).arg(Math.floor(page.fraction * 100));
+            }
+            return page.backend.progressDone > 0 ? qsTr("%1 downloaded").arg(page.size(page.backend.progressDone)) : "";
+        }
+        if (page.stage === "installing") {
+            var pct = page.fraction >= 0 ? qsTr("%1%").arg(Math.floor(page.fraction * 100)) : "";
+            var d = page.backend.progressDetail;
+            return d.length > 0 && pct.length > 0 ? d + " · " + pct : d + pct;
+        }
+        return "";
+    }
+
+    // The clock for "Restart Tonight" (23:00 today, offered until 22:30) and
+    // "Last checked: Today at …". Ticks while shown, and catches up when
+    // the page shows again after the window sat in the tray.
+    property double now: Date.now()
+    onVisibleChanged: page.now = Date.now()
+    onRestartReadyChanged: page.now = Date.now()
+    Timer {
+        interval: 60 * 1000
+        repeat: true
+        triggeredOnStart: true
+        running: page.visible
+        onTriggered: page.now = Date.now()
+    }
+    function tonightAt(nowMs) {
+        var d = new Date(nowMs);
+        d.setHours(23, 0, 0, 0);
+        return nowMs < d.getTime() - 30 * 60 * 1000 ? Math.floor(d.getTime() / 1000) : 0;
+    }
+    readonly property double tonight: page.tonightAt(page.now)
+
+    function size(bytes) {
+        if (bytes >= 1e9) {
+            return qsTr("%1 GB").arg((bytes / 1e9).toLocaleString(Qt.locale(), "f", 1));
+        }
+        if (bytes >= 1e6) {
+            return qsTr("%1 MB").arg(Math.round(bytes / 1e6));
+        }
+        return qsTr("%1 kB").arg(Math.round(bytes / 1e3));
+    }
+
+    function copyDetails() {
+        copier.text = page.backend.errorText;
+        copier.selectAll();
+        copier.copy();
+        copier.text = "";
+        copied.restart();
+    }
 
     function retry() {
         if (page.backend.errorOp === "download") {
@@ -95,9 +153,19 @@ AtlasPage {
         }
     }
 
+    // Copy Details goes through this: QML has no clipboard of its own.
+    TextEdit {
+        id: copier
+        visible: false
+    }
+    Timer {
+        id: copied
+        interval: 2000
+    }
+
     ConfirmDialog {
         id: scheduleDialog
-        title: qsTr("Restart Later")
+        title: qsTr("Pick a Restart Time")
         text: qsTr("Atlas Updater restarts your computer at this time. You get a notification 5 minutes before, and apps get to save their work first.")
         acceptText: qsTr("Schedule Restart")
         closeOnAccept: false
@@ -189,6 +257,9 @@ AtlasPage {
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         busy: page.checking || page.downloading || page.working
+        progress: page.fraction
+        showBar: page.downloading || page.stage.length > 0
+        barText: page.progressText
         tint: {
             if (page.hasError) {
                 return Kirigami.Theme.negativeTextColor;
@@ -236,13 +307,13 @@ AtlasPage {
                 return qsTr("Reading the system state…");
             }
             if (page.working) {
-                return page.backend.restarting === true ? qsTr("Restarting…") : qsTr("Applying your change…");
+                return page.backend.restarting === true ? qsTr("Restarting System…") : qsTr("Applying your change…");
             }
             if (page.checking) {
                 return qsTr("Checking for updates…");
             }
             if (page.downloading) {
-                return qsTr("Downloading %1…").arg(page.backend.availableVersion);
+                return page.stage === "installing" ? qsTr("Installing %1…").arg(page.backend.availableVersion) : qsTr("Downloading %1…").arg(page.backend.availableVersion);
             }
             if (page.rollbackQueued) {
                 return qsTr("Restart to go back to %1").arg(page.backend.rollbackTarget);
@@ -268,7 +339,10 @@ AtlasPage {
             if (page.backend.restarting === true) {
                 return qsTr("Saving your session…");
             }
-            if (page.checking || page.downloading || page.working) {
+            if (page.downloading) {
+                return qsTr("Keep using your computer. The update is set up on the side and starts when you restart.");
+            }
+            if (page.checking || page.working) {
                 // Never repeat the headline.
                 return page.backend.busyText === hero.headline ? qsTr("This takes a moment.") : page.backend.busyText;
             }
@@ -295,16 +369,31 @@ AtlasPage {
         }
 
         PrimaryButton {
-            text: page.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update")
+            text: page.restarting ? qsTr("Restarting System…") : (page.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update"))
             visible: page.restartReady
             enabled: !page.backend.busy && !page.working
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
-            text: qsTr("Restart Later…")
+            text: qsTr("Restart Tonight")
+            visible: page.restartReady && !page.working && page.backend.scheduledAt === 0 && page.tonight > 0
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.text: qsTr("Restarts at %1. You get a notification 5 minutes before.").arg(new Date(page.tonight * 1000).toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)))
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            onClicked: {
+                var at = page.tonightAt(Date.now());
+                page.now = Date.now();
+                if (at > 0) {
+                    page.backend.scheduleRestart(at);
+                }
+            }
+        }
+        SecondaryButton {
+            text: qsTr("Pick a Time…")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0
             onClicked: scheduleDialog.open()
         }
+
         SecondaryButton {
             text: qsTr("Cancel Scheduled Restart")
             visible: page.backend.scheduledAt > 0 && !page.working
@@ -334,6 +423,12 @@ AtlasPage {
             onClicked: page.retry()
         }
         SecondaryButton {
+            text: copied.running ? qsTr("Copied") : qsTr("Copy Details")
+            Accessible.name: qsTr("Copy the error details")
+            visible: page.hasError
+            onClicked: page.copyDetails()
+        }
+        SecondaryButton {
             text: qsTr("Dismiss")
             Accessible.name: qsTr("Dismiss error")
             visible: page.hasError && !page.canRetry
@@ -345,6 +440,18 @@ AtlasPage {
             enabled: !page.backend.busy
             onClicked: page.backend.checkForUpdate()
         }
+    }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        Layout.topMargin: -Kirigami.Units.smallSpacing
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+        visible: page.backend.lastChecked > 0 && page.backend.loaded && !page.hasError && !page.checking && !page.downloading && !page.working
+        horizontalAlignment: Text.AlignHCenter
+        font: Kirigami.Theme.smallFont
+        opacity: 0.6
+        text: qsTr("Last checked: %1").arg(Dates.relative(page.backend.lastChecked, page.now))
+        textFormat: Text.PlainText
     }
 
     // ---- release notes ----
@@ -404,6 +511,23 @@ AtlasPage {
         SectionRow {
             title: qsTr("Previous")
             value: page.backend.hasRollback ? page.version(page.backend.rollbackVersion, page.backend.rollbackDate) : qsTr("None")
+        }
+        SectionRow {
+            title: qsTr("Changelog")
+            subtitle: qsTr("What changed in each version this computer went through")
+            chevron: true
+            onClicked: page.openChangelog()
+        }
+    }
+
+    // ---- what happens on its own ----
+    Section {
+        title: qsTr("Automatic Updates")
+        footer: qsTr("Atlas Updater never restarts your computer without asking. A version you went back from isn't downloaded again on its own.")
+        SectionRow {
+            iconName: "update-none"
+            title: qsTr("Updates download on their own")
+            subtitle: qsTr("In the background, when you're online and not on a metered connection. Restart when it suits you.")
         }
     }
 

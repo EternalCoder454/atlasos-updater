@@ -356,11 +356,81 @@ pub fn parse_body(json: &str) -> Notes {
 
 /// Blocking. Call from a worker thread.
 pub fn fetch(template: &str, version: &str) -> Result<Notes, FetchError> {
-    let url = url_for(template, version);
+    Ok(get(&url_for(template, version))?.map_or(Notes::Missing, |t| parse_body(&t)))
+}
+
+/// One release from GitHub's release list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    /// The tag, which is the version (44.YYYYMMDD).
+    pub version: String,
+    /// When it was published, RFC 3339 (may be empty).
+    pub date: String,
+    /// [`render`] and [`render_plain`] of the body; empty when it has none.
+    pub html: String,
+    pub plain: String,
+}
+
+/// The release list's URL for the notes `template`: GitHub's
+/// `.../releases/tags/{version}` becomes `.../releases?per_page=100`; any
+/// other template (`file:///dir/{version}.json`) gets `releases` for the
+/// version (`file:///dir/releases.json`).
+pub fn releases_url(template: &str) -> String {
+    match template.strip_suffix("/tags/{version}") {
+        Some(base) => format!("{base}?per_page=100"),
+        None => template.replace("{version}", "releases"),
+    }
+}
+
+/// GitHub's release list (a JSON array), drafts left out.
+pub fn parse_releases(json: &str) -> Vec<Release> {
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str(json) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|r| r["draft"] != serde_json::Value::Bool(true))
+        .filter_map(|r| {
+            let version = r["tag_name"].as_str()?.trim();
+            if version.is_empty() {
+                return None;
+            }
+            let body = r["body"].as_str().unwrap_or("").trim();
+            let html = if body.is_empty() {
+                String::new()
+            } else {
+                render(body)
+            };
+            Some(Release {
+                version: version.to_string(),
+                date: r["published_at"].as_str().unwrap_or("").to_string(),
+                plain: if html.trim().is_empty() {
+                    String::new()
+                } else {
+                    render_plain(body)
+                },
+                html: if html.trim().is_empty() {
+                    String::new()
+                } else {
+                    html
+                },
+            })
+        })
+        .collect()
+}
+
+/// The raw release list from the URL for `template` (see [`releases_url`]);
+/// `None` when there is none. Blocking.
+pub fn fetch_releases(template: &str) -> Result<Option<String>, FetchError> {
+    get(&releases_url(template))
+}
+
+/// The text at `url` (https, http or file://); `None` for a missing one.
+fn get(url: &str) -> Result<Option<String>, FetchError> {
     if let Some(path) = url.strip_prefix("file://") {
         return match std::fs::read_to_string(path) {
-            Ok(text) => Ok(parse_body(&text)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Notes::Missing),
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(FetchError::Other(e.to_string())),
         };
     }
@@ -374,13 +444,13 @@ pub fn fetch(template: &str, version: &str) -> Result<Notes, FetchError> {
         .build()
         .into();
     let mut resp = agent
-        .get(&url)
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| FetchError::Other(e.to_string()))?;
     let status = resp.status().as_u16();
     if status == 404 || status == 410 {
-        return Ok(Notes::Missing);
+        return Ok(None);
     }
     if status == 403 || status == 429 {
         return Err(FetchError::RateLimited);
@@ -394,12 +464,44 @@ pub fn fetch(template: &str, version: &str) -> Result<Notes, FetchError> {
         .limit(2 * 1024 * 1024)
         .read_to_string()
         .map_err(|e| FetchError::Other(e.to_string()))?;
-    Ok(parse_body(&text))
+    Ok(Some(text))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_list_url() {
+        assert_eq!(
+            releases_url(crate::config::DEFAULT_NOTES_URL),
+            "https://api.github.com/repos/EternalCoder454/AtlasOS/releases?per_page=100"
+        );
+        assert_eq!(
+            releases_url("file:///var/notes/{version}.json"),
+            "file:///var/notes/releases.json"
+        );
+    }
+
+    #[test]
+    fn release_list_parses_and_skips_drafts() {
+        let json = r#"[
+            {"tag_name": "44.20261002", "published_at": "2026-10-02T20:00:00Z", "body": "- Plasma 6.7.5"},
+            {"tag_name": "44.20260925", "draft": true, "body": "secret"},
+            {"tag_name": " ", "body": "x"},
+            {"tag_name": "44.20260924", "body": ""}
+        ]"#;
+        let r = parse_releases(json);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].version, "44.20261002");
+        assert_eq!(r[0].date, "2026-10-02T20:00:00Z");
+        assert!(r[0].html.contains("Plasma 6.7.5"));
+        assert!(r[0].plain.contains("Plasma 6.7.5"));
+        assert_eq!(r[1].version, "44.20260924");
+        assert!(r[1].html.is_empty() && r[1].plain.is_empty());
+        assert!(parse_releases("{}").is_empty());
+        assert!(parse_releases("not json").is_empty());
+    }
 
     #[test]
     fn url_fills_version() {

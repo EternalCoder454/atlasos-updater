@@ -33,3 +33,25 @@ function shortDate(iso) {
     }
     return d.toLocaleDateString(Qt.locale(), Qt.locale().dateFormat(1)) // 1 = Locale.ShortFormat;
 }
+
+// Unix seconds -> "Today at 9:41", "Yesterday at 18:02" or the full date,
+// as seen at `nowMs` (pass the page's clock so it updates after midnight).
+function relative(secs, nowMs) {
+    var d = new Date(secs * 1000);
+    if (isNaN(d.getTime())) {
+        return "";
+    }
+    var time = d.toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1));
+    var today = new Date(nowMs);
+    today.setHours(0, 0, 0, 0);
+    var day = new Date(d.getTime());
+    day.setHours(0, 0, 0, 0);
+    var days = Math.round((today.getTime() - day.getTime()) / 86400000);
+    if (days === 0) {
+        return qsTr("Today at %1").arg(time);
+    }
+    if (days === 1) {
+        return qsTr("Yesterday at %1").arg(time);
+    }
+    return atTime(secs);
+}

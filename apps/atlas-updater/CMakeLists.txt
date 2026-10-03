@@ -40,7 +40,7 @@ qt_add_qml_module(atlas-updater-app
     VERSION 1.0
     QML_FILES
         qml/Main.qml qml/Cards.qml qml/UpdatesPage.qml qml/RollbackPage.qml
-        qml/ChannelPage.qml qml/HistoryPage.qml qml/SettingsPage.qml
+        qml/ChannelPage.qml qml/HistoryPage.qml qml/ChangelogPage.qml qml/SettingsPage.qml
         qml/ReportsPage.qml qml/SentReportsPage.qml qml/AboutPage.qml
         qml/dates.js
 )

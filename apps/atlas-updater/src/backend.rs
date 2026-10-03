@@ -66,6 +66,24 @@ pub mod qobject {
         #[qproperty(QString, apps_status, cxx_name = "appsStatus")]
         #[qproperty(QString, apps_error, cxx_name = "appsError")]
         #[qproperty(QString, history_json, cxx_name = "historyJson")]
+        /// The Changelog page's versions (changelog::Item as JSON), newest first.
+        #[qproperty(QString, changelog_json, cxx_name = "changelogJson")]
+        /// "", "loading", "ready" or "error".
+        #[qproperty(QString, changelog_state, cxx_name = "changelogState")]
+        /// Plain-language reason for "error", or a note that the list shown
+        /// is a saved one (offline) with "ready".
+        #[qproperty(QString, changelog_note, cxx_name = "changelogNote")]
+        /// While an update downloads: "downloading" (bytes) or "installing"
+        /// (steps), else "". From the helper's Progress property.
+        #[qproperty(QString, progress_stage, cxx_name = "progressStage")]
+        /// Bytes or steps done and in all (`progressTotal` 0: unknown).
+        /// Doubles: QML numbers, and byte counts pass i32.
+        #[qproperty(f64, progress_done, cxx_name = "progressDone")]
+        #[qproperty(f64, progress_total, cxx_name = "progressTotal")]
+        /// The step running ("Deploying Image"), may be empty.
+        #[qproperty(QString, progress_detail, cxx_name = "progressDetail")]
+        /// When this app last checked for updates (Unix seconds; 0: never).
+        #[qproperty(i64, last_checked, cxx_name = "lastChecked")]
         #[qproperty(i64, scheduled_at, cxx_name = "scheduledAt")]
         #[qproperty(bool, crash_enabled, cxx_name = "crashEnabled")]
         #[qproperty(bool, crash_has_server, cxx_name = "crashHasServer")]
@@ -150,6 +168,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "loadHistory"]
         fn load_history(self: Pin<&mut Backend>);
+        /// The Changelog page opened (or asked again): read the release list
+        /// (cached for an hour) and the history.
+        #[qinvokable]
+        #[cxx_name = "loadChangelog"]
+        fn load_changelog(self: Pin<&mut Backend>);
 
         #[qinvokable]
         #[cxx_name = "checkApps"]
@@ -223,10 +246,11 @@ use crate::notes::{self, Notes};
 use crate::ops::{self, Op};
 use crate::schedule::{self, Event, Schedule};
 use crate::view::{self, View};
-use crate::{apps, crash, rc, restart};
+use crate::{apps, changelog, crash, rc, restart};
 
 const RC_RESTART: &str = "Restart";
 const RC_NOTIFIED: &str = "Notified";
+const RC_CHECKED: &str = "Checked";
 
 #[derive(Default)]
 pub struct BackendRust {
@@ -268,6 +292,14 @@ pub struct BackendRust {
     apps_status: QString,
     apps_error: QString,
     history_json: QString,
+    changelog_json: QString,
+    changelog_state: QString,
+    changelog_note: QString,
+    progress_stage: QString,
+    progress_done: f64,
+    progress_total: f64,
+    progress_detail: QString,
+    last_checked: i64,
     scheduled_at: i64,
     crash_enabled: bool,
     crash_has_server: bool,
@@ -292,7 +324,99 @@ pub struct BackendRust {
     /// Failed notes lookups: version and when, so a failure is not retried
     /// on every status refresh.
     notes_failed: Option<(String, std::time::Instant)>,
+    /// A Changelog load is running.
+    changelog_inflight: bool,
+    /// Another was asked for meanwhile (a version changed): run it after.
+    changelog_dirty: bool,
+    /// When fetching the release list last failed.
+    changelog_failed: Option<std::time::Instant>,
 }
+
+/// This machine's history, newest first (developer fixtures: theirs).
+fn read_history(fixtures: Option<&std::path::Path>) -> Vec<atlas_core::history::Entry> {
+    match fixtures {
+        Some(dir) => config::read_fixture(dir, "history.jsonl")
+            .map(|t| {
+                let mut v: Vec<atlas_core::history::Entry> = t
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                v.reverse();
+                v
+            })
+            .unwrap_or_default(),
+        None => atlas_core::history::read_default().unwrap_or_default(),
+    }
+}
+
+/// The release list for the Changelog page.
+struct ReleaseList {
+    releases: Vec<notes::Release>,
+    /// Shown above the list (a saved list used offline), or the error.
+    note: String,
+    /// GitHub was asked and failed: wait before asking again.
+    fetch_failed: bool,
+}
+
+/// The cache while fresh, else GitHub (then cached), else a stale cache with
+/// a note saying so. `may_fetch` false (a fetch failed a moment ago) uses
+/// whatever is cached. `wanted`: the versions this computer has or is offered.
+fn release_list(
+    fixtures: Option<&std::path::Path>,
+    template: &str,
+    wanted: &[&str],
+    may_fetch: bool,
+) -> Result<ReleaseList, ReleaseList> {
+    let list = |text: &str, note: &str, fetch_failed| ReleaseList {
+        releases: notes::parse_releases(text),
+        note: note.to_string(),
+        fetch_failed,
+    };
+    if let Some(dir) = fixtures {
+        let text = config::read_fixture(dir, "releases.json").unwrap_or_default();
+        return Ok(list(&text, "", false));
+    }
+    const SAVED: &str = "Showing the release notes saved earlier: the newest could not be loaded.";
+    let url = notes::releases_url(template);
+    let cache = changelog::cache_path();
+    let cached = cache
+        .as_deref()
+        .and_then(|p| changelog::read_cache(p, &url, std::time::SystemTime::now()));
+    if let Some(c) = &cached
+        && (c.fresh(wanted) || !may_fetch)
+    {
+        let note = if c.fresh(wanted) { "" } else { SAVED };
+        return Ok(list(&c.text, note, false));
+    }
+    if !may_fetch {
+        return Err(list(
+            "",
+            "The release notes could not be loaded. Try again in a few minutes.",
+            false,
+        ));
+    }
+    let fetched = notes::fetch_releases(template);
+    if let Ok(Some(text)) = &fetched
+        && cache
+            .as_deref()
+            .is_some_and(|p| changelog::write_cache(p, &url, text))
+    {
+        return Ok(list(text, "", false));
+    }
+    match (fetched, cached) {
+        // a list we could not save: still good to show
+        (Ok(Some(text)), _) if serde_json::from_str::<Vec<serde_json::Value>>(&text).is_ok() => {
+            Ok(list(&text, "", false))
+        }
+        (_, Some(c)) => Ok(list(&c.text, SAVED, true)),
+        (Err(e), None) => Err(list("", &e.text(), true)),
+        (Ok(_), None) => Err(list("", "The release notes could not be loaded.", true)),
+    }
+}
+
+/// How long the Changelog leaves GitHub alone after a failed fetch (its
+/// limit for unauthenticated requests is 60 an hour).
+const CHANGELOG_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// How long a failed (or missing) notes lookup is left alone.
 const NOTES_BACKOFF: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -380,6 +504,14 @@ impl qobject::Backend {
             Some(d) => config::fixture_schedule(d),
             None => rc::get(RC_RESTART, "ScheduledAt").and_then(|v| v.parse::<i64>().ok()),
         };
+        // Fixture mode: `last-checked` (Unix seconds), else never.
+        let checked = match &self.rust().fixtures {
+            Some(d) => config::read_fixture(d, "last-checked"),
+            None => rc::get(RC_CHECKED, "At"),
+        };
+        if let Some(t) = checked.and_then(|v| v.trim().parse::<i64>().ok()) {
+            self.as_mut().set_last_checked(t);
+        }
         if let Some(at) = saved {
             // A time that passed while we were not running is dropped: never
             // restart the machine unexpectedly at login.
@@ -535,8 +667,12 @@ impl qobject::Backend {
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
         let op2 = op.clone();
+        let pq = qt.clone();
+        let on_progress: ops::OnProgress = Box::new(move |p| {
+            let _ = pq.queue(move |obj| obj.show_progress(p));
+        });
         if !spawn_named("atlas-op", move || {
-            let res = guarded(|| ops::run(&op2, fixtures.as_deref()))
+            let res = guarded(|| ops::run(&op2, fixtures.as_deref(), on_progress))
                 .unwrap_or_else(|| Err(OpError::Message(INTERNAL.into())));
             let _ = qt.queue(move |obj| obj.finish_op(op2, foreground, res));
         }) {
@@ -550,8 +686,19 @@ impl qobject::Backend {
         }
     }
 
+    /// The helper's progress, while a foreground op runs (a late one,
+    /// queued before the op finished, is dropped).
+    fn show_progress(mut self: Pin<&mut Self>, p: Option<atlas_core::progress::Progress>) {
+        let p = p.filter(|_| *self.busy()).unwrap_or_default();
+        self.as_mut().set_progress_stage(q(&p.stage));
+        self.as_mut().set_progress_done(p.done as f64);
+        self.as_mut().set_progress_total(p.total as f64);
+        self.as_mut().set_progress_detail(q(&p.detail));
+    }
+
     fn finish_op(mut self: Pin<&mut Self>, op: Op, foreground: bool, res: Result<Status, OpError>) {
         if foreground {
+            self.as_mut().show_progress(None);
             self.as_mut().set_busy(false);
             self.as_mut().end_op(op.name());
         } else {
@@ -564,6 +711,13 @@ impl qobject::Backend {
                     self.as_mut().set_error("", QString::default());
                 }
                 self.as_mut().apply_status(&st);
+                if matches!(op, Op::Check | Op::Upgrade) {
+                    let now = schedule::unix_now();
+                    self.as_mut().set_last_checked(now);
+                    if self.rust().fixtures.is_none() {
+                        rc::set(RC_CHECKED, "At", Some(&now.to_string()));
+                    }
+                }
                 if foreground {
                     let v = self.rust().view.clone();
                     // No banner where the Updates page's hero already
@@ -762,6 +916,92 @@ impl qobject::Backend {
         }
     }
 
+    // ---- changelog ----
+
+    pub fn load_changelog(mut self: Pin<&mut Self>) {
+        if !self.rust().window_open {
+            return;
+        }
+        if self.rust().changelog_inflight {
+            self.as_mut().rust_mut().changelog_dirty = true;
+            return;
+        }
+        let may_fetch = self
+            .rust()
+            .changelog_failed
+            .is_none_or(|t| t.elapsed() >= CHANGELOG_BACKOFF);
+        let fixtures = self.rust().fixtures.clone();
+        let template = self.rust().config.release_notes_url.clone();
+        let v = &self.rust().view;
+        let slot = |s: &view::Slot| {
+            if s.present {
+                s.version.clone()
+            } else {
+                String::new()
+            }
+        };
+        let (current, staged, available) = (slot(&v.current), slot(&v.staged), slot(&v.available));
+        if self.changelog_json().is_empty() {
+            self.as_mut().set_changelog_state(q("loading"));
+        }
+        self.as_mut().rust_mut().changelog_inflight = true;
+        let qt = self.qt_thread();
+        let started = spawn_named("atlas-changelog", move || {
+            let history = read_history(fixtures.as_deref());
+            let wanted = [current.as_str(), staged.as_str(), available.as_str()];
+            let res = release_list(fixtures.as_deref(), &template, &wanted, may_fetch);
+            let failed = match &res {
+                Ok(l) | Err(l) => l.fetch_failed,
+            };
+            let res = res
+                .map_err(|l| l.note)
+                .map(|ReleaseList { releases, note, .. }| {
+                    let ran: Vec<changelog::Ran> = history
+                        .iter()
+                        .filter_map(|e| {
+                            Some(changelog::Ran {
+                                version: e.version.as_deref()?,
+                                first_booted: &e.first_booted,
+                            })
+                        })
+                        .collect();
+                    let items = changelog::merge(&releases, &ran, &current, &staged, &available);
+                    (
+                        serde_json::to_string(&items).unwrap_or_else(|_| "[]".into()),
+                        note,
+                    )
+                });
+            let _ = qt.queue(move |mut obj| {
+                obj.as_mut().rust_mut().changelog_inflight = false;
+                if failed {
+                    obj.as_mut().rust_mut().changelog_failed = Some(std::time::Instant::now());
+                }
+                let again = std::mem::take(&mut obj.as_mut().rust_mut().changelog_dirty);
+                match res {
+                    Ok((text, note)) => {
+                        obj.as_mut().set_changelog_json(q(&text));
+                        obj.as_mut().set_changelog_note(q(&note));
+                        obj.as_mut().set_changelog_state(q("ready"));
+                    }
+                    Err(e) => {
+                        obj.as_mut().set_changelog_note(q(&e));
+                        obj.as_mut().set_changelog_state(q("error"));
+                    }
+                }
+                if again {
+                    obj.load_changelog();
+                }
+            });
+        });
+        if !started {
+            self.as_mut().rust_mut().changelog_inflight = false;
+            self.as_mut().set_changelog_note(q(
+                "Could not start a worker thread. The system may be out of resources.",
+            ));
+            self.as_mut().set_changelog_state(q("error"));
+        }
+    }
+
     // ---- history ----
 
     pub fn load_history(self: Pin<&mut Self>) {
@@ -769,19 +1009,7 @@ impl qobject::Backend {
         let current = self.rust().view.current.digest.clone();
         let qt = self.qt_thread();
         spawn_named("atlas-history", move || {
-            let entries = match &fixtures {
-                Some(dir) => config::read_fixture(dir, "history.jsonl")
-                    .map(|t| {
-                        let mut v: Vec<atlas_core::history::Entry> = t
-                            .lines()
-                            .filter_map(|l| serde_json::from_str(l).ok())
-                            .collect();
-                        v.reverse();
-                        v
-                    })
-                    .unwrap_or_default(),
-                None => atlas_core::history::read_default().unwrap_or_default(),
-            };
+            let entries = read_history(fixtures.as_deref());
             let rows: Vec<_> = entries
                 .iter()
                 .map(|e| {
@@ -911,6 +1139,7 @@ impl qobject::Backend {
                 .set_info_text(q("Developer fixtures: restart skipped."));
             return;
         }
+        // stays set until the session ends, or the logout is canceled
         self.as_mut().set_restarting(true);
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
@@ -927,6 +1156,11 @@ impl qobject::Backend {
             // The Updates page shows the error; restartProblem also lets the
             // shell notify when the window is not active (a scheduled
             // restart in the tray, for example).
+            if e == restart::CANCELED {
+                obj.as_mut().set_info_text(q(&e));
+                clear(obj);
+                return;
+            }
             if e == restart::NO_ANSWER {
                 // Plasma may still act on the request: say so, no notification.
                 obj.as_mut().set_error("restart", q(&e));
@@ -947,8 +1181,8 @@ impl qobject::Backend {
                 Err(e) => {
                     let _ = qt.queue(move |obj| fail(obj, e));
                 }
-                // The request went through. If the session still runs (the
-                // logout was dismissed) the time must not stay set.
+                // Not reached when the restart happens (the session ends
+                // first); a canceled one comes back as restart::CANCELED.
                 Ok(()) => {
                     let _ = qt_ok.queue(clear);
                 }

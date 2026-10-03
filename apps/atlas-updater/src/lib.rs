@@ -3,6 +3,7 @@
 
 mod apps;
 mod backend;
+mod changelog;
 mod config;
 mod crash;
 mod errors;

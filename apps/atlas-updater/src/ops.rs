@@ -4,6 +4,7 @@ use std::path::Path;
 
 use atlas_core::bootc::{Channel, Status};
 use atlas_core::helper_client::HelperClient;
+use atlas_core::progress::Progress;
 
 use crate::config;
 use crate::errors::{self, OpError};
@@ -43,12 +44,16 @@ impl Op {
     }
 }
 
+/// Called with the helper's progress while an upgrade or switch runs, and
+/// with `None` when it goes back to nothing.
+pub type OnProgress = Box<dyn Fn(Option<Progress>) + Send + 'static>;
+
 /// Talks to the system helper, or reads `status.json` under the fixtures switch.
 /// A short-lived current-thread runtime and a fresh connection per call: nothing
 /// stays allocated while the app sits idle in the tray.
-pub fn run(op: &Op, fixtures: Option<&Path>) -> Result<Status, OpError> {
+pub fn run(op: &Op, fixtures: Option<&Path>, on_progress: OnProgress) -> Result<Status, OpError> {
     if let Some(dir) = fixtures {
-        return fixture_status(op, dir);
+        return fixture_status(op, dir, &on_progress);
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -58,6 +63,25 @@ pub fn run(op: &Op, fixtures: Option<&Path>) -> Result<Status, OpError> {
         let client = HelperClient::connect()
             .await
             .map_err(|e| errors::friendly(&e))?;
+        // Subscribed before the call starts, so no early update is missed.
+        // Progress is extra: without it the bar is simply indeterminate.
+        let follow = match op {
+            Op::Upgrade | Op::Switch(_) => client.progress_changes().await.ok().map(|mut s| {
+                tokio::spawn(async move {
+                    while let Some(p) = std::future::poll_fn(|cx| {
+                        zbus::export::futures_core::Stream::poll_next(
+                            std::pin::Pin::new(&mut s),
+                            cx,
+                        )
+                    })
+                    .await
+                    {
+                        on_progress(p);
+                    }
+                })
+            }),
+            _ => None,
+        };
         let st = match op {
             Op::Status => client.status().await,
             Op::Check => client.check_for_update().await,
@@ -66,11 +90,14 @@ pub fn run(op: &Op, fixtures: Option<&Path>) -> Result<Status, OpError> {
             Op::CancelRollback => client.cancel_rollback().await,
             Op::Switch(c) => client.switch_channel(*c).await,
         };
+        if let Some(task) = follow {
+            task.abort();
+        }
         st.map_err(|e| errors::friendly(&e))
     })
 }
 
-fn fixture_status(op: &Op, dir: &Path) -> Result<Status, OpError> {
+fn fixture_status(op: &Op, dir: &Path, on_progress: &OnProgress) -> Result<Status, OpError> {
     // Ops with a visible effect read their own file when it exists, so a
     // fixture directory can show "before" and "after".
     let name = match op {
@@ -86,8 +113,14 @@ fn fixture_status(op: &Op, dir: &Path) -> Result<Status, OpError> {
     if let Some(msg) = text.strip_prefix("ERROR:") {
         return Err(OpError::Message(msg.trim().to_string()));
     }
-    // Screenshot hook: stay busy until the app quits.
+    // Screenshot hook: stay busy until the app quits, showing the progress
+    // in `progress.json` if there is one.
     if config::fixture_hold(op.name()) {
+        if let Some(p) = config::read_fixture(dir, "progress.json")
+            .and_then(|t| serde_json::from_str::<Progress>(&t).ok())
+        {
+            on_progress(Some(p));
+        }
         config::hold_forever();
     }
     std::thread::sleep(std::time::Duration::from_millis(300));

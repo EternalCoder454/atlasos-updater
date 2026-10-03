@@ -57,7 +57,7 @@ AtlasPage {
         visible: page.backend.restarting === true
         busy: true
         iconName: "view-refresh"
-        headline: qsTr("Restarting…")
+        headline: qsTr("Restarting System…")
         subtitle: qsTr("Saving your session…")
     }
 
