@@ -230,7 +230,8 @@ Screens:
 ## AtlasOS side (the AtlasOS repo, not here)
 
 - Image tags: `stable` (weekly) and `testing` (daily), each version tagged
-  `44.YYYYMMDD`. The image label `org.opencontainers.image.version` = the
+  `44.YYYYMMDD-N` (N: the build's number that day; older ones are plain
+  `44.YYYYMMDD`). The image label `org.opencontainers.image.version` = the
   version, which `bootc status` shows.
 - Ships `atlasos-update-stage.timer`, autostarts `atlas-updater --tray`,
   keeps Discover's notifier out, and installs the RPMs built by

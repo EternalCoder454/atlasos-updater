@@ -222,6 +222,19 @@ mod tests {
         assert_eq!(compare_versions("45.1", "44.99"), Ordering::Greater);
         assert_eq!(compare_versions("44.1", "44.1"), Ordering::Equal);
         assert_eq!(compare_versions("44.1", "44.1.1"), Ordering::Less);
+        // builds numbered within the day, and the older plain day versions
+        assert_eq!(
+            compare_versions("44.20261008-10", "44.20261008-2"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("44.20261008", "44.20261008-1"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("44.20261009-1", "44.20261008-5"),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -266,7 +279,8 @@ mod tests {
 
     #[test]
     fn versions_without_a_release_still_show() {
-        // testing-channel builds have no GitHub release
+        // a build with no GitHub release (local builds, or one whose release
+        // was never written)
         let ran = [Ran {
             version: "44.20261030",
             first_booted: "2026-10-30T08:00:00Z",

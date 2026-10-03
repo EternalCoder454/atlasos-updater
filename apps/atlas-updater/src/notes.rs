@@ -362,7 +362,7 @@ pub fn fetch(template: &str, version: &str) -> Result<Notes, FetchError> {
 /// One release from GitHub's release list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
-    /// The tag, which is the version (44.YYYYMMDD).
+    /// The tag, which is the version (44.YYYYMMDD-N; older ones 44.YYYYMMDD).
     pub version: String,
     /// When it was published, RFC 3339 (may be empty).
     pub date: String,

@@ -485,11 +485,11 @@ struct BootInfo {
     image: Option<String>,
 }
 
-/// Compare dotted numeric versions like `44.20261008`; `None` if either has a
-/// non-numeric part.
+/// Compare numeric versions like `44.20261008` or `44.20261008-2` (the build
+/// number within the day); `None` if either has a non-numeric part.
 fn version_cmp(a: &str, b: &str) -> Option<Cmp> {
     let parse = |v: &str| {
-        v.split('.')
+        v.split(['.', '-'])
             .map(|p| p.parse::<u64>().ok())
             .collect::<Option<Vec<_>>>()
     };
@@ -1554,6 +1554,15 @@ mod tests {
         assert_eq!(version_cmp("44.9", "44.10"), Some(Cmp::Less));
         assert_eq!(version_cmp("44.1", "44.1.0"), Some(Cmp::Equal));
         assert_eq!(version_cmp("44.x", "44.1"), None);
+        assert_eq!(
+            version_cmp("44.20261008-10", "44.20261008-2"),
+            Some(Cmp::Greater)
+        );
+        assert_eq!(version_cmp("44.20261008", "44.20261008-1"), Some(Cmp::Less));
+        assert_eq!(
+            version_cmp("44.20261009-1", "44.20261008-5"),
+            Some(Cmp::Greater)
+        );
     }
 
     fn boot_with(d: &tempfile::TempDir, p: &Path, image: &str, version: &str, digest: &str) {
