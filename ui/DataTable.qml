@@ -489,7 +489,11 @@ FocusScope {
             }
 
             // Over the cells: a changed figure repaints the row as one
-            // rectangle (see repaintarea.h).
+            // rectangle (see repaintarea.h). Keyed on the values, not the
+            // texts: that repaints rows whose text held ("0 B/s" from a
+            // rate that moved), but the busy table then goes as one
+            // rectangle, and painting through a clip of many costs more
+            // than painting it all (measured: 22 against 25.7 ms/s).
             RepaintArea {
                 anchors.fill: parent
                 content: root.columns.map(c => row.model[c.role])
