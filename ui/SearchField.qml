@@ -63,6 +63,21 @@ T.TextField {
         border.color: control.activeFocus ? Qt.alpha(Kirigami.Theme.highlightColor, 0.7) : Qt.alpha(Kirigami.Theme.textColor, 0.1)
     }
 
+    // A template field keeps placeholderText but draws nothing for it.
+    Text {
+        x: control.leftPadding
+        anchors.verticalCenter: parent.verticalCenter
+        width: control.availableWidth
+        visible: control.length === 0 && control.preeditText.length === 0
+        text: control.placeholderText
+        font: control.font
+        color: control.placeholderTextColor
+        verticalAlignment: control.verticalAlignment
+        elide: Text.ElideRight
+        renderType: control.renderType
+        Accessible.ignored: true
+    }
+
     Kirigami.Icon {
         id: icon
         x: control.rtl ? control.width - width - Kirigami.Units.largeSpacing : Kirigami.Units.largeSpacing
