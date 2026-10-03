@@ -33,7 +33,9 @@ qt_add_qml_module(atlas-ui
         ContextMenuSeparator.qml
     SOURCES
         livechart.h livechart.cpp
+        repaintarea.h repaintarea.cpp
+        accessibilitystate.h accessibilitystate.cpp
 )
 target_link_libraries(atlas-ui PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Qml)
-# LiveChartItem is C++ (QQuickPaintedItem).
+# LiveChartItem (QQuickPaintedItem), RepaintArea and AccessibilityState are C++.
 set_target_properties(atlas-ui PROPERTIES AUTOMOC ON)

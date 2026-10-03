@@ -185,6 +185,10 @@ FocusScope {
         event.accepted = true;
     }
     readonly property bool mirrored: LayoutMirroring.enabled
+    // Translated once: qsTr looks its file up in Qt's resources on every
+    // call, and the rows re-evaluate whenever the model changes.
+    readonly property string expandedText: qsTr("Expanded")
+    readonly property string collapsedText: qsTr("Collapsed")
 
     function openMenuAtCurrent() {
         const item = list.currentItem;
@@ -365,16 +369,21 @@ FocusScope {
             Accessible.focused: selected && root.activeFocus
             // Qt's Accessible has no expandable or expanded state to set;
             // say it in the description.
-            Accessible.description: expandable ? (expanded ? qsTr("Expanded") : qsTr("Collapsed")) : ""
+            Accessible.description: expandable ? (expanded ? root.expandedText : root.collapsedText) : ""
             Accessible.onPressAction: root.activated(index)
             Accessible.onToggleAction: {
                 if (expandable) {
                     root.toggleRequested(index);
                 }
             }
+            // Every column, for the current row and for every row while a
+            // screen reader is listening; otherwise the first only.
+            // Formatting every cell twice on each change doubled a busy
+            // table's work.
             Accessible.name: {
                 const parts = [];
-                for (let i = 0; i < root.columns.length; ++i) {
+                const all = selected || AccessibilityState.active;
+                for (let i = 0; i < (all ? root.columns.length : Math.min(1, root.columns.length)); ++i) {
                     const c = root.columns[i];
                     const v = row.model[c.role];
                     parts.push(c.title + " " + (c.text ? c.text(v, row.model) : v));
@@ -401,7 +410,8 @@ FocusScope {
                         required property int index
                         readonly property var column: root.columns[index]
                         readonly property var value: row.model[column.role]
-                        readonly property real heat: column.heat > 0 ? Math.max(0, Math.min(1, Number(value) / column.heat)) : 0
+                        // A value the machine doesn't report (NaN) is cold.
+                        readonly property real heat: column.heat > 0 && Number(value) > 0 ? Math.min(1, Number(value) / column.heat) : 0
                         readonly property real indent: index === 0 ? row.indent : 0
 
                         width: root.widths[index] ?? 0
@@ -476,6 +486,13 @@ FocusScope {
                         onTapped: root.toggleRequested(row.index)
                     }
                 }
+            }
+
+            // Over the cells: a changed figure repaints the row as one
+            // rectangle (see repaintarea.h).
+            RepaintArea {
+                anchors.fill: parent
+                content: root.columns.map(c => row.model[c.role])
             }
 
             MouseArea {
