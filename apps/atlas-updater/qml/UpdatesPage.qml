@@ -45,7 +45,10 @@ AtlasPage {
 
     // The helper's progress while a download (or a channel switch) runs.
     readonly property string stage: page.downloading || page.busyOp === "switch" ? page.backend.progressStage : ""
-    readonly property real fraction: page.stage.length > 0 && page.backend.progressTotal > 0 ? Math.min(1, page.backend.progressDone / page.backend.progressTotal) : -1
+    // Installing is counted in steps, not bytes: one step (bootc importing
+    // the image) can take a minute, and a percentage would sit still that
+    // long. So the bar moves on its own and the text names the step.
+    readonly property real fraction: page.stage === "downloading" && page.backend.progressTotal > 0 ? Math.min(1, page.backend.progressDone / page.backend.progressTotal) : -1
     readonly property string progressText: {
         if (page.stage === "downloading") {
             if (page.fraction >= 0) {
@@ -54,11 +57,19 @@ AtlasPage {
             return page.backend.progressDone > 0 ? qsTr("%1 downloaded").arg(page.size(page.backend.progressDone)) : "";
         }
         if (page.stage === "installing") {
-            var pct = page.fraction >= 0 ? qsTr("%1%").arg(Math.floor(page.fraction * 100)) : "";
-            var d = page.backend.progressDetail;
-            return d.length > 0 && pct.length > 0 ? d + " · " + pct : d + pct;
+            var total = page.backend.progressTotal;
+            var step = total > 0 ? qsTr("Step %1 of %2").arg(Math.min(total, page.backend.progressDone + 1)).arg(total) : "";
+            var d = page.sentenceCase(page.backend.progressDetail);
+            return d.length > 0 && step.length > 0 ? step + " · " + d : step + d;
         }
         return "";
+    }
+    // bootc writes "Importing Image", rpm-ostree "Writing OSTree commit":
+    // capitalised words after the first are lowered, names such as OSTree kept.
+    function sentenceCase(text) {
+        return text.split(" ").map(function (w, i) {
+            return i > 0 && /^[A-Z][a-z]+$/.test(w) ? w.toLowerCase() : w;
+        }).join(" ");
     }
 
     // The clock for "Restart Tonight" (23:00 today, offered until 22:30) and

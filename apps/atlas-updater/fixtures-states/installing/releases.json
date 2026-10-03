@@ -1,0 +1,38 @@
+[
+ {
+  "tag_name": "44.20261009",
+  "draft": true,
+  "published_at": "2026-10-09T04:00:00Z",
+  "body": "draft"
+ },
+ {
+  "tag_name": "44.20261002",
+  "draft": false,
+  "published_at": "2026-10-02T04:10:00Z",
+  "body": "## What's new\n\n- **Download progress.** Atlas Updater shows how much of an update is downloaded, then each install step.\n- **Changelog.** Every version this computer went through, with its notes.\n- Restart Tonight: one click restarts at 11 PM.\n\nFull details on [GitHub](https://github.com/EternalCoder454/AtlasOS/releases)."
+ },
+ {
+  "tag_name": "44.20261001",
+  "draft": false,
+  "published_at": "2026-10-01T04:12:00Z",
+  "body": "## What's new\n\n- Updates also work on systems with packages added through `rpm-ostree install`.\n- Faster dock and launcher animations."
+ },
+ {
+  "tag_name": "44.20260928",
+  "draft": false,
+  "published_at": "2026-09-28T04:05:00Z",
+  "body": "- Kernel 7.2.6\n- Mesa 26.2.3 with fixes for RDNA 3 cards"
+ },
+ {
+  "tag_name": "44.20260924",
+  "draft": false,
+  "published_at": "2026-09-24T04:09:30Z",
+  "body": "- First release on the stable channel."
+ },
+ {
+  "tag_name": "44.20260917",
+  "draft": false,
+  "published_at": "2026-09-17T04:00:00Z",
+  "body": "- Older than this computer: not shown."
+ }
+]
