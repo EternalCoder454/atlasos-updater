@@ -233,10 +233,17 @@ fn run_with(
 ) -> Result<String, String> {
     match feed {
         Feed::BootcFd(sink) => {
-            let first = run_once(program, args, timeout, cap, Feed::BootcFd(sink));
+            // note whether bootc reported anything: one that did accepted the flag
+            let reported = Arc::new(AtomicBool::new(false));
+            let (r2, s2) = (reported.clone(), sink);
+            let counting: ProgressSink = Arc::new(move |p| {
+                r2.store(true, Ordering::Release);
+                s2(p)
+            });
+            let first = run_once(program, args, timeout, cap, Feed::BootcFd(counting));
             // an older bootc without the (hidden) flag: run it once without
             match first {
-                Err(e) if e.contains("--progress-fd") => {
+                Err(e) if !reported.load(Ordering::Acquire) && rejects_progress_fd(&e) => {
                     run_once(program, args, timeout, cap, Feed::None)
                 }
                 other => other,
@@ -244,6 +251,16 @@ fn run_with(
         }
         other => run_once(program, args, timeout, cap, other),
     }
+}
+
+/// Whether bootc's error says it does not know `--progress-fd` (clap's
+/// "unexpected argument '--progress-fd' found", or "unrecognized"/"unknown"
+/// next to the flag), as opposed to a failure that merely names it.
+fn rejects_progress_fd(stderr: &str) -> bool {
+    stderr.contains("unexpected argument '--progress-fd'")
+        || stderr.lines().any(|l| {
+            l.contains("--progress-fd") && (l.contains("unrecognized") || l.contains("unknown"))
+        })
 }
 
 fn run_once(
@@ -1936,6 +1953,36 @@ echo "ran: $*""#,
         let (sink, _) = collector();
         let out = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
         assert_eq!(out.as_deref(), Ok("ran: upgrade\n"));
+    }
+
+    #[test]
+    fn a_failure_after_progress_that_names_the_flag_is_not_run_again() {
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("log");
+        let prog = script(
+            &d,
+            &format!(
+                r#"echo run >> {}
+eval "echo '{{\"type\":\"ProgressBytes\",\"bytes\":1,\"bytesTotal\":2}}' >&$3"
+echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"#,
+                log.display()
+            ),
+        );
+        let (sink, _) = collector();
+        let e = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
+        assert!(e.unwrap_err().contains("--progress-fd"));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        // and an unrelated failure naming the fd, with no progress, is not either
+        let prog = script(
+            &d,
+            &format!(
+                "echo run >> {}\necho 'cannot write to --progress-fd 5' >&2; exit 1",
+                log.display()
+            ),
+        );
+        let _ = std::fs::remove_file(&log);
+        let _ = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
     }
 
     #[test]

@@ -113,7 +113,7 @@ runs, the JSON of `atlas_core::progress::Progress`, otherwise `""`.
   packages, Running scripts, Writing rpmdb, Writing OSTree commit, Staging
   deployment: `done` is the index of the current step, `total` is 8. Other
   lines are ignored.
-- A bootc that rejects `--progress-fd` (its stderr names the flag) is run once
+- A bootc that rejects `--progress-fd` (its stderr says the argument is unexpected, unrecognized or unknown, and it reported no progress) is run once
   more without it. A progress pipe whose fd would be 0 to 2 is not used.
 - Progress is an addition: the output caps, timeouts and interruption
   handling are the same, nothing from the caller reaches argv, and if the
