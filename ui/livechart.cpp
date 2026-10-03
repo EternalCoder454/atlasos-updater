@@ -96,7 +96,7 @@ void LiveChartItem::updateTop()
     }
     if (top != m_top) {
         m_top = top;
-        Q_EMIT topChanged();
+        Q_EMIT scaleTopChanged();
     }
 }
 

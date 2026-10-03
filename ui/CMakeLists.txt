@@ -26,6 +26,7 @@ qt_add_qml_module(atlas-ui
         LiveChart.qml
         UsageBar.qml
         MiniBars.qml
+        DataTable.qml
     SOURCES
         livechart.h livechart.cpp
 )

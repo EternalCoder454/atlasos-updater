@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
@@ -146,6 +147,92 @@ AtlasPage {
                     value: "1.4 MB/s"
                     selected: sidebar.current === "enp5s0"
                     onClicked: sidebar.current = "enp5s0"
+                }
+            }
+        }
+    }
+
+    // A table with made-up processes. A real app gives it a Rust
+    // QAbstractItemModel that sorts itself and moves rows; this one sorts a
+    // ListModel in JavaScript.
+    DataTable {
+        id: table
+        Layout.preferredHeight: Kirigami.Units.gridUnit * 16
+        sortRole: "cpu"
+        depthRole: "depth"
+        expandableRole: "expandable"
+        expandedRole: "expanded"
+        placeholderText: qsTr("No Apps Running")
+        columns: [
+            { title: qsTr("Name"), role: "name", fill: true, iconRole: "icon" },
+            { title: qsTr("State"), role: "state", width: 6, cell: stateCell },
+            { title: qsTr("CPU"), role: "cpu", width: 5, align: Qt.AlignRight, heat: 100, text: v => v.toFixed(1) + "%" },
+            { title: qsTr("Memory"), role: "memory", width: 6, align: Qt.AlignRight, text: v => v.toFixed(0) + " MiB" }
+        ]
+        model: ListModel {
+            id: apps
+        }
+
+        property var groupOpen: true
+        readonly property var names: [["Firefox", "firefox"], ["Konsole", "utilities-terminal"], ["Dolphin", "system-file-manager"], ["Kate", "kate"], ["Atlas Updater", "system-software-update"], ["KWin", "kwin"], ["Plasma Shell", "plasma"], ["PipeWire", "audio-card"], ["Discover", "plasmadiscover"], ["Spectacle", "spectacle"], ["Okular", "okular"], ["Gwenview", "gwenview"]]
+        property var load: names.map((_, i) => ({ cpu: (i * 7) % 30, memory: 80 + i * 37 }))
+
+        function rebuild() {
+            const order = table.sortOrder === Qt.AscendingOrder ? 1 : -1;
+            const rows = table.names.map((n, i) => ({ name: n[0], icon: n[1], state: i === 5 ? "stopped" : "running", cpu: table.load[i].cpu, memory: table.load[i].memory, depth: 0, expandable: i === 0, expanded: i === 0 && table.groupOpen }));
+            rows.sort((a, b) => (a[table.sortRole] < b[table.sortRole] ? -1 : a[table.sortRole] > b[table.sortRole] ? 1 : 0) * order);
+            // Firefox's processes, under it while it is open.
+            const at = rows.findIndex(r => r.expandable);
+            if (table.groupOpen) {
+                rows.splice(at + 1, 0, { name: "Web Content", icon: "", state: "running", cpu: 4.2, memory: 310, depth: 1, expandable: false, expanded: false }, { name: "GPU Process", icon: "", state: "running", cpu: 1.1, memory: 95, depth: 1, expandable: false, expanded: false });
+            }
+            const current = table.currentIndex >= 0 && table.currentIndex < apps.count ? apps.get(table.currentIndex).name : "";
+            apps.clear();
+            for (const r of rows) {
+                apps.append(r);
+            }
+            table.currentIndex = rows.findIndex(r => r.name === current);
+        }
+
+        onSortRoleChanged: rebuild()
+        onSortOrderChanged: rebuild()
+        onToggleRequested: row => {
+            groupOpen = !groupOpen;
+            rebuild();
+        }
+        Component.onCompleted: rebuild()
+
+        Timer {
+            interval: 1000
+            running: true
+            repeat: true
+            onTriggered: {
+                table.load = table.load.map((l, i) => ({ cpu: Math.max(0, Math.min(100, l.cpu + (Math.random() - 0.5) * 12 * (i % 3 + 1))), memory: l.memory }));
+                // Hold the order still under the pointer.
+                if (!table.pointerInside) {
+                    table.rebuild();
+                }
+            }
+        }
+
+        Component {
+            id: stateCell
+            Row {
+                property var value
+                property var row
+                property var column
+                spacing: Kirigami.Units.smallSpacing
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Kirigami.Units.gridUnit * 0.5
+                    height: width
+                    radius: width / 2
+                    color: parent.value === "running" ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
+                }
+                QQC2.Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: parent.value === "running" ? qsTr("Running") : qsTr("Stopped")
+                    opacity: 0.8
                 }
             }
         }

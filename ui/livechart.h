@@ -26,8 +26,9 @@ class LiveChartItem : public QQuickPaintedItem
     // samples: 1.25 times the highest one shown, and at least minimumScale.
     Q_PROPERTY(qreal maximum READ maximum WRITE setMaximum NOTIFY maximumChanged)
     Q_PROPERTY(qreal minimumScale READ minimumScale WRITE setMinimumScale NOTIFY maximumChanged)
-    // The value the top of the plot stands for now, for a caption.
-    Q_PROPERTY(qreal top READ top NOTIFY topChanged)
+    // The value the top of the plot stands for now, for a caption. (Not
+    // `top`: QQuickItem has a final member of that name.)
+    Q_PROPERTY(qreal scaleTop READ scaleTop NOTIFY scaleTopChanged)
 
     Q_PROPERTY(QColor color MEMBER m_color NOTIFY styleChanged)
     Q_PROPERTY(QColor color2 MEMBER m_color2 NOTIFY styleChanged)
@@ -54,7 +55,7 @@ public:
     void setMaximum(qreal m);
     qreal minimumScale() const { return m_minimumScale; }
     void setMinimumScale(qreal m);
-    qreal top() const { return m_top; }
+    qreal scaleTop() const { return m_top; }
 
     void paint(QPainter *p) override;
 
@@ -62,7 +63,7 @@ Q_SIGNALS:
     void valuesChanged();
     void values2Changed();
     void maximumChanged();
-    void topChanged();
+    void scaleTopChanged();
     void styleChanged();
 
 private:
