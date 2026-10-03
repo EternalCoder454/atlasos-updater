@@ -106,12 +106,15 @@ runs, the JSON of `atlas_core::progress::Progress`, otherwise `""`.
   `staging` are one installing range (steps of both added up).
 - rpm-ostree (`upgrade`, `rebase`): stdout is parsed as it arrives. Download
   total is the sum of the `ostree chunk layers needed` and `custom layers
-  needed` sizes, done the sum of the layers fetched so far; with nothing
+  needed` sizes, done the sum of the `Fetching layer` and `Fetching ostree
+  chunk` lines finished so far (never more than the total); with nothing
   needed it goes straight to installing. Installing is the fixed list
   Checking out tree, Importing rpm-md, Resolving dependencies, Checking out
   packages, Running scripts, Writing rpmdb, Writing OSTree commit, Staging
   deployment: `done` is the index of the current step, `total` is 8. Other
   lines are ignored.
+- A bootc that rejects `--progress-fd` (its stderr names the flag) is run once
+  more without it. A progress pipe whose fd would be 0 to 2 is not used.
 - Progress is an addition: the output caps, timeouts and interruption
   handling are the same, nothing from the caller reaches argv, and if the
   progress pipe can't be made the operation runs without progress.

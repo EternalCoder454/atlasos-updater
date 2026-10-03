@@ -120,7 +120,10 @@ impl BootcParser {
                     self.importing_total = total;
                     (steps, total)
                 } else {
-                    (self.importing_total + steps, self.importing_total + total)
+                    (
+                        self.importing_total.saturating_add(steps),
+                        self.importing_total.saturating_add(total),
+                    )
                 };
                 Some(Progress {
                     stage: INSTALLING.into(),
@@ -157,6 +160,8 @@ pub struct RpmOstreeParser {
     finished: u64,
     /// Index of the current step once installing started.
     step: Option<usize>,
+    /// The incomplete line last looked at, so it is not reported twice.
+    seen_partial: String,
 }
 
 impl RpmOstreeParser {
@@ -167,13 +172,18 @@ impl RpmOstreeParser {
     /// Feed stdout bytes; returns the updates in them.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Progress> {
         let mut out = Vec::new();
-        for line in self.lines.feed(chunk) {
+        let complete = self.lines.feed(chunk);
+        if !complete.is_empty() {
+            self.seen_partial.clear();
+        }
+        for line in complete {
             out.extend(self.line(&line, true));
         }
         // "[1/2] Fetching layer x (300 MB)..." has no newline until it is done
         let partial = self.lines.partial();
-        if partial.ends_with("...") {
+        if partial.ends_with("...") && partial != self.seen_partial {
             out.extend(self.line(&partial, false));
+            self.seen_partial = partial;
         }
         out
     }
@@ -187,7 +197,9 @@ impl RpmOstreeParser {
         if let Some(rest) = line.strip_prefix("custom layers needed:") {
             return self.need(rest);
         }
-        if line.starts_with('[') && line.contains("Fetching layer") {
+        if line.starts_with('[')
+            && (line.contains("Fetching layer ") || line.contains("Fetching ostree chunk "))
+        {
             if complete && line.ends_with("...done") {
                 self.finished += parse_size(paren(line)?)?;
             }
@@ -223,7 +235,12 @@ impl RpmOstreeParser {
     fn downloading(&self) -> Progress {
         Progress {
             stage: DOWNLOADING.into(),
-            done: self.finished,
+            // never more done than needed
+            done: if self.needed > 0 {
+                self.finished.min(self.needed)
+            } else {
+                self.finished
+            },
             total: self.needed,
             ..Progress::default()
         }
@@ -382,6 +399,29 @@ mod tests {
         assert_eq!(got[0].done, 0, "a started layer is not finished");
         let got = p.feed(b"done\n");
         assert_eq!((got[0].done, got[0].total), (100_000_000, 300_000_000));
+    }
+
+    #[test]
+    fn rpm_ostree_counts_ostree_chunks_and_layers_and_never_exceeds_the_total() {
+        let mut p = RpmOstreeParser::new();
+        p.feed(b"ostree chunk layers needed: 2 (200.0 MB)\ncustom layers needed: 1 (100.0 MB)\n");
+        let got = p.feed(b"[1/3] Fetching ostree chunk sha256:abc (100.0 MB)...done\n");
+        assert_eq!((got[0].done, got[0].total), (100_000_000, 300_000_000));
+        let got = p.feed(b"[2/3] Fetching ostree chunk sha256:def (100.0 MB)...done\n");
+        assert_eq!(got[0].done, 200_000_000);
+        p.feed(b"[3/3] Fetching layer 2578b (100.0 MB)...done\n");
+        // a size that rounds up past the total is clamped
+        let got = p.feed(b"[4/3] Fetching layer zzz (100.0 MB)...done\n");
+        assert_eq!((got[0].done, got[0].total), (300_000_000, 300_000_000));
+    }
+
+    #[test]
+    fn rpm_ostree_does_not_report_the_same_partial_line_twice() {
+        let mut p = RpmOstreeParser::new();
+        p.feed(b"custom layers needed: 1 (100.0 MB)\n");
+        assert_eq!(p.feed(b"[1/1] Fetching layer abc (100.0 MB)...").len(), 1);
+        assert!(p.feed(b"").is_empty());
+        assert_eq!(p.feed(b"done\n").len(), 1);
     }
 
     #[test]

@@ -192,16 +192,24 @@ impl HelperClient {
         parse_progress(&self.proxy.progress().await?)
     }
 
-    /// Every change of the progress; `None` when it goes back to nothing.
+    /// Every change of the progress (no initial value: read that with
+    /// [`progress`](Self::progress) first); `None` when it goes back to nothing.
     /// Items that cannot be read are skipped. Ends when the stream is dropped
     /// or the connection closes.
     pub async fn progress_changes(&self) -> Result<impl Stream<Item = Option<Progress>> + use<>> {
         let mut changes = self.proxy.receive_progress_changed().await;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            while let Some(c) =
-                std::future::poll_fn(|cx| Pin::new(&mut changes).poll_next(cx)).await
-            {
+            loop {
+                let next = std::future::poll_fn(|cx| Pin::new(&mut changes).poll_next(cx));
+                let c = tokio::select! {
+                    // the stream was dropped: stop listening
+                    () = tx.closed() => break,
+                    c = next => match c {
+                        Some(c) => c,
+                        None => break,
+                    },
+                };
                 let Ok(json) = c.get().await else { continue };
                 let Ok(p) = parse_progress(&json) else {
                     continue;

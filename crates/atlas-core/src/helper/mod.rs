@@ -231,6 +231,28 @@ fn run_with(
     cap: usize,
     feed: Feed,
 ) -> Result<String, String> {
+    match feed {
+        Feed::BootcFd(sink) => {
+            let first = run_once(program, args, timeout, cap, Feed::BootcFd(sink));
+            // an older bootc without the (hidden) flag: run it once without
+            match first {
+                Err(e) if e.contains("--progress-fd") => {
+                    run_once(program, args, timeout, cap, Feed::None)
+                }
+                other => other,
+            }
+        }
+        other => run_once(program, args, timeout, cap, other),
+    }
+}
+
+fn run_once(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    cap: usize,
+    feed: Feed,
+) -> Result<String, String> {
     let mut cmd = Command::new(program);
     let mut progress_rx = None;
     let mut stdout_tap: Option<Tap> = None;
@@ -250,6 +272,10 @@ fn run_with(
             if let Ok((r, w)) = std::io::pipe() {
                 use std::os::fd::AsRawFd;
                 let fd = w.as_raw_fd();
+                // a pipe on 0, 1 or 2 would clash with the child's stdio
+                if fd <= 2 {
+                    return run_once(program, args, timeout, cap, Feed::None);
+                }
                 fd_arg = fd.to_string();
                 // SAFETY: the closure only calls fcntl, which is async-signal-safe.
                 // It clears FD_CLOEXEC on the write end in the child alone, so
@@ -1804,6 +1830,27 @@ mod tests {
         p
     }
 
+    /// `run_with`, retried while the just-written script is "Text file busy"
+    /// (another test thread forked while it was open for writing).
+    fn go(
+        prog: &Path,
+        args: &[&str],
+        timeout: Duration,
+        feed: impl Fn() -> Feed,
+    ) -> Result<String, String> {
+        for _ in 0..40 {
+            match run_with(prog, args, timeout, 1024, feed()) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                other => return other,
+            }
+        }
+        Err("Text file busy".into())
+    }
+
+    const TEN: Duration = Duration::from_secs(10);
+
     fn collector() -> (ProgressSink, Arc<Mutex<Vec<crate::progress::Progress>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s2 = seen.clone();
@@ -1822,18 +1869,33 @@ eval "echo '{\"type\":\"ProgressSteps\",\"task\":\"staging\",\"steps\":1,\"steps
 echo out"#,
         );
         let (sink, seen) = collector();
-        let out = run_with(
-            &prog,
-            &["upgrade"],
-            Duration::from_secs(10),
-            1024,
-            Feed::BootcFd(sink),
-        );
+        let out = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
         assert_eq!(out.as_deref(), Ok("out\n"));
         let seen = lock(&seen);
         assert_eq!(seen.len(), 2);
         assert_eq!((seen[0].done, seen[0].total), (5, 10));
         assert_eq!(seen[1].detail, "Deploying Image");
+    }
+
+    #[test]
+    fn the_flag_follows_the_subcommand_and_the_rest_of_the_argv_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(&d, "echo \"$@\"");
+        let (sink, _) = collector();
+        let out = go(
+            &prog,
+            &["switch", "--transport", "oci", "img:testing"],
+            TEN,
+            || Feed::BootcFd(sink.clone()),
+        )
+        .unwrap();
+        let words: Vec<&str> = out.split_whitespace().collect();
+        assert_eq!(&words[..2], ["switch", "--progress-fd"]);
+        assert!(words[2].parse::<i32>().unwrap() > 2);
+        assert_eq!(&words[3..], ["--transport", "oci", "img:testing"]);
+        // without a feed nothing is added
+        let out = go(&prog, &["status", "--json"], TEN, || Feed::None).unwrap();
+        assert_eq!(out.trim(), "status --json");
     }
 
     #[test]
@@ -1844,14 +1906,7 @@ echo out"#,
             "echo 'custom layers needed: 1 (300.0 MB)'\necho 'Writing rpmdb...done'",
         );
         let (sink, seen) = collector();
-        let out = run_with(
-            &prog,
-            &["upgrade"],
-            Duration::from_secs(10),
-            1024,
-            Feed::Stdout(sink),
-        )
-        .unwrap();
+        let out = go(&prog, &["upgrade"], TEN, || Feed::Stdout(sink.clone())).unwrap();
         assert!(out.contains("Writing rpmdb"));
         let seen = lock(&seen);
         assert_eq!(seen.len(), 2);
@@ -1864,49 +1919,169 @@ echo out"#,
         let d = tempfile::tempdir().unwrap();
         let prog = script(&d, "echo oops >&2; exit 1");
         let (sink, seen) = collector();
-        let e = run_with(
-            &prog,
-            &["upgrade"],
-            Duration::from_secs(10),
-            1024,
-            Feed::BootcFd(sink),
-        );
+        let e = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
         assert_eq!(e, Err("oops".into()));
         assert!(lock(&seen).is_empty());
     }
 
     #[test]
-    fn upgrade_and_switch_report_progress_and_clear_it_after() {
-        struct Reporting(Mutex<Vec<String>>);
-        impl BootcRunner for Reporting {
-            fn run(&self, args: &[&str]) -> Result<String, String> {
-                match args {
-                    ["status", ..] => Ok(PLAIN.into()),
-                    _ => Ok(String::new()),
-                }
-            }
-            fn run_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
-                lock(&self.0).push(args[0].into());
-                sink(crate::progress::Progress {
-                    stage: "downloading".into(),
-                    done: 1,
-                    total: 2,
-                    ..Default::default()
-                });
-                self.run(args)
+    fn a_bootc_without_the_flag_is_run_again_without_it() {
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(
+            &d,
+            r#"case "$*" in *--progress-fd*)
+echo "error: unexpected argument '--progress-fd' found" >&2; exit 2;; esac
+echo "ran: $*""#,
+        );
+        let (sink, _) = collector();
+        let out = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
+        assert_eq!(out.as_deref(), Ok("ran: upgrade\n"));
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_progress_pipe_does_not_hang_the_runner() {
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(&d, "eval \"sleep 5 >&$3 2>&1 &\"\necho done");
+        let (sink, _) = collector();
+        let t = Instant::now();
+        let out = go(&prog, &["upgrade"], TEN, || Feed::BootcFd(sink.clone()));
+        assert_eq!(out.as_deref(), Ok("done\n"));
+        assert!(
+            t.elapsed() < PIPE_GRACE + Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    use crate::progress::Progress as Prog;
+
+    /// Reports one update through `run_progress` and says what a reader of
+    /// the property sees at that moment.
+    struct Reporting {
+        calls: Mutex<Vec<(String, bool)>>,
+        seen: Mutex<Vec<String>>,
+        rx: Mutex<Option<tokio::sync::watch::Receiver<String>>>,
+        fail: bool,
+    }
+
+    impl Reporting {
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Reporting {
+                calls: Mutex::new(Vec::new()),
+                seen: Mutex::new(Vec::new()),
+                rx: Mutex::new(None),
+                fail,
+            })
+        }
+        fn core(self: &Arc<Self>) -> Core {
+            let c = Core::new(self.clone());
+            *lock(&self.rx) = Some(c.progress_watch());
+            c
+        }
+        fn called(&self, with_progress: bool) -> Vec<String> {
+            lock(&self.calls)
+                .iter()
+                .filter(|(_, p)| *p == with_progress)
+                .map(|(a, _)| a.clone())
+                .collect()
+        }
+    }
+
+    impl BootcRunner for Reporting {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            lock(&self.calls).push((args.join(" "), false));
+            match args {
+                ["status", ..] => Ok(BOOTED_WITH_UPDATE.into()),
+                _ => Ok(String::new()),
             }
         }
-        let r = Arc::new(Reporting(Mutex::new(Vec::new())));
-        let c = Core::new(r.clone());
-        let rx = c.progress_watch();
+        fn run_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
+            lock(&self.calls).push((args.join(" "), true));
+            sink(Prog {
+                stage: "downloading".into(),
+                done: 1,
+                total: 2,
+                ..Default::default()
+            });
+            let now = lock(&self.rx).as_ref().unwrap().borrow().clone();
+            lock(&self.seen).push(now);
+            if self.fail {
+                return Err("boom".into());
+            }
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn upgrade_and_switch_report_progress_and_clear_it_after() {
+        let r = Reporting::new(false);
+        let c = r.core();
         c.execute(&Op::Upgrade).unwrap();
         assert_eq!(c.progress_json(), "");
-        // the update was seen while it ran
-        assert!(rx.has_changed().unwrap());
-        assert_eq!(*lock(&r.0), ["upgrade"]);
-        // a check does not report
-        c.execute(&Op::CheckForUpdate).unwrap();
-        assert_eq!(*lock(&r.0), ["upgrade"]);
+        c.execute(&Op::SwitchChannel("testing".into())).unwrap();
+        assert_eq!(c.progress_json(), "");
+        let seen = lock(&r.seen).clone();
+        assert_eq!(seen.len(), 2);
+        let ops: Vec<String> = seen
+            .iter()
+            .map(|j| {
+                assert!(!j.is_empty());
+                let p: Prog = serde_json::from_str(j).unwrap();
+                assert_eq!((p.stage.as_str(), p.done, p.total), ("downloading", 1, 2));
+                p.op
+            })
+            .collect();
+        assert_eq!(ops, ["upgrade", "switch"]);
+        let with = r.called(true);
+        assert_eq!(with[0], "upgrade");
+        assert!(with[1].starts_with("switch "), "{with:?}");
+    }
+
+    #[test]
+    fn status_check_and_rollback_never_get_the_progress_flag() {
+        let r = Reporting::new(false);
+        let c = r.core();
+        for op in [Op::Status, Op::CheckForUpdate, Op::Rollback] {
+            let _ = c.execute(&op);
+        }
+        assert!(r.called(true).is_empty(), "{:?}", r.called(true));
+        assert!(lock(&r.seen).is_empty());
+        assert_eq!(c.progress_json(), "");
+    }
+
+    #[test]
+    fn a_failing_operation_clears_the_property() {
+        let r = Reporting::new(true);
+        let c = r.core();
+        assert!(c.execute(&Op::Upgrade).is_err());
+        assert_eq!(c.progress_json(), "");
+        assert!(c.execute(&Op::SwitchChannel("testing".into())).is_err());
+        assert_eq!(c.progress_json(), "");
+        assert_eq!(lock(&r.seen).len(), 2);
+    }
+
+    #[test]
+    fn a_timeout_clears_the_property() {
+        struct Slow(PathBuf);
+        impl BootcRunner for Slow {
+            fn run(&self, _a: &[&str]) -> Result<String, String> {
+                Ok(PLAIN.into())
+            }
+            fn run_progress(&self, args: &[&str], sink: &ProgressSink) -> Result<String, String> {
+                go(&self.0, args, Duration::from_millis(500), || {
+                    Feed::BootcFd(sink.clone())
+                })
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let prog = script(
+            &d,
+            "eval \"echo '{\\\"type\\\":\\\"ProgressBytes\\\",\\\"bytes\\\":1,\\\"bytesTotal\\\":2}' >&$3\"\nexec sleep 30",
+        );
+        let c = Core::new(Arc::new(Slow(prog)));
+        let e = c.execute(&Op::Upgrade).unwrap_err();
+        assert!(format!("{e:?}").contains("did not finish"), "{e:?}");
+        assert_eq!(c.progress_json(), "");
     }
 
     #[test]
