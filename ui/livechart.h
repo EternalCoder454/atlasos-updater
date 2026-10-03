@@ -25,7 +25,7 @@ class LiveChartItem : public QQuickPaintedItem
     // The value at the top of the plot. 0 (the default) scales to the
     // samples: 1.25 times the highest one shown, and at least minimumScale.
     Q_PROPERTY(qreal maximum READ maximum WRITE setMaximum NOTIFY maximumChanged)
-    Q_PROPERTY(qreal minimumScale READ minimumScale WRITE setMinimumScale NOTIFY maximumChanged)
+    Q_PROPERTY(qreal minimumScale READ minimumScale WRITE setMinimumScale NOTIFY minimumScaleChanged)
     // The value the top of the plot stands for now, for a caption. (Not
     // `top`: QQuickItem has a final member of that name.)
     Q_PROPERTY(qreal scaleTop READ scaleTop NOTIFY scaleTopChanged)
@@ -33,7 +33,7 @@ class LiveChartItem : public QQuickPaintedItem
     Q_PROPERTY(QColor color MEMBER m_color NOTIFY styleChanged)
     Q_PROPERTY(QColor color2 MEMBER m_color2 NOTIFY styleChanged)
     Q_PROPERTY(QColor textColor MEMBER m_textColor NOTIFY styleChanged)
-    Q_PROPERTY(QFont font MEMBER m_font NOTIFY styleChanged)
+    Q_PROPERTY(QFont font MEMBER m_font NOTIFY fontChanged)
     // Captions, already formatted: label and valueText top left, topText
     // top right, spanText bottom left ("60 seconds"), and 0 bottom right.
     Q_PROPERTY(bool captions MEMBER m_captions NOTIFY styleChanged)
@@ -59,16 +59,23 @@ public:
 
     void paint(QPainter *p) override;
 
+protected:
+    void itemChange(ItemChange change, const ItemChangeData &data) override;
+
 Q_SIGNALS:
     void valuesChanged();
     void values2Changed();
     void maximumChanged();
+    void minimumScaleChanged();
     void scaleTopChanged();
     void styleChanged();
+    void fontChanged();
 
 private:
     void updateTop();
     void drawSeries(QPainter *p, const QList<qreal> &values, const QColor &color, double fillAlpha, double w, double top, double plotH);
+    void drawRun(QPainter *p, const qreal *values, int from, int to, const QColor &color, double fillAlpha, double x0, double dx, double bottom, double plotH);
+    void forgetCaptions();
     void drawText(QPainter *p, QStaticText &t, QString &shown, const QString &text, QPointF at, double alpha);
 
     QList<qreal> m_values, m_values2;

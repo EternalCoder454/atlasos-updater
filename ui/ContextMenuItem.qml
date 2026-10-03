@@ -46,8 +46,7 @@ T.MenuItem {
         Text {
             Layout.fillWidth: true
             text: control.text
-            font.family: Kirigami.Theme.defaultFont.family
-            font.pointSize: Kirigami.Theme.defaultFont.pointSize
+            font: Kirigami.Theme.defaultFont
             color: control.tint
             textFormat: Text.PlainText
             elide: Text.ElideRight
@@ -56,8 +55,7 @@ T.MenuItem {
             visible: control.shortcutText.length > 0
             Layout.leftMargin: Kirigami.Units.gridUnit
             text: control.shortcutText
-            font.family: Kirigami.Theme.smallFont.family
-            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            font: Kirigami.Theme.smallFont
             color: Qt.alpha(Kirigami.Theme.textColor, 0.5)
             textFormat: Text.PlainText
         }

@@ -28,15 +28,20 @@ import org.kde.kirigami as Kirigami
 // A column is an object with:
 //   title, role       the header and the model role it shows
 //   width             in grid units; or `fill: true` for the column that
-//                     takes what is left (the first one, if none says so)
+//                     takes what is left (the first one, if none says so;
+//                     a second `fill` is sized by its width like the rest)
 //   align             Qt.AlignLeft (default) or Qt.AlignRight for figures
 //   text(value, row)  formats the value; `row` is the delegate's model object
 //   heat              shade the cell by value / heat (load columns, as in the
 //                     Windows Task Manager); 0 or absent for none
 //   iconRole          a role holding an icon name, drawn before the text
 //   cell              a Component for anything else (a status dot, a switch);
-//                     it gets `value`, `row` and `column` set
+//                     it gets `value`, `row` and `column` set. Rows are
+//                     reused as the list scrolls, so a cell shows only what
+//                     those three say and keeps no state of its own.
 //   sortable          false to keep its header from sorting (default true)
+//
+// Name the table for screen readers with Accessible.name ("Apps").
 //
 // A tree (an app and its processes) is the model's to flatten: give
 // `depthRole`, `expandableRole` and `expandedRole`, and the first column
@@ -69,27 +74,27 @@ FocusScope {
     activeFocusOnTab: true
 
     Accessible.role: Accessible.Table
-    Accessible.name: placeholderText
+    Accessible.focusable: true
+    // Mirror every cell and the header with the table, even when the app
+    // mirrors only the table itself.
+    LayoutMirroring.childrenInherit: true
 
     readonly property real padding: Kirigami.Units.smallSpacing
     readonly property real cellPadding: Kirigami.Units.largeSpacing
-    // Pixel widths, the fill column taking what the others leave.
+    // Pixel widths, the fill column taking what the others leave. A column
+    // without a width (or a second fill) gets a few grid units rather than
+    // NaN; if the fixed columns don't fit, the header and rows clip.
     readonly property var widths: {
         const avail = Math.max(0, width - 2 * padding);
-        let fixed = 0, fill = -1;
-        for (let i = 0; i < columns.length; ++i) {
-            if (columns[i].fill === true && fill < 0) {
-                fill = i;
-            } else if (columns[i].width !== undefined) {
-                fixed += Math.round(columns[i].width * Kirigami.Units.gridUnit);
-            }
-        }
+        const gu = Kirigami.Units.gridUnit;
+        let fill = columns.findIndex(c => c.fill === true);
         if (fill < 0) {
             fill = 0;
         }
-        const w = [];
-        for (let i = 0; i < columns.length; ++i) {
-            w.push(i === fill ? Math.max(Kirigami.Units.gridUnit * 4, avail - fixed + (columns[i].width === undefined || columns[i].fill ? 0 : Math.round(columns[i].width * Kirigami.Units.gridUnit))) : Math.round(columns[i].width * Kirigami.Units.gridUnit));
+        const w = columns.map((c, i) => i === fill ? 0 : Math.round((c.width ?? 4) * gu));
+        const fixed = w.reduce((a, b) => a + b, 0);
+        if (columns.length > 0) {
+            w[fill] = Math.max(gu * 4, avail - fixed);
         }
         return w;
     }
@@ -132,25 +137,27 @@ FocusScope {
             break;
         case Qt.Key_Return:
         case Qt.Key_Enter:
-            if (to >= 0 && !event.isAutoRepeat) {
-                root.activated(to);
+            if (to >= 0) {
+                if (!event.isAutoRepeat) {
+                    root.activated(to);
+                }
+                event.accepted = true;
             }
-            event.accepted = true;
             return;
         case Qt.Key_Delete:
-            if (to >= 0 && !event.isAutoRepeat) {
-                root.deleteRequested(to);
+            if (to >= 0) {
+                if (!event.isAutoRepeat) {
+                    root.deleteRequested(to);
+                }
+                event.accepted = true;
             }
-            event.accepted = true;
             return;
         case Qt.Key_Menu:
-            root.openMenuAtCurrent();
-            event.accepted = true;
+            event.accepted = root.openMenuAtCurrent();
             return;
         case Qt.Key_F10:
             if (event.modifiers & Qt.ShiftModifier) {
-                root.openMenuAtCurrent();
-                event.accepted = true;
+                event.accepted = root.openMenuAtCurrent();
             }
             return;
         case Qt.Key_Left:
@@ -160,9 +167,9 @@ FocusScope {
                 const open = (event.key === Qt.Key_Right) !== root.mirrored;
                 if (open !== list.currentItem.expanded) {
                     root.toggleRequested(to);
+                    event.accepted = true;
                 }
             }
-            event.accepted = true;
             return;
         default:
             return;
@@ -178,10 +185,11 @@ FocusScope {
     function openMenuAtCurrent() {
         const item = list.currentItem;
         if (!item) {
-            return;
+            return false;
         }
-        const p = item.mapToItem(root, Kirigami.Units.gridUnit * 2, item.height / 2);
+        const p = item.mapToItem(root, root.mirrored ? item.width - Kirigami.Units.gridUnit * 2 : Kirigami.Units.gridUnit * 2, item.height / 2);
         root.contextMenuRequested(list.currentIndex, p.x, p.y);
+        return true;
     }
 
     // The card, drawn like Section's.
@@ -197,8 +205,9 @@ FocusScope {
         id: header
         x: root.padding
         y: root.padding
+        width: root.width - 2 * root.padding
         height: Math.round(Kirigami.Units.gridUnit * 1.8)
-        LayoutMirroring.enabled: root.mirrored
+        clip: true
 
         Repeater {
             model: root.columns.length
@@ -214,6 +223,7 @@ FocusScope {
                 height: header.height
                 Accessible.role: Accessible.ColumnHeader
                 Accessible.name: column.title
+                Accessible.onPressAction: root.sortBy(index)
 
                 Rectangle {
                     anchors.fill: parent
@@ -227,7 +237,9 @@ FocusScope {
                     anchors.leftMargin: root.cellPadding
                     anchors.rightMargin: root.cellPadding
                     spacing: Kirigami.Units.smallSpacing
-                    layoutDirection: head.alignRight !== root.mirrored ? Qt.RightToLeft : Qt.LeftToRight
+                    // Mirrored with the table, so figures' titles sit at
+                    // the end either way.
+                    layoutDirection: head.alignRight ? Qt.RightToLeft : Qt.LeftToRight
 
                     QQC2.Label {
                         text: head.column.title
@@ -325,11 +337,23 @@ FocusScope {
             readonly property int depth: root.depthRole ? (model[root.depthRole] ?? 0) : 0
             readonly property bool expandable: root.expandableRole ? model[root.expandableRole] === true : false
             readonly property bool expanded: root.expandedRole ? model[root.expandedRole] === true : false
+            readonly property real indent: depth * Kirigami.Units.gridUnit * 1.2
 
             width: ListView.view.width
             height: root.rowHeight
             Accessible.role: Accessible.Row
             Accessible.selected: selected
+            Accessible.focusable: true
+            Accessible.focused: selected && root.activeFocus
+            // Qt's Accessible has no expandable or expanded state to set;
+            // say it in the description.
+            Accessible.description: expandable ? (expanded ? qsTr("Expanded") : qsTr("Collapsed")) : ""
+            Accessible.onPressAction: root.activated(index)
+            Accessible.onToggleAction: {
+                if (expandable) {
+                    root.toggleRequested(index);
+                }
+            }
             Accessible.name: {
                 const parts = [];
                 for (let i = 0; i < root.columns.length; ++i) {
@@ -350,7 +374,6 @@ FocusScope {
 
             Row {
                 anchors.fill: parent
-                LayoutMirroring.enabled: root.mirrored
 
                 Repeater {
                     model: root.columns.length
@@ -361,7 +384,7 @@ FocusScope {
                         readonly property var column: root.columns[index]
                         readonly property var value: row.model[column.role]
                         readonly property real heat: column.heat > 0 ? Math.max(0, Math.min(1, Number(value) / column.heat)) : 0
-                        readonly property real indent: index === 0 ? row.depth * Kirigami.Units.gridUnit * 1.2 : 0
+                        readonly property real indent: index === 0 ? row.indent : 0
 
                         width: root.widths[index] ?? 0
                         height: row.height
@@ -376,24 +399,6 @@ FocusScope {
                             color: Qt.alpha(Kirigami.Theme.neutralTextColor, 0.06 + 0.32 * cell.heat)
                         }
 
-                        Kirigami.Icon {
-                            id: chevron
-                            visible: cell.index === 0 && row.expandable
-                            x: root.mirrored ? parent.width - width - root.cellPadding / 2 - cell.indent : root.cellPadding / 2 + cell.indent
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: Kirigami.Units.iconSizes.small
-                            height: width
-                            source: root.mirrored ? "arrow-left" : "arrow-right"
-                            isMask: true
-                            color: Kirigami.Theme.textColor
-                            opacity: 0.45
-                            rotation: row.expanded ? (root.mirrored ? -90 : 90) : 0
-
-                            TapHandler {
-                                onTapped: root.toggleRequested(row.index)
-                            }
-                        }
-
                         Loader {
                             id: custom
                             active: cell.column.cell !== undefined
@@ -404,7 +409,7 @@ FocusScope {
                             onLoaded: {
                                 item.value = Qt.binding(() => cell.value);
                                 item.row = Qt.binding(() => row.model);
-                                item.column = cell.column;
+                                item.column = Qt.binding(() => cell.column);
                             }
                         }
 
@@ -430,6 +435,27 @@ FocusScope {
                                 font.features: cell.column.align === Qt.AlignRight ? { "tnum": 1 } : {}
                             }
                         }
+                    }
+                }
+            }
+
+            // The tree's chevron, one per row and only in a tree, at the
+            // start of the first column (its right edge when mirrored).
+            Loader {
+                active: root.expandableRole.length > 0 && row.expandable
+                x: root.mirrored ? row.width - width - root.cellPadding / 2 - row.indent : root.cellPadding / 2 + row.indent
+                anchors.verticalCenter: parent.verticalCenter
+                width: Kirigami.Units.iconSizes.small
+                height: width
+                sourceComponent: Kirigami.Icon {
+                    source: root.mirrored ? "arrow-left" : "arrow-right"
+                    isMask: true
+                    color: Kirigami.Theme.textColor
+                    opacity: 0.45
+                    rotation: row.expanded ? (root.mirrored ? -90 : 90) : 0
+
+                    TapHandler {
+                        onTapped: root.toggleRequested(row.index)
                     }
                 }
             }

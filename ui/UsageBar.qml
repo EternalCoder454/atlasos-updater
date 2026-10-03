@@ -40,15 +40,19 @@ ColumnLayout {
     readonly property real whole: total > 0 ? total : sum
     readonly property color trackColor: Qt.alpha(Kirigami.Theme.textColor, 0.1)
 
+    // Mirrored, the bar fills from the right.
+    readonly property bool mirrored: LayoutMirroring.enabled
+
     function colorAt(i) {
         if (i < colors.length) {
             return colors[i];
         }
-        return Qt.alpha(colors[colors.length - 1], 0.25);
+        return Qt.alpha(colors.length > 0 ? colors[colors.length - 1] : Kirigami.Theme.highlightColor, 0.25);
     }
 
     spacing: Kirigami.Units.smallSpacing
     Layout.fillWidth: true
+    LayoutMirroring.childrenInherit: true
 
     Accessible.role: Accessible.Graphic
     Accessible.name: {
@@ -88,15 +92,20 @@ ColumnLayout {
                 }
                 readonly property real share: root.whole > 0 ? Math.min(1 - start, Math.max(0, root.values[index]) / root.whole) : 0
                 readonly property real r: bar.height / 2
+                // Edges measured from the start of the bar.
+                readonly property real from: Math.round(start * bar.width)
+                readonly property real to: Math.round((start + share) * bar.width)
+                readonly property bool atStart: from < r
+                readonly property bool atEnd: to > bar.width - r
 
-                x: Math.round(start * bar.width)
-                width: Math.round((start + share) * bar.width) - x
+                x: root.mirrored ? bar.width - to : from
+                width: to - from
                 height: bar.height
                 visible: width > 0
                 color: root.colorAt(index)
-                topLeftRadius: x < r ? r : 0
+                topLeftRadius: (root.mirrored ? atEnd : atStart) ? r : 0
                 bottomLeftRadius: topLeftRadius
-                topRightRadius: x + width > bar.width - r ? r : 0
+                topRightRadius: (root.mirrored ? atStart : atEnd) ? r : 0
                 bottomRightRadius: topRightRadius
             }
         }

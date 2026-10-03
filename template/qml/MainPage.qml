@@ -184,7 +184,10 @@ AtlasPage {
         readonly property var names: [["Firefox", "firefox"], ["Konsole", "utilities-terminal"], ["Dolphin", "system-file-manager"], ["Kate", "kate"], ["Atlas Updater", "system-software-update"], ["KWin", "kwin"], ["Plasma Shell", "plasma"], ["PipeWire", "audio-card"], ["Discover", "plasmadiscover"], ["Spectacle", "spectacle"], ["Okular", "okular"], ["Gwenview", "gwenview"]]
         property var load: names.map((_, i) => ({ cpu: (i * 7) % 30, memory: 80 + i * 37 }))
 
-        function rebuild() {
+        // The rows in their new order, moved and updated in place the way a
+        // real model does it: clearing would scroll the list back to the top
+        // and lose the keyboard's place.
+        function rebuild(holdOrder) {
             const order = table.sortOrder === Qt.AscendingOrder ? 1 : -1;
             const rows = table.names.map((n, i) => ({ name: n[0], icon: n[1], state: i === 5 ? "stopped" : "running", cpu: table.load[i].cpu, memory: table.load[i].memory, depth: 0, expandable: i === 0, expanded: i === 0 && table.groupOpen }));
             const q = search.query.toLowerCase();
@@ -197,12 +200,40 @@ AtlasPage {
             if (table.groupOpen && at >= 0) {
                 rows.splice(at + 1, 0, { name: "Web Content", icon: "", state: "running", cpu: 4.2, memory: 310, depth: 1, expandable: false, expanded: false }, { name: "GPU Process", icon: "", state: "running", cpu: 1.1, memory: 95, depth: 1, expandable: false, expanded: false });
             }
-            const current = table.currentIndex >= 0 && table.currentIndex < apps.count ? apps.get(table.currentIndex).name : "";
-            apps.clear();
-            for (const r of rows) {
-                apps.append(r);
+            if (holdOrder) {
+                // New figures only, each row where it is.
+                const byName = {};
+                for (const r of rows) {
+                    byName[r.name] = r;
+                }
+                for (let i = 0; i < apps.count; ++i) {
+                    const r = byName[apps.get(i).name];
+                    if (r) {
+                        apps.set(i, r);
+                    }
+                }
+                return;
             }
-            table.currentIndex = rows.findIndex(r => r.name === current);
+            for (let i = 0; i < rows.length; ++i) {
+                let j = -1;
+                for (let k = i; k < apps.count; ++k) {
+                    if (apps.get(k).name === rows[i].name) {
+                        j = k;
+                        break;
+                    }
+                }
+                if (j < 0) {
+                    apps.insert(i, rows[i]);
+                } else {
+                    if (j !== i) {
+                        apps.move(j, i, 1);
+                    }
+                    apps.set(i, rows[i]);
+                }
+            }
+            if (apps.count > rows.length) {
+                apps.remove(rows.length, apps.count - rows.length);
+            }
         }
 
         onSortRoleChanged: rebuild()
@@ -222,9 +253,7 @@ AtlasPage {
                 table.load = table.load.map((l, i) => ({ cpu: Math.max(0, Math.min(100, l.cpu + (Math.random() - 0.5) * 12 * (i % 3 + 1))), memory: l.memory }));
                 // Hold the order still under the pointer, and while the
                 // menu is open on a row.
-                if (!table.pointerInside && !rowMenu.opened) {
-                    table.rebuild();
-                }
+                table.rebuild(table.pointerInside || rowMenu.opened);
             }
         }
 

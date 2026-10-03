@@ -6,6 +6,10 @@ import QtQuick.Layouts
 // header toggles the group; while folded it shows as selected if one of its
 // entries is, so the sidebar still says where you are.
 //
+// A compact sidebar (icons only) has no room for sub-entries: the group is
+// its header's icon alone, and a click on it emits `activated` for the app to
+// open the group's first entry.
+//
 //   SidebarGroup {
 //       text: qsTr("Disk")
 //       iconName: "drive-harddisk-symbolic"
@@ -36,6 +40,7 @@ ColumnLayout {
     }
 
     signal toggled
+    signal activated
 
     Layout.fillWidth: true
     // The gap between entries; match the sidebar column it sits in.
@@ -47,8 +52,12 @@ ColumnLayout {
         icon.name: root.iconName
         disclosure: true
         expanded: root.expanded
-        selected: !root.expanded && root.holdsSelection
+        selected: (!root.expanded || root.compact) && root.holdsSelection
         onClicked: {
+            if (root.compact) {
+                root.activated();
+                return;
+            }
             root.expanded = !root.expanded;
             root.toggled();
         }
@@ -57,7 +66,7 @@ ColumnLayout {
     ColumnLayout {
         id: entries
         Layout.fillWidth: true
-        visible: root.expanded
+        visible: root.expanded && !root.compact
         spacing: root.spacing
     }
 }
