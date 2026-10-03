@@ -83,6 +83,30 @@ Rules:
   60 min upgrade/rollback/switch) and 4 MiB output caps.
 - D-Bus policy: anyone may call the interface (polkit decides). Only root may own the name.
 
+**Local rpm-ostree changes.** On a system with packages added by
+`rpm-ostree install`, replaced or removed base packages or a regenerated
+initramfs, bootc refuses `upgrade` and `switch` ("Deployment contains local
+rpm-ostree modifications") and shows those deployments as `incompatible`,
+with no image, version or channel. When bootc shows that on the booted or
+staged deployment, the helper (`helper/layered.rs`):
+- fills the missing `image` of those entries in from `rpm-ostree status
+  --json` (the deployment with the same ostree commit) and `spec.image` from
+  rpm-ostree's first deployment, so the JSON the methods return reads as
+  bootc's would;
+- `CheckForUpdate`: `skopeo inspect` of that image (rpm-ostree's own
+  `upgrade --check` never looks at the image), kept in
+  `/var/lib/atlas-core/layered-update.json` and shown as the booted entry's
+  `cachedUpdate` while it is for the image followed and newer than the
+  booted and staged images (the stage timer stages without the helper);
+  `Upgrade` and `SwitchChannel` delete it;
+- `Upgrade`: `rpm-ostree upgrade` (stages only; never `--reboot`);
+- `SwitchChannel`: `rpm-ostree rebase <origin with tag = channel>`.
+
+rpm-ostree and skopeo keep the added packages and run like bootc: absolute
+paths (`/usr/bin/rpm-ostree`, `/usr/bin/skopeo`), fixed argv, clean
+environment, the same timeouts and caps. `Rollback` is `rpm-ostree rollback`
+there too: a second `bootc rollback` doesn't undo the first on such a system.
+
 **History.** `atlas-system-helper record-boot` (CLI mode, run as root by
 `atlas-record-boot.service`, a oneshot at boot) appends one line to
 `/var/lib/atlas-core/history.jsonl` when the booted image digest differs from
@@ -124,7 +148,8 @@ pub fn update_all(progress: impl FnMut(Progress)) -> Result<()>;  // one transac
   `atlas-updater.notifyrc`) with a "Restart to Update" action, and the tray
   icon goes to NeedsAttention.
 - The background download and staging is the OS's job
-  (`atlasos-update-stage.timer` in the AtlasOS image runs `bootc upgrade`).
+  (`atlasos-update-stage.timer` in the AtlasOS image runs `bootc upgrade`, or
+  `rpm-ostree upgrade` on a system with local rpm-ostree changes).
   The app only shows it.
 
 Screens:

@@ -5,6 +5,7 @@
 //! with a fake [`BootcRunner`].
 
 pub mod events;
+pub mod layered;
 pub mod service;
 
 use std::cmp::Ordering as Cmp;
@@ -24,8 +25,12 @@ use crate::helper_client::{
 };
 use crate::history;
 
-/// bootc is always run by absolute path.
+/// bootc is always run by absolute path, and so are rpm-ostree and skopeo,
+/// which stand in for it on a system with local rpm-ostree changes (see
+/// [`layered`]).
 pub const BOOTC: &str = "/usr/bin/bootc";
+pub const RPM_OSTREE: &str = "/usr/bin/rpm-ostree";
+pub const SKOPEO: &str = "/usr/bin/skopeo";
 const STDERR_TAIL: usize = 4096;
 /// Most output kept from bootc (stdout and stderr each).
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
@@ -48,14 +53,23 @@ pub enum HelperError {
 }
 
 /// Runs bootc with the given argv (without the program name) and returns its
-/// stdout, or its stderr tail on failure.
+/// stdout, or its stderr tail on failure. rpm-ostree and skopeo likewise, for
+/// a system with local rpm-ostree changes; a runner without them fails those.
 pub trait BootcRunner: Send + Sync + 'static {
     fn run(&self, args: &[&str]) -> Result<String, String>;
+
+    fn rpm_ostree(&self, _args: &[&str]) -> Result<String, String> {
+        Err("rpm-ostree is not available".into())
+    }
+
+    fn skopeo(&self, _args: &[&str]) -> Result<String, String> {
+        Err("skopeo is not available".into())
+    }
 }
 
-/// The real runner: `/usr/bin/bootc` with a cleared environment, a wall-clock
-/// timeout (2 minutes for status and check, 60 for upgrade, rollback and
-/// switch) and capped output.
+/// The real runner: `/usr/bin/bootc` (and rpm-ostree, skopeo) with a cleared
+/// environment, a wall-clock timeout (2 minutes for status and check, 60 for
+/// upgrade, rollback and switch) and capped output.
 pub struct SystemBootc;
 
 impl BootcRunner for SystemBootc {
@@ -63,6 +77,16 @@ impl BootcRunner for SystemBootc {
         let short = matches!(args, ["status", ..] | ["upgrade", "--check"]);
         let timeout = if short { SHORT_TIMEOUT } else { LONG_TIMEOUT };
         run_limited(Path::new(BOOTC), args, timeout, OUTPUT_CAP)
+    }
+
+    fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+        let short = matches!(args, ["status", ..]);
+        let timeout = if short { SHORT_TIMEOUT } else { LONG_TIMEOUT };
+        run_limited(Path::new(RPM_OSTREE), args, timeout, OUTPUT_CAP)
+    }
+
+    fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+        run_limited(Path::new(SKOPEO), args, SHORT_TIMEOUT, OUTPUT_CAP)
     }
 }
 
@@ -155,7 +179,10 @@ fn run_limited(
     if CLOSING.load(Ordering::Acquire) {
         kill_group(pgid, rustix::process::Signal::TERM);
     }
-    let result = supervise(&mut child, pgid, timeout, cap);
+    let name = program
+        .file_name()
+        .map_or("bootc".into(), |n| n.to_string_lossy());
+    let result = supervise(&mut child, pgid, timeout, cap, &name);
     if let Some(set) = lock(&RUNNING).as_mut() {
         set.remove(&pgid);
     }
@@ -167,6 +194,7 @@ fn supervise(
     pgid: u32,
     timeout: Duration,
     cap: usize,
+    name: &str,
 ) -> Result<String, String> {
     let out = child.stdout.take().ok_or("no stdout")?;
     let err = child.stderr.take().ok_or("no stderr")?;
@@ -191,7 +219,7 @@ fn supervise(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
-                    "bootc did not finish within {} s and was stopped",
+                    "{name} did not finish within {} s and was stopped",
                     timeout.as_secs()
                 ));
             }
@@ -200,7 +228,7 @@ fn supervise(
                 kill_group(pgid, rustix::process::Signal::KILL);
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("waiting for bootc failed: {e}"));
+                return Err(format!("waiting for {name} failed: {e}"));
             }
         }
     };
@@ -221,7 +249,7 @@ fn supervise(
     };
     if status.success() {
         if over {
-            return Err("bootc printed too much output".into());
+            return Err(format!("{name} printed too much output"));
         }
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
@@ -232,11 +260,11 @@ fn supervise(
         }
         Err(match (text.is_empty(), status.signal(), status.code()) {
             (false, _, _) => text,
-            (true, Some(sig), _) => format!("bootc was stopped by signal {sig}"),
+            (true, Some(sig), _) => format!("{name} was stopped by signal {sig}"),
             (true, None, Some(code)) => {
-                format!("bootc failed (exit status {code}) without a message")
+                format!("{name} failed (exit status {code}) without a message")
             }
-            (true, None, None) => "bootc failed without a message".into(),
+            (true, None, None) => format!("{name} failed without a message"),
         })
     }
 }
@@ -316,6 +344,9 @@ pub struct Core {
     runner: Arc<dyn BootcRunner>,
     busy: AtomicBool,
     events: Option<PathBuf>,
+    /// Where the last update check's result is kept on a system with local
+    /// rpm-ostree changes (see [`layered`]); without it, it isn't kept.
+    update_file: Option<PathBuf>,
     /// `bootc status` shared between callers; see [`Core::cached_status`].
     status_cache: StatusCache,
 }
@@ -365,8 +396,16 @@ impl Core {
             runner,
             busy: AtomicBool::new(false),
             events: None,
+            update_file: None,
             status_cache: StatusCache::default(),
         }
+    }
+
+    /// Keep the update check's result on a system with local rpm-ostree
+    /// changes in this file ([`layered::UPDATE_FILE`]).
+    pub fn with_update_file(mut self, path: PathBuf) -> Self {
+        self.update_file = Some(path);
+        self
     }
 
     /// Also record update and rollback events to this file.
@@ -455,16 +494,41 @@ impl Core {
     fn run_op(&self, op: &Op) -> Result<String, HelperError> {
         match op {
             Op::Status => {}
+            // bootc refuses both on a system with local rpm-ostree changes;
+            // there they go through skopeo and rpm-ostree (see `layered`).
+            // If the system turns out not to be one, or can't be asked,
+            // bootc's own error stands.
             Op::CheckForUpdate => {
-                self.bootc(&["upgrade", "--check"])?;
+                if let Err(e) = self.bootc(&["upgrade", "--check"]) {
+                    let Ok(Some(origin)) = self.layered_origin() else {
+                        return Err(e);
+                    };
+                    self.layered_check(&origin)?;
+                }
             }
             Op::Upgrade => {
-                // stages only: never --apply
-                self.bootc(&["upgrade"])?;
+                // stages only: never --apply (rpm-ostree: never --reboot)
+                if let Err(e) = self.bootc(&["upgrade"]) {
+                    let Ok(Some(_)) = self.layered_origin() else {
+                        return Err(e);
+                    };
+                    self.rpm_ostree(&["upgrade"])?;
+                    self.forget_update();
+                }
             }
             Op::Rollback | Op::CancelRollback => return self.toggle_rollback(op),
             Op::SwitchChannel(channel) => {
-                let current = self.status()?;
+                let json = self.bootc(&["status", "--json"])?;
+                // rebase keeps the local changes, which bootc can't switch
+                if let Some(origin) = self.origin_if_layered(&json)? {
+                    let target = layered::origin_with_channel(&origin, channel)
+                        .map_err(HelperError::InvalidArgument)?;
+                    self.rpm_ostree(&["rebase", &target])?;
+                    self.forget_update();
+                    return self.status_json();
+                }
+                let current = Status::from_json(&json)
+                    .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
                 let booted = current.booted_ref().ok_or_else(|| {
                     HelperError::Failed("bootc reports no booted image reference".into())
                 })?;
@@ -498,7 +562,14 @@ impl Core {
     /// event is recorded even if the final status read then fails.
     fn toggle_rollback(&self, op: &Op) -> Result<String, HelperError> {
         let cancel = *op == Op::CancelRollback;
-        let queued = self.status()?.status.rollback_queued;
+        let current = self.status()?.status;
+        let queued = current.rollback_queued;
+        // On a system with local rpm-ostree changes a second `bootc rollback`
+        // leaves the first queued; `rpm-ostree rollback` toggles there.
+        let layered = [&current.booted, &current.staged]
+            .into_iter()
+            .flatten()
+            .any(|e| e.incompatible);
         if queued && !cancel {
             return Err(HelperError::Failed(ROLLBACK_ALREADY_QUEUED.into()));
         }
@@ -510,7 +581,19 @@ impl Core {
         } else {
             ("rollback-requested", "rollback-failed")
         };
-        match self.bootc(&["rollback"]) {
+        let res = if layered {
+            // rpm-ostree won't roll back past a staged update; bootc drops it
+            // itself, so do the same first
+            if current.staged.is_some() {
+                self.rpm_ostree(&["cleanup", "-p"])
+            } else {
+                Ok(String::new())
+            }
+            .and_then(|_| self.rpm_ostree(&["rollback"]))
+        } else {
+            self.bootc(&["rollback"])
+        };
+        match res {
             Err(HelperError::Failed(m)) if m == INTERRUPTED => {
                 return Err(HelperError::Failed(m));
             }
@@ -600,8 +683,85 @@ impl Core {
         self.runner.run(args).map_err(HelperError::Failed)
     }
 
+    fn rpm_ostree(&self, args: &[&str]) -> Result<String, HelperError> {
+        self.runner.rpm_ostree(args).map_err(HelperError::Failed)
+    }
+
+    /// `bootc status --json`, on a system with local rpm-ostree changes with
+    /// what bootc leaves out filled in from rpm-ostree (see [`layered`]); if
+    /// rpm-ostree can't be read there, bootc's status as it is.
     fn status_json(&self) -> Result<String, HelperError> {
-        self.bootc(&["status", "--json"])
+        let json = self.bootc(&["status", "--json"])?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Ok(json);
+        };
+        if !layered::is_layered(&v) {
+            return Ok(json);
+        }
+        let Ok(rpm) = self.rpm_ostree(&["status", "--json"]) else {
+            return Ok(json);
+        };
+        Ok(layered::fill(v, &rpm, self.saved_update().as_ref()).unwrap_or(json))
+    }
+
+    /// The image rpm-ostree follows on a system with local rpm-ostree
+    /// changes; `None` on one without, which bootc handles.
+    fn layered_origin(&self) -> Result<Option<String>, HelperError> {
+        self.origin_if_layered(&self.bootc(&["status", "--json"])?)
+    }
+
+    /// [`Core::layered_origin`] from bootc's status `json`.
+    fn origin_if_layered(&self, json: &str) -> Result<Option<String>, HelperError> {
+        let v: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
+        if !layered::is_layered(&v) {
+            return Ok(None);
+        }
+        let rpm = self.rpm_ostree(&["status", "--json"])?;
+        layered::followed_origin(&rpm)
+            .map(Some)
+            .map_err(HelperError::Failed)
+    }
+
+    /// `upgrade --check` for a system with local rpm-ostree changes: ask the
+    /// registry with skopeo and keep the answer.
+    fn layered_check(&self, origin: &str) -> Result<(), HelperError> {
+        let r = layered::parse_origin(origin)
+            .ok_or_else(|| HelperError::Failed(format!("unusable rpm-ostree origin {origin:?}")))?;
+        let out = self
+            .runner
+            .skopeo(&["inspect", "--", &layered::skopeo_ref(&r)])
+            .map_err(HelperError::Failed)?;
+        let found = layered::image_from_skopeo(&out, &r).map_err(HelperError::Failed)?;
+        let Some(path) = &self.update_file else {
+            return Ok(());
+        };
+        let text = serde_json::to_string(&found).map_err(|e| HelperError::Failed(e.to_string()))?;
+        let tmp = path.with_extension("tmp");
+        let write = || -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut f = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut f, text.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        };
+        write().map_err(|e| HelperError::Failed(format!("cannot save the update check: {e}")))
+    }
+
+    /// Drop the last check's result once something else is staged (it
+    /// would be shown as news again after switching back).
+    fn forget_update(&self) {
+        if let Some(path) = &self.update_file {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The last [`Core::layered_check`] result.
+    fn saved_update(&self) -> Option<crate::bootc::ImageStatus> {
+        let text = std::fs::read_to_string(self.update_file.as_ref()?).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     fn status(&self) -> Result<Status, HelperError> {
@@ -1462,5 +1622,189 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e, "bad");
+    }
+
+    /// A system with local rpm-ostree changes, as the test VM showed it:
+    /// bootc refuses to change it, rpm-ostree and skopeo answer.
+    struct Layered {
+        calls: Mutex<Vec<Vec<String>>>,
+        rpm_ostree_status: Result<String, String>,
+    }
+
+    const REFUSED: &str = "error: Upgrading: Deployment contains local rpm-ostree modifications; cannot upgrade via bootc.";
+    const SKOPEO_OUT: &str = r#"{"Digest":"sha256:ccc","Created":"2026-10-09T04:00:00Z",
+        "Labels":{"org.opencontainers.image.version":"44.20261009"}}"#;
+
+    impl Layered {
+        fn new() -> Arc<Layered> {
+            Arc::new(Layered {
+                calls: Mutex::default(),
+                rpm_ostree_status: Ok(
+                    include_str!("../../tests/fixtures/rpm-ostree-layered.json").into()
+                ),
+            })
+        }
+        fn record(&self, program: &str, args: &[&str]) {
+            let mut call = vec![program.to_string()];
+            call.extend(args.iter().map(|s| s.to_string()));
+            self.calls.lock().unwrap().push(call);
+        }
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl BootcRunner for Layered {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.record("bootc", args);
+            match args {
+                ["status", "--json"] => {
+                    Ok(include_str!("../../tests/fixtures/status-layered.json").into())
+                }
+                _ => Err(REFUSED.into()),
+            }
+        }
+        fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+            self.record("rpm-ostree", args);
+            match args {
+                ["status", "--json"] => self.rpm_ostree_status.clone(),
+                _ => Ok(String::new()),
+            }
+        }
+        fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+            self.record("skopeo", args);
+            Ok(SKOPEO_OUT.into())
+        }
+    }
+
+    fn ran(calls: &[Vec<String>], want: &[&str]) -> bool {
+        calls.iter().any(|c| c == want)
+    }
+
+    #[test]
+    fn layered_status_has_the_image_and_channel() {
+        let f = Layered::new();
+        let s = Status::from_json(&Core::new(f.clone()).execute(&Op::Status).unwrap()).unwrap();
+        assert_eq!(s.channel(), Some(Channel::Stable));
+        assert_eq!(
+            s.status.booted.as_ref().unwrap().version(),
+            Some("44.20261034")
+        );
+    }
+
+    #[test]
+    fn layered_status_without_rpm_ostree_is_bootc_s() {
+        let f = Arc::new(Layered {
+            calls: Mutex::default(),
+            rpm_ostree_status: Err("rpm-ostreed is not running".into()),
+        });
+        let s = Status::from_json(&Core::new(f).execute(&Op::Status).unwrap()).unwrap();
+        assert_eq!(s.channel(), None);
+    }
+
+    #[test]
+    fn layered_check_asks_the_registry_and_keeps_the_answer() {
+        let d = tempfile::tempdir().unwrap();
+        let f = Layered::new();
+        let c = Core::new(f.clone()).with_update_file(d.path().join("u/layered-update.json"));
+        let s = Status::from_json(&c.execute(&Op::CheckForUpdate).unwrap()).unwrap();
+        assert!(ran(
+            &f.calls(),
+            &[
+                "skopeo",
+                "inspect",
+                "--",
+                "oci:/var/mnt/atlasreg/registry:stable"
+            ]
+        ));
+        let update = s.available_update().unwrap();
+        assert_eq!(update.image_digest, "sha256:ccc");
+        assert_eq!(update.version.as_deref(), Some("44.20261009"));
+        // a later helper (the first exited when idle) still shows it
+        let later =
+            Core::new(Layered::new()).with_update_file(d.path().join("u/layered-update.json"));
+        let s = Status::from_json(&later.execute(&Op::Status).unwrap()).unwrap();
+        assert!(s.update_available());
+    }
+
+    #[test]
+    fn layered_upgrade_stages_with_rpm_ostree() {
+        let d = tempfile::tempdir().unwrap();
+        let f = Layered::new();
+        let c = Core::new(f.clone()).with_update_file(d.path().join("layered-update.json"));
+        c.execute(&Op::CheckForUpdate).unwrap();
+        c.execute(&Op::Upgrade).unwrap();
+        // what it staged is no longer news
+        assert!(!d.path().join("layered-update.json").exists());
+        let calls = f.calls();
+        assert!(ran(&calls, &["rpm-ostree", "upgrade"]));
+        // stages only: no reboot, no apply
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .all(|a| !matches!(a.as_str(), "--apply" | "--reboot" | "-r"))
+        );
+    }
+
+    #[test]
+    fn layered_switch_rebases_to_the_other_tag() {
+        let f = Layered::new();
+        Core::new(f.clone())
+            .execute(&Op::SwitchChannel("testing".into()))
+            .unwrap();
+        let calls = f.calls();
+        assert!(ran(
+            &calls,
+            &[
+                "rpm-ostree",
+                "rebase",
+                "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:testing"
+            ]
+        ));
+        assert!(!calls.iter().any(|c| c[..2] == ["bootc", "switch"]));
+    }
+
+    #[test]
+    fn layered_rollback_uses_rpm_ostree() {
+        let f = Layered::new();
+        Core::new(f.clone()).execute(&Op::Rollback).unwrap();
+        let calls = f.calls();
+        // the fixture has an update staged, which goes first
+        let at = |want: &[&str]| calls.iter().position(|c| c == want);
+        assert!(
+            at(&["rpm-ostree", "cleanup", "-p"]).unwrap()
+                < at(&["rpm-ostree", "rollback"]).unwrap()
+        );
+        assert!(!ran(&f.calls(), &["bootc", "rollback"]));
+    }
+
+    #[test]
+    fn bootc_s_error_stays_when_rpm_ostree_can_t_be_asked() {
+        let f = Arc::new(Layered {
+            calls: Mutex::default(),
+            rpm_ostree_status: Err("rpm-ostreed is not running".into()),
+        });
+        for op in [Op::CheckForUpdate, Op::Upgrade] {
+            match Core::new(f.clone()).execute(&op) {
+                Err(HelperError::Failed(m)) => assert_eq!(m, REFUSED),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_system_s_bootc_error_stays() {
+        // bootc fails for some other reason: rpm-ostree is not tried
+        let f = Arc::new(Fake {
+            calls: Mutex::default(),
+            status: PLAIN.into(),
+            after_upgrade: None,
+            fail_on: Some("upgrade"),
+        });
+        match core(&f).execute(&Op::CheckForUpdate) {
+            Err(HelperError::Failed(m)) => assert_eq!(m, "boom"),
+            other => panic!("{other:?}"),
+        }
     }
 }

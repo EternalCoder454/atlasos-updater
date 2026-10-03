@@ -1,0 +1,396 @@
+{
+  "deployments": [
+    {
+      "unlocked": "none",
+      "packages": [
+        "htop"
+      ],
+      "requested-local-packages": [],
+      "base-removals": [],
+      "pinned": false,
+      "osname": "default",
+      "base-remote-replacements": {},
+      "regenerate-initramfs": false,
+      "checksum": "5fac9d2b502a8cec2235a87c7498900b30404debadea561393d69737f006cc05",
+      "container-image-reference-digest": "sha256:87cf0ded78678b44ca5ce652a56fdc6ee412c00100cf3d085e67dbc2e1dc3037",
+      "requested-base-local-replacements": [],
+      "id": "default-5fac9d2b502a8cec2235a87c7498900b30404debadea561393d69737f006cc05.0",
+      "version": "44.20261002",
+      "requested-local-fileoverride-packages": [],
+      "base-checksum": "e068ae4060b3529cb238be93d4ecbe219abac598f6ad09d42cda74438177957c",
+      "requested-base-removals": [],
+      "requested-packages": [
+        "htop"
+      ],
+      "serial": 0,
+      "base-timestamp": 1790980936,
+      "staged": true,
+      "booted": false,
+      "container-image-reference": "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:stable",
+      "base-local-replacements": [],
+      "timestamp": 1790999677
+    },
+    {
+      "unlocked": "none",
+      "packages": [
+        "htop"
+      ],
+      "requested-local-packages": [],
+      "base-removals": [],
+      "pinned": false,
+      "osname": "default",
+      "base-remote-replacements": {},
+      "regenerate-initramfs": false,
+      "checksum": "f4f19999a678451398af100665509865c9ac978fab85e997e08402822a863ea4",
+      "container-image-reference-digest": "sha256:e9f26ecee723163461a91a07197ae7adaf6bf08997081939c589cc7cf99e381f",
+      "requested-base-local-replacements": [],
+      "id": "default-f4f19999a678451398af100665509865c9ac978fab85e997e08402822a863ea4.0",
+      "version": "44.20261034",
+      "requested-local-fileoverride-packages": [],
+      "base-checksum": "5bb2d3b60e0b81080dd7f413ba5b7c0f530a551d5886b5060df3141d9a995ebc",
+      "requested-base-removals": [],
+      "requested-packages": [
+        "htop"
+      ],
+      "serial": 0,
+      "base-timestamp": 1790967279,
+      "staged": false,
+      "booted": true,
+      "container-image-reference": "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:stable",
+      "base-local-replacements": [],
+      "timestamp": 1790999352
+    },
+    {
+      "unlocked": "none",
+      "requested-local-packages": [],
+      "base-removals": [],
+      "pinned": false,
+      "osname": "default",
+      "base-remote-replacements": {},
+      "regenerate-initramfs": false,
+      "checksum": "5bb2d3b60e0b81080dd7f413ba5b7c0f530a551d5886b5060df3141d9a995ebc",
+      "container-image-reference-digest": "sha256:e9f26ecee723163461a91a07197ae7adaf6bf08997081939c589cc7cf99e381f",
+      "requested-base-local-replacements": [],
+      "id": "default-5bb2d3b60e0b81080dd7f413ba5b7c0f530a551d5886b5060df3141d9a995ebc.0",
+      "version": "44.20261034",
+      "requested-local-fileoverride-packages": [],
+      "requested-base-removals": [],
+      "requested-packages": [],
+      "serial": 0,
+      "timestamp": 1790967279,
+      "staged": false,
+      "booted": false,
+      "container-image-reference": "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:stable",
+      "packages": [],
+      "base-local-replacements": []
+    }
+  ],
+  "transaction": null,
+  "cached-update": {
+    "update-sha256": "f4f19999a678451398af100665509865c9ac978fab85e997e08402822a863ea4",
+    "rpm-diff": {
+      "downgraded": [],
+      "removed": [
+        [
+          0,
+          "keditbookmarks",
+          "26.08.1-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "keditbookmarks-libs",
+          "26.08.1-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "kjournald-libs",
+          "26.08.1-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "kpmcore",
+          "26.08.1-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "kunifiedpush",
+          "26.08.1-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb",
+          "3:11.8.8-3.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb-backup",
+          "3:11.8.8-3.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb-common",
+          "3:11.8.8-3.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "mariadb-connector-c",
+          "3.4.9-2.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb-connector-c-config",
+          "3.4.9-2.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "mariadb-cracklib-password-check",
+          "3:11.8.8-3.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb-errmsg",
+          "3:11.8.8-3.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "mariadb-gssapi-server",
+          "3:11.8.8-3.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "mariadb-server",
+          "3:11.8.8-3.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "plasma-desktop-doc",
+          "6.7.5-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-boto3",
+          "1.43.104-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-botocore",
+          "1.43.104-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-jmespath",
+          "1.0.1-14.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-pygdbmi",
+          "0.11.0.0-12.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-pyside6",
+          "6.11.2-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "python3-s3transfer",
+          "0.19.1-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-sentry-sdk",
+          "2.48.0-2.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "python3-shiboken6",
+          "6.11.2-1.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "qt6-qtbase-mysql",
+          "6.11.2-2.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "sos",
+          "4.12.0-2.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "tuned",
+          "2.28.0-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "tuned-ppd",
+          "2.28.0-1.fc44",
+          "noarch"
+        ],
+        [
+          0,
+          "xapian-core-libs",
+          "1.4.30-2.fc44",
+          "x86_64"
+        ],
+        [
+          0,
+          "xwaylandvideobridge",
+          "0.5.2-1.fc44",
+          "x86_64"
+        ]
+      ],
+      "upgraded": [
+        [
+          0,
+          "brave-origin",
+          [
+            "1.96.60-1",
+            "x86_64"
+          ],
+          [
+            "1.96.61-1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-core",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-core-libs",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-doc",
+          [
+            "6.30.0-1.fc44",
+            "noarch"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "noarch"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-file-widgets",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-gui",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-widgets",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "kf6-kio-widgets-libs",
+          [
+            "6.30.0-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.30.0-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ],
+        [
+          0,
+          "plasma-setup",
+          [
+            "6.7.5-1.fc44",
+            "x86_64"
+          ],
+          [
+            "6.7.5-1.fc44.atlas1",
+            "x86_64"
+          ]
+        ]
+      ],
+      "added": [
+        [
+          0,
+          "power-profiles-daemon",
+          "0.30-3.fc44",
+          "x86_64"
+        ]
+      ]
+    },
+    "checksum": "e068ae4060b3529cb238be93d4ecbe219abac598f6ad09d42cda74438177957c",
+    "origin": "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:stable",
+    "osname": "default",
+    "deployment": "default-5fac9d2b502a8cec2235a87c7498900b30404debadea561393d69737f006cc05.0",
+    "ref-has-new-commit": true,
+    "timestamp": 1790980936
+  },
+  "update-driver": null
+}

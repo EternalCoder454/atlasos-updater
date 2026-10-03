@@ -1,0 +1,80 @@
+{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "metadata": {
+    "name": "host"
+  },
+  "spec": {
+    "bootOrder": "default",
+    "image": null
+  },
+  "status": {
+    "booted": {
+      "cachedUpdate": null,
+      "composefs": null,
+      "downloadOnly": false,
+      "image": null,
+      "incompatible": true,
+      "ostree": {
+        "checksum": "f4f19999a678451398af100665509865c9ac978fab85e997e08402822a863ea4",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": true,
+      "store": "ostreeContainer"
+    },
+    "readOnly": false,
+    "rollback": {
+      "cachedUpdate": {
+        "architecture": "amd64",
+        "image": {
+          "image": "/var/mnt/atlasreg/registry:stable",
+          "transport": "oci"
+        },
+        "imageDigest": "sha256:87cf0ded78678b44ca5ce652a56fdc6ee412c00100cf3d085e67dbc2e1dc3037",
+        "timestamp": "2026-10-02T22:42:16.191590732Z",
+        "version": "44.20261002"
+      },
+      "composefs": null,
+      "downloadOnly": false,
+      "image": {
+        "architecture": "amd64",
+        "image": {
+          "image": "/var/mnt/atlasreg/registry:stable",
+          "transport": "oci"
+        },
+        "imageDigest": "sha256:e9f26ecee723163461a91a07197ae7adaf6bf08997081939c589cc7cf99e381f",
+        "timestamp": "2026-10-02T18:54:39.043034591Z",
+        "version": "44.20261034"
+      },
+      "incompatible": false,
+      "ostree": {
+        "checksum": "5bb2d3b60e0b81080dd7f413ba5b7c0f530a551d5886b5060df3141d9a995ebc",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": true,
+      "store": "ostreeContainer"
+    },
+    "rollbackQueued": false,
+    "staged": {
+      "cachedUpdate": null,
+      "composefs": null,
+      "downloadOnly": false,
+      "image": null,
+      "incompatible": true,
+      "ostree": {
+        "checksum": "5fac9d2b502a8cec2235a87c7498900b30404debadea561393d69737f006cc05",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": false,
+      "store": "ostreeContainer"
+    },
+    "type": null,
+    "usrOverlay": null
+  }
+}

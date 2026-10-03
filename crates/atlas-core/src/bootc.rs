@@ -248,7 +248,7 @@ impl fmt::Display for RefError {
 impl std::error::Error for RefError {}
 
 /// Transports a switch may use. The transport of the booted ref is kept as is.
-const TRANSPORTS: &[&str] = &[
+pub(crate) const TRANSPORTS: &[&str] = &[
     "registry",
     "oci",
     "oci-archive",

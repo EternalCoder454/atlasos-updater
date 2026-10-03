@@ -62,6 +62,9 @@ Source package for atlas-core and atlas-updater.
 %package -n atlas-core
 Summary:        Shared library and system helper for Atlas apps
 Requires:       bootc
+# stand in for bootc on a system with local rpm-ostree changes
+Requires:       rpm-ostree
+Requires:       skopeo
 Requires:       polkit
 Requires:       dbus-common
 # Crash reports are posted with curl (only when the user sends one).

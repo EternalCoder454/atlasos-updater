@@ -119,6 +119,10 @@ impl Service {
         if let Some(p) = events {
             core = core.with_events(p);
         }
+        Service::from_core(core)
+    }
+
+    pub fn from_core(core: Core) -> Service {
         Service {
             core: Arc::new(core),
             activity: Arc::new(Activity::default()),
