@@ -64,7 +64,7 @@ Flow {
                 text: cell.index
                 color: Qt.alpha(Kirigami.Theme.textColor, 0.55)
                 font.family: Kirigami.Theme.smallFont.family
-                font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.85
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
                 textFormat: Text.PlainText
             }
         }

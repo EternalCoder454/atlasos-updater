@@ -18,6 +18,7 @@ qt_add_qml_module(atlas-ui
         SectionRow.qml
         StatusHero.qml
         SidebarItem.qml
+        SidebarGroup.qml
         AtlasPage.qml
         AtlasSwitch.qml
         ConfirmDialog.qml

@@ -242,7 +242,8 @@ FocusScope {
             isMask: true
             color: Kirigami.Theme.textColor
             opacity: 0.45
-            rotation: root.disclosure && root.expanded ? 90 : 0
+            // A quarter turn to point down, whichever way it starts.
+            rotation: root.disclosure && root.expanded ? (root.mirrored ? -90 : 90) : 0
             Layout.preferredWidth: Kirigami.Units.iconSizes.small
             Layout.preferredHeight: Kirigami.Units.iconSizes.small
             Behavior on rotation {

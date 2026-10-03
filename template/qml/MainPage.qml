@@ -89,4 +89,65 @@ AtlasPage {
             }
         }
     }
+
+    Section {
+        title: qsTr("Sidebar")
+
+        // A sidebar column as an app would lay it out, here inside a Section.
+        ColumnLayout {
+            id: sidebar
+            property string current: "nvme0n1"
+
+            Layout.margins: Kirigami.Units.largeSpacing
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 13
+            spacing: 2
+
+            SidebarItem {
+                Layout.fillWidth: true
+                text: qsTr("Processor")
+                icon.name: "cpu"
+                tintIcon: false
+                value: charts.load.length ? Math.round(charts.load[charts.load.length - 1]) + "%" : ""
+                selected: sidebar.current === "cpu"
+                onClicked: sidebar.current = "cpu"
+            }
+            SidebarGroup {
+                text: qsTr("Disk")
+                iconName: "drive-harddisk-symbolic"
+
+                Repeater {
+                    model: [
+                        { name: "nvme0n1", label: "Samsung 990 Pro", rate: "12 MB/s" },
+                        { name: "sda", label: "Backup", rate: "0 B/s" }
+                    ]
+
+                    SidebarItem {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        sub: true
+                        text: modelData.label
+                        icon.name: "drive-harddisk-symbolic"
+                        value: modelData.rate
+                        selected: sidebar.current === modelData.name
+                        onClicked: sidebar.current = modelData.name
+                    }
+                }
+            }
+            SidebarGroup {
+                text: qsTr("Network")
+                iconName: "network-wired-symbolic"
+                expanded: false
+
+                SidebarItem {
+                    Layout.fillWidth: true
+                    sub: true
+                    text: "enp5s0"
+                    icon.name: "network-wired-symbolic"
+                    value: "1.4 MB/s"
+                    selected: sidebar.current === "enp5s0"
+                    onClicked: sidebar.current = "enp5s0"
+                }
+            }
+        }
+    }
 }
