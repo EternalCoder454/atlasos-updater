@@ -6,6 +6,9 @@
 # strip=none) and the binaries are shipped as built.
 %global debug_package %{nil}
 
+# No LTO for the C++ app: its link took longer than compiling it.
+%global _lto_cflags %{nil}
+
 # --define "_atlas_build_cache <dir>" (packaging/build-rpm.sh passes it when
 # ATLAS_BUILD_CACHE is set) keeps cargo's downloads, cargo's output and the
 # CMake build in <dir>, so a rebuild only compiles what changed.
@@ -107,15 +110,23 @@ export CARGO_HOME=%{cargo_home}
 export CARGO_TARGET_DIR=%{cargo_target_dir}
 %endif
 # Fedora's Rust flags (hardening, build-id, ...), also used by Corrosion's cargo.
-export RUSTFLAGS="%{build_rustflags}"
+# Their -Ccodegen-units=1 gives way to Cargo.toml's 4 (the last one wins), and
+# there is no LTO. With them, rebuilding after a change to atlas-core took 3
+# times as long, for binaries a fifth smaller.
+export RUSTFLAGS="%{build_rustflags} -Ccodegen-units=4"
 export CARGO_PROFILE_RELEASE_STRIP=none
-cargo build --release -p atlas-core --bin atlas-system-helper
+export CARGO_PROFILE_RELEASE_LTO=false
+# Beside the app's build: the two don't share atlas-core (the app's has the
+# flatpak feature), and each leaves CPUs idle at times.
+cargo build --release -p atlas-core --bin atlas-system-helper &
+helper=$!
 %if %{with app}
 # (checked with rpmspec --eval: %%cmake honours _vpath_srcdir, not __cmake_source_dir)
 %global _vpath_srcdir apps/atlas-updater
 %cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
 %cmake_build
 %endif
+wait $helper
 
 %install
 d=crates/atlas-core/data
