@@ -10,8 +10,11 @@ ExecStart=/usr/libexec/atlas-system-helper
 # PrivateDevices, RestrictNamespaces, RestrictSUIDSGID, MemoryDenyWriteExecute
 # or NoNewPrivileges: bootc and ostree need mount namespaces, /sysroot, /ostree
 # and /etc writable, setuid checkouts, immutable bits and SELinux transitions.
-# CAP_SYS_PTRACE stays: bootc reads /proc/1/ns/mnt to enter the host mount
-# namespace. Network access stays (registry pulls).
+# PrivateTmp=yes does put the service in its own mount namespace; that is
+# fine: AtlasOS's update-stage service runs bootc switch/upgrade with
+# PrivateTmp=yes too (verified in a VM), because bootc joins the host mount
+# namespace through /proc/1/ns/mnt. That needs CAP_SYS_PTRACE, so it stays in
+# the capability set. Network access stays (registry pulls).
 PrivateTmp=yes
 ProtectHome=yes
 ProtectKernelModules=yes

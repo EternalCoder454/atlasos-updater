@@ -51,13 +51,14 @@ impl FetchError {
 
 /// Characters that never belong in a link: controls, any Unicode whitespace
 /// (U+00A0, U+2028 ...) and the invisible format characters (zero-width,
-/// bidi controls U+202A-202E and U+2066-2069, BOM, tags).
+/// bidi controls U+202A-202E and U+2066-2069, BOM, tags). U+200C and U+200D
+/// (joiners) stay: emoji sequences and Persian or Indic text need them.
 fn is_hidden(c: char) -> bool {
     c.is_control()
         || c.is_whitespace()
         || matches!(c,
             '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
-            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+            | '\u{200b}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
             | '\u{110bd}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
@@ -482,6 +483,14 @@ mod tests {
         }
         assert!(html.contains("fixgnp.exe safe text"), "{html}");
         assert!(html.contains("<p>next</p>"), "{html}");
+    }
+
+    #[test]
+    fn joiners_stay_for_emoji_and_persian_text() {
+        let html = render("family \u{1f468}\u{200d}\u{1f469} می\u{200c}خواهم \u{200f}x");
+        assert!(html.contains("\u{1f468}\u{200d}\u{1f469}"), "{html}");
+        assert!(html.contains("می\u{200c}خواهم"), "{html}");
+        assert!(!html.contains('\u{200f}'), "{html}");
     }
 
     #[test]

@@ -98,7 +98,11 @@ an update (`Status::is_downgrade`; `ImageStatus::is_older_than`: the version lab
 compared as numbers, or the build times say it is older and neither says
 the opposite; nothing comparable means not older). `available_update`
 leaves it out, so the app never offers it; `Upgrade` and `SwitchChannel`
-(a switch to the followed channel pulls its tag too) check what they staged
+(a switch to the followed channel pulls its tag too) first ask the registry
+with one quick `skopeo inspect` (30 s, no retries, bootc's `auth.json` if
+there is one) and refuse an older image before anything is downloaded
+(`DOWNGRADE_REFUSED`, "Nothing was downloaded"); if the registry can't be
+asked, that is logged and the pull goes on. Then they check what they staged
 against the status from before (or, if that couldn't be read, the booted
 image after) and, for a downgrade, remove it again with `rpm-ostree cleanup
 -p` and fail with `helper_client::DOWNGRADE_REFUSED` and the two versions

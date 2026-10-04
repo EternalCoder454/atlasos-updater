@@ -40,6 +40,10 @@ const STDERR_TAIL: usize = 4096;
 /// Most output kept from bootc (stdout and stderr each).
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The check before a pull is fail-open, so it gets one short try.
+const QUICK_TIMEOUT: Duration = Duration::from_secs(30);
+/// bootc's registry credentials, first one found (as the stager's condition).
+const AUTH_FILES: [&str; 2] = ["/run/ostree/auth.json", "/etc/ostree/auth.json"];
 const STATUS_CACHE: Duration = Duration::from_secs(2);
 const LONG_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -69,6 +73,12 @@ pub trait BootcRunner: Send + Sync + 'static {
 
     fn skopeo(&self, _args: &[&str]) -> Result<String, String> {
         Err("skopeo is not available".into())
+    }
+
+    /// One quick `skopeo` call (about 30 seconds at most) for the check made
+    /// before a pull; a runner without its own limit uses [`skopeo`](Self::skopeo).
+    fn skopeo_quick(&self, args: &[&str]) -> Result<String, String> {
+        self.skopeo(args)
     }
 
     /// [`run`](Self::run) for `upgrade` and `switch`, reporting progress to
@@ -123,6 +133,10 @@ impl BootcRunner for SystemBootc {
 
     fn skopeo(&self, args: &[&str]) -> Result<String, String> {
         run_limited(Path::new(SKOPEO), args, SHORT_TIMEOUT, OUTPUT_CAP)
+    }
+
+    fn skopeo_quick(&self, args: &[&str]) -> Result<String, String> {
+        run_limited(Path::new(SKOPEO), args, QUICK_TIMEOUT, OUTPUT_CAP)
     }
 }
 
@@ -834,15 +848,13 @@ impl Core {
                 // stages only: never --apply (rpm-ostree: never --reboot)
                 // A system the read before shows with local changes goes to
                 // rpm-ostree at once, without bootc's refusal first.
-                let mut layered =
-                    before.is_some_and(|b| matches!(self.origin_of(&b.read), Ok(Some(_))));
+                let origin = before.and_then(|b| self.origin_of(&b.read).ok().flatten());
+                let mut layered = origin.is_some();
                 // An older image is refused before anything is downloaded
                 // when the registry can be asked; `refuse_downgrade` below
                 // stays as the backstop.
-                let followed = if layered {
-                    before
-                        .and_then(|b| self.origin_of(&b.read).ok().flatten())
-                        .and_then(|o| layered::parse_origin(&o))
+                let followed = if let Some(origin) = &origin {
+                    layered::parse_origin(origin)
                 } else {
                     before_status.and_then(|s| s.spec.image.clone().or(s.booted_ref().cloned()))
                 };
@@ -1002,11 +1014,21 @@ impl Core {
             return Ok(());
         };
         let image = layered::skopeo_ref(target);
-        let Ok(out) = self.fetching(|| self.runner.skopeo(&["inspect", "--", &image])) else {
-            return Ok(());
+        let mut args = vec!["inspect"];
+        if let Some(auth) = AUTH_FILES.iter().find(|p| Path::new(p).is_file()) {
+            args.extend(["--authfile", auth]);
+        }
+        args.extend(["--", &image]);
+        let found = match self.runner.skopeo_quick(&args) {
+            Ok(out) => layered::image_from_skopeo(&out, target),
+            Err(e) => Err(e),
         };
-        let Ok(found) = layered::image_from_skopeo(&out, target) else {
-            return Ok(());
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => {
+                eprintln!("atlas-system-helper: pre-pull check skipped: {e}");
+                return Ok(());
+            }
         };
         if before.is_downgrade(&found) {
             let msg = downgrade_message(before, &found);
@@ -1268,7 +1290,12 @@ impl Core {
             if done.is_err() {
                 let _ = std::fs::remove_file(&tmp);
             }
-            done
+            done?;
+            // make the rename itself durable
+            if let Some(dir) = path.parent() {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+            Ok(())
         };
         write().map_err(|e| HelperError::Failed(format!("cannot save the update check: {e}")))
     }
@@ -3067,6 +3094,109 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             assert!(c.execute(&Op::Upgrade).is_ok());
             assert!(stager.calls().iter().any(|c| c[0] == "upgrade"));
         }
+    }
+
+    #[test]
+    fn a_switch_to_the_other_channel_may_be_older_than_the_booted_image() {
+        // booted :testing 44.20261001; :stable is another tag, so another image
+        let stager = Stager::new(PLAIN.into(), false);
+        let f = Arc::new(Registry {
+            stager: stager.clone(),
+            out: Ok(skopeo_json(
+                "44.20260920",
+                "2026-09-20T04:00:00Z",
+                "sha256:stable",
+            )),
+        });
+        Core::new(f)
+            .execute(&Op::SwitchChannel("stable".into()))
+            .unwrap();
+        assert!(stager.calls().iter().any(|c| c[0] == "switch"));
+    }
+
+    #[test]
+    fn a_failed_pre_pull_check_lets_a_switch_through() {
+        let stager = Stager::new(PLAIN.into(), false);
+        let f = Arc::new(Registry {
+            stager: stager.clone(),
+            out: Err("i/o timeout".into()),
+        });
+        Core::new(f)
+            .execute(&Op::SwitchChannel("stable".into()))
+            .unwrap();
+        assert!(stager.calls().iter().any(|c| c[0] == "switch"));
+    }
+
+    /// The layered fixture, but with a booted image reference (version
+    /// 44.20261034 of :stable) and a registry that answers with `out`.
+    struct LayeredKnown {
+        inner: Arc<Layered>,
+        out: String,
+    }
+
+    impl LayeredKnown {
+        fn new(version: &str) -> Arc<LayeredKnown> {
+            Arc::new(LayeredKnown {
+                inner: Layered::new(),
+                out: skopeo_json(version, "2026-09-20T04:00:00Z", "sha256:old"),
+            })
+        }
+    }
+
+    impl BootcRunner for LayeredKnown {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            if args == ["status", "--json"] {
+                self.inner.record("bootc", args);
+                let booted = r#""image": {
+          "architecture": "amd64",
+          "image": {"image": "/var/mnt/atlasreg/registry:stable", "transport": "oci"},
+          "imageDigest": "sha256:booted",
+          "timestamp": "2026-10-02T18:54:39Z",
+          "version": "44.20261034"
+        },
+        "incompatible": true,"#;
+                let json = include_str!("../../tests/fixtures/status-layered.json");
+                let old = "\"image\": null,\n      \"incompatible\": true,";
+                assert!(json.contains(old));
+                return Ok(json.replacen(old, booted, 1));
+            }
+            self.inner.run(args)
+        }
+        fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+            self.inner.rpm_ostree(args)
+        }
+        fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+            self.inner.record("skopeo", args);
+            Ok(self.out.clone())
+        }
+    }
+
+    #[test]
+    fn a_layered_upgrade_to_an_older_image_is_refused_before_the_pull() {
+        let f = LayeredKnown::new("44.20260920");
+        match Core::new(f.clone()).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("Nothing was downloaded"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let calls = f.inner.calls();
+        assert!(!ran(&calls, &["rpm-ostree", "upgrade"]));
+        assert!(!calls.iter().any(|c| c[..2] == ["bootc", "upgrade"]));
+    }
+
+    #[test]
+    fn a_layered_rebase_to_an_older_image_is_refused_before_the_pull() {
+        let f = LayeredKnown::new("44.20260920");
+        match Core::new(f.clone()).execute(&Op::SwitchChannel("stable".into())) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("Nothing was downloaded"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!f.inner.calls().iter().any(|c| c[..2] == ["rpm-ostree", "rebase"]));
     }
 
     #[test]

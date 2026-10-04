@@ -27,8 +27,9 @@ pub const STATE_UNREAD_CANCEL: &str =
     "The rollback was canceled, but AtlasOS couldn't read the new state.";
 /// What the helper says when asked to cancel a rollback that is not queued.
 pub const NO_ROLLBACK_QUEUED: &str = "No rollback is queued.";
-/// Start of the error when `Upgrade` found an image older than the one this
-/// computer runs (the version follows) and took it out again.
+/// Start of the error when `Upgrade` or `SwitchChannel` found an image older
+/// than the one this computer runs (the version follows): refused before the
+/// download when the registry could be asked, otherwise taken out again after.
 pub const DOWNGRADE_REFUSED: &str =
     "The update on the server is older than the version on this computer, so it wasn't installed.";
 
