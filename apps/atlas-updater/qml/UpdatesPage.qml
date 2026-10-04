@@ -21,6 +21,22 @@ AtlasPage {
 
     title: qsTr("Updates")
 
+    // The OS logo for the up-to-date state, if the icon theme has it.
+    readonly property string logoIcon: osLogoProbe.valid ? osLogoProbe.source : (distroLogoProbe.valid ? "distributor-logo" : "checkmark")
+    Kirigami.Icon {
+        id: osLogoProbe
+        visible: false
+        width: 0
+        height: 0
+        source: page.backend.osLogo
+    }
+    Kirigami.Icon {
+        id: distroLogoProbe
+        visible: false
+        width: 0
+        height: 0
+        source: "distributor-logo"
+    }
     readonly property var apps: page.backend.appsJson.length > 0 ? JSON.parse(page.backend.appsJson) : []
     // Errors from these operations belong to the hero; the others (apps, crash
     // reports) stay in the banner at the top.
@@ -265,6 +281,8 @@ AtlasPage {
     // ---- the system ----
     StatusHero {
         id: hero
+        badgeUnits: 7
+        ringWidth: 5
         Layout.topMargin: Kirigami.Units.gridUnit
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         busy: page.checking || page.downloading || page.working
@@ -283,6 +301,13 @@ AtlasPage {
             }
             return page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor;
         }
+        // Up to date: the OS logo in its own colours with a check badge,
+        // not a tinted circle. The logo is `LOGO=` from os-release, then
+        // `distributor-logo`, then a plain check.
+        readonly property bool upToDate: iconName === page.logoIcon && page.logoIcon !== "checkmark"
+        showTintCircle: !upToDate
+        iconIsMask: !upToDate
+        cornerBadgeIcon: upToDate ? "checkmark" : ""
         iconName: {
             if (page.hasError) {
                 return "dialog-error";
@@ -294,7 +319,8 @@ AtlasPage {
                 return "view-refresh";
             }
             if (page.downloading) {
-                return "download";
+                // An update goes up a version: an up arrow, not a download's.
+                return Qt.resolvedUrl("icons/update-arrow.svg");
             }
             if (page.rollbackQueued) {
                 return "edit-undo";
@@ -308,7 +334,7 @@ AtlasPage {
             if (page.backend.updateAvailable) {
                 return "update-medium";
             }
-            return "checkmark";
+            return page.logoIcon;
         }
         headline: {
             if (page.hasError) {

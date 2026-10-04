@@ -1,12 +1,16 @@
 # Atlas Updater and atlas-core: design
 
 AtlasOS is a Fedora Kinoite 44 bootc image (`ghcr.io/eternalcoder454/atlasos`).
-This repo holds three things:
+This repo holds two things:
 
 - **atlas-core**: the shared Rust library and the privileged system helper that
   Atlas apps reuse (Atlas Store later depends on it through git).
 - **atlas-updater**: the Atlas Updater app (`net.eterneon.atlas.updater`).
-- **template/**: the starting point for new Atlas apps.
+
+Atlas.Ui, the QML module every Atlas app shares, its Material Symbols fonts,
+the design rules for Atlas apps and the app template live in
+**atlas-framework** (`EternalCoder454/atlas-framework`, `~/Documents/Atlas
+Framework`). The app uses the installed Atlas.Ui (the atlas-ui package).
 
 Stack: Rust + Qt 6.11 + Kirigami 6.30 through CXX-Qt. Everything builds and runs
 on Fedora 44 (Qt 6.11.2, KF6 6.30, bootc 1.16.13, flatpak 1.18.2, polkit 127,
@@ -28,7 +32,6 @@ crates/atlas-core/            lib + bin `atlas-system-helper`
 apps/atlas-updater/           the app (CMake + Corrosion, or cxx-qt-build)
   qml/                        Kirigami UI, compiled ahead of time (qmlcachegen)
   data/                       .desktop, autostart .desktop, .notifyrc, metainfo, icon
-template/                     minimal Atlas app skeleton (Kirigami window + atlas-core)
 packaging/atlas.spec          one spec, subpackages `atlas-core` and `atlas-updater`
 packaging/build-rpm.sh        builds the RPMs inside fedora:44: build-rpm.sh <out dir>
 ```
@@ -310,8 +313,11 @@ default; when off nothing is collected or written):
 - **Settings.** Per user, `~/.config/atlas/crash-reporting.toml`,
   `enabled = false` (`crash::Settings`). **Endpoint:** a GlitchTip (Sentry
   compatible) DSN, `dsn = ""` in `/etc/atlas/crash-reporting.toml`, default
-  shipped in `/usr/share/atlas/crash-reporting.toml`. With no DSN `send()`
-  fails with "no endpoint configured".
+  shipped in `/usr/share/atlas/crash-reporting.toml`:
+  `https://atlasos@atlasos.eterneon.net/crash/1`, the AtlasOS relay (store
+  URL `https://atlasos.eterneon.net/crash/api/1/store/`). An empty `dsn` in
+  `/etc` turns sending off; with no DSN `send()` fails with "no endpoint
+  configured".
 - **Sources.** Atlas app Rust panics (`crash::install`, `record_fatal` for Qt
   fatal messages); systemd-coredump entries of the user's own processes
   (`collect_coredumps`: journal fields COREDUMP_EXE/COMM/SIGNAL_NAME/
@@ -323,7 +329,11 @@ default; when off nothing is collected or written):
   `channel-switched`, `channel-switch-failed`; `record-boot` adds
   `update-applied`, `rollback-applied`, `automatic-rollback`; greenboot
   scripts call `atlas-system-helper record-event health-check-failed|
-  health-check-passed`).
+  health-check-passed`). Only failures become reports (`REPORTED_EVENTS`:
+  `update-failed`, `rollback-failed`, `channel-switch-failed`,
+  `automatic-rollback`, `health-check-failed`); other events are skipped
+  and the marker moves past them. Pending reports of other helper events
+  from older versions are deleted when pending reports are loaded.
 - **Collected, only this.** AtlasOS version, channel and previous version;
   app name, version and category (Plasma, KWin, Atlas app, other); the stack
   trace; kernel; GPU model (pci.ids) and driver; uptime; CPU model, RAM total
@@ -358,5 +368,10 @@ default; when off nothing is collected or written):
 - **Consent.** Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/`.
   The app shows `Report::payload()` (the exact Sentry event JSON that `send()`
   posts to `{dsn host}/api/{project}/store/`) and only then calls `send()`,
-  which moves the report to `sent/` (kept 90 days). "Don't Send" calls
+  which moves the report to `sent/` (kept 90 days). The relay posts the
+  report as a public issue in github.com/EternalCoder454/AtlasOS and
+  answers `{"id", "url"}`; `url` is kept (`Report::issue_url`) only if it
+  starts with `https://github.com/EternalCoder454/AtlasOS/issues/`, and the
+  Sent Reports list shows it as "View on GitHub". The Send screens say
+  before sending that the report becomes public. "Don't Send" calls
   `discard()`. "Report on GitHub" opens `github_issue_url()`.

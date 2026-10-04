@@ -57,6 +57,11 @@ private:
     QQmlApplicationEngine *m_engine = nullptr;
     bool m_closing = false; // window closed, engine destruction queued
     QPointer<KNotification> m_restartSoon;
+    // The last restart failed: the tray shows the urgent icon until the next try.
+    bool m_restartFailed = false;
+    // Tray attention icons: an update is ready, and urgent.
+    QString m_readyIcon;
+    QString m_urgentIcon;
     QPointer<QQuickWindow> m_window;
     QFileSystemWatcher m_watcher;
     QTimer m_debounce;

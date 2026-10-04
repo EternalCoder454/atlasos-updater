@@ -55,8 +55,11 @@ BuildRequires:  cmake(KF6Notifications)
 BuildRequires:  cmake(KF6StatusNotifierItem)
 BuildRequires:  cmake(KF6DBusAddons)
 BuildRequires:  pkgconfig(gio-2.0)
-# QML modules qmlcachegen resolves at build time (not linked)
+# QML modules qmlcachegen resolves at build time (not linked). atlas-ui comes
+# from atlas-framework, which is in no repository: install its RPMs first
+# (build-rpm.sh does, given ATLAS_LOCAL_RPMS).
 BuildRequires:  kf6-kirigami-devel
+BuildRequires:  atlas-ui >= 1.1.0
 %endif
 
 %description
@@ -85,6 +88,9 @@ removal by dnf.
 %package -n atlas-updater
 Summary:        Atlas Updater for AtlasOS
 Requires:       atlas-core = %{version}-%{release}
+# Atlas.Ui, the shared look (atlas-framework). 1.1.0 also ships
+# %{_datadir}/atlas/crash-reporting.toml, the crash report server.
+Requires:       atlas-ui >= 1.1.0
 Requires:       kf6-kirigami
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative
@@ -144,7 +150,6 @@ install -Dpm0644 $d/polkit-1/actions/net.eterneon.atlas.system.policy \
     %{buildroot}%{_datadir}/polkit-1/actions/net.eterneon.atlas.system.policy
 install -Dpm0644 $d/polkit-1/rules.d/50-atlas-system.rules \
     %{buildroot}%{_datadir}/polkit-1/rules.d/50-atlas-system.rules
-install -Dpm0644 $d/atlas/crash-reporting.toml %{buildroot}%{_datadir}/atlas/crash-reporting.toml
 install -Dpm0644 $d/dnf/protected.d/atlas.conf %{buildroot}%{_sysconfdir}/dnf/protected.d/atlas.conf
 %if %{with app}
 %cmake_install
@@ -177,7 +182,6 @@ appstream-util validate-relax --nonet \
 %{_presetdir}/50-atlas-core.preset
 %{_datadir}/polkit-1/actions/net.eterneon.atlas.system.policy
 %{_datadir}/polkit-1/rules.d/50-atlas-system.rules
-%{_datadir}/atlas/crash-reporting.toml
 %config(noreplace) %{_sysconfdir}/dnf/protected.d/atlas.conf
 
 %if %{with app}

@@ -1,5 +1,0 @@
-# Atlas crash reporting endpoint (default; copy to /etc/atlas/crash-reporting.toml
-# to override). Crash reports are opt-in per user, and nothing is ever sent
-# while dsn is empty. Set it to a GlitchTip (Sentry compatible) DSN:
-#   dsn = "https://<key>@<host>/<project>"
-dsn = ""

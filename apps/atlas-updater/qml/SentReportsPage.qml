@@ -63,6 +63,13 @@ AtlasPage {
                     payloadDialog.payload = row.modelData.payload;
                     payloadDialog.open();
                 }
+                // A trailing item of the row, so Section's separators and
+                // corners still see plain SectionRows.
+                TextButton {
+                    text: qsTr("View on GitHub")
+                    visible: row.modelData.issueUrl.length > 0 && page.backend.isSafeLink(row.modelData.issueUrl)
+                    onClicked: Qt.openUrlExternally(row.modelData.issueUrl)
+                }
             }
         }
     }

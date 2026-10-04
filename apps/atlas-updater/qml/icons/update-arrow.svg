@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- The downloading badge: an up arrow with a stem, as an update goes up a
+       version. Breeze's arrow-up is a bare chevron. One colour; StatusHero
+       paints it in the tint. -->
+  <g fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 11 18.5 L 11 4"/>
+    <path d="M 4.5 10.5 L 11 4 L 17.5 10.5"/>
+  </g>
+</svg>

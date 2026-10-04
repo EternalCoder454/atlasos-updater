@@ -90,6 +90,8 @@ pub mod qobject {
         #[qproperty(QString, reports_json, cxx_name = "reportsJson")]
         #[qproperty(i32, reports_count, cxx_name = "reportsCount")]
         #[qproperty(QString, sent_json, cxx_name = "sentJson")]
+        /// The icon name from `LOGO=` in os-release, or empty.
+        #[qproperty(QString, os_logo, cxx_name = "osLogo")]
         /// `ATLAS_UPDATER_FIXTURES` is set: everything shown is fake. The UI
         /// shows a permanent banner.
         #[qproperty(bool, fixtures_active, cxx_name = "fixturesActive")]
@@ -306,6 +308,7 @@ pub struct BackendRust {
     reports_json: QString,
     reports_count: i32,
     sent_json: QString,
+    os_logo: QString,
     fixtures_active: bool,
     fixture_notified: String,
 
@@ -492,6 +495,9 @@ impl qobject::Backend {
         let cfg = Config::load();
         let fixtures = config::fixtures_dir();
         let schedule = self.rust().schedule.clone();
+        if let Some(logo) = atlas_core::osrelease::logo_icon() {
+            self.as_mut().set_os_logo(QString::from(logo.as_str()));
+        }
         {
             let mut r = self.as_mut().rust_mut();
             r.started = true;
@@ -1366,7 +1372,7 @@ impl qobject::Backend {
                     if !fixtures {
                         obj.as_mut().load_reports();
                     }
-                    obj.as_mut().set_info_text(q("Crash report sent. Thank you."));
+                    obj.as_mut().set_info_text(q("Crash report sent to the AtlasOS GitHub project. Thank you."));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => obj.as_mut().set_error("sendReport", q(
                     "No crash report server is set up on this system, so the report can't be sent. It stays here until you decide.",

@@ -3,6 +3,8 @@
 #   packaging/build-rpm.sh <out dir> [rpmbuild options, e.g. --without app]
 # The binary RPMs (no source, no debuginfo) are copied to <out dir>.
 # Cargo needs network access.
+# ATLAS_LOCAL_RPMS=<dir> installs the RPMs in <dir> first: atlas-framework's
+# (atlas-ui), which the app builds against and no repository has.
 # ATLAS_BUILD_CACHE=<dir> (optional, such as a podman cache mount) keeps cargo's
 # downloads, cargo's output and the CMake build in <dir>, and builds in a fixed
 # place, so the next build only recompiles what changed.
@@ -19,6 +21,14 @@ main() {
     version=$(awk '/^Version:/ {print $2; exit}' "$spec")
     
     dnf -y install rpm-build dnf5-plugins tar gzip >&2
+    if [ -n "${ATLAS_LOCAL_RPMS:-}" ]; then
+        # Atlas.Ui and its fonts, not the gallery. dnf brings their
+        # dependencies; rpm then puts these exact files in place even when a
+        # build of the same version is installed already.
+        local_rpms=("$ATLAS_LOCAL_RPMS"/atlas-ui-[0-9]*.rpm "$ATLAS_LOCAL_RPMS"/atlas-symbols-fonts-[0-9]*.rpm)
+        dnf -y install "${local_rpms[@]}" >&2
+        rpm -U --replacepkgs --replacefiles "${local_rpms[@]}" >&2
+    fi
     # builddep reads the spec; pass --without/--with through as rpm macros
     defs=()
     for ((i = 0; i < ${#rpmopts[@]}; i++)); do
@@ -48,6 +58,15 @@ main() {
         if [ "$(cat "$cache/toolchain" 2>/dev/null)" != "$toolchain" ]; then
             rm -rf "$cache/target" "$cache/cmake"
             printf '%s\n' "$toolchain" >"$cache/toolchain"
+        fi
+        # The app's QML is compiled against the installed Atlas.Ui (its
+        # qmltypes and .qml files), which CMake doesn't track: rebuild the
+        # CMake side, not cargo's, whenever that changes. (--without app
+        # builds don't install it: cat fails, which pipefail mustn't see.)
+        atlasui=$({ cat /usr/lib64/qt6/qml/Atlas/Ui/* 2>/dev/null || true; } | sha256sum)
+        if [ "$(cat "$cache/atlas-ui" 2>/dev/null)" != "$atlasui" ]; then
+            rm -rf "$cache/cmake"
+            printf '%s\n' "$atlasui" >"$cache/atlas-ui"
         fi
         rpmopts+=(--define "_atlas_build_cache $cache")
     else

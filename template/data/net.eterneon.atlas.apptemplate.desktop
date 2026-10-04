@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Atlas App
-Comment=Atlas app template
-Exec=atlas-app-template
-Icon=applications-system
-Terminal=false
-Categories=Qt;KDE;System;
-StartupNotify=true

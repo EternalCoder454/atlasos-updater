@@ -328,7 +328,7 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bootc::fixtures::{BOOTED_WITH_UPDATE, PLAIN};
+    use crate::fixtures::{BOOTED_WITH_UPDATE, PLAIN};
     use crate::helper::events;
 
     #[test]

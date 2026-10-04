@@ -45,8 +45,22 @@ AtlasPage {
     }
 
     Section {
+        title: qsTr("Appearance")
+
+        SectionRow {
+            title: qsTr("Transparency effects")
+            // The switch keeps the choice even while the desktop can't blur;
+            // the note says why nothing is blurred.
+            subtitle: qsTr("Blur behind Atlas app windows. Applies to all Atlas apps.") + (Appearance.transparency && !Appearance.blurAvailable ? "\n" + qsTr("No blur right now: the desktop's blur effect is off.") : "")
+            showSwitch: true
+            switchChecked: Appearance.transparency
+            onSwitchToggled: checked => Appearance.transparency = checked
+        }
+    }
+
+    Section {
         title: qsTr("Crash Reports")
-        footer: page.backend.crashHasServer ? qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. Nothing is sent without asking you first.") : qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. No crash report server is set up on this system, so reports can't be sent yet.")
+        footer: page.backend.crashHasServer ? qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. Reports are posted as public issues on the AtlasOS GitHub project, only when you press Send, with no name or account attached. Anyone can read them, including the stack trace and your AtlasOS version, kernel, CPU, GPU and memory.") : qsTr("When an app or the system crashes, a report is saved here and you can choose to send it. No crash report server is set up on this system, so reports can't be sent yet.")
 
         SectionRow {
             title: qsTr("Send crash reports")

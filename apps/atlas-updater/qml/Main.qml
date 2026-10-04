@@ -6,7 +6,7 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
-QQC2.ApplicationWindow {
+AtlasWindow {
     id: root
 
     // Both come from Shell::openWindow() (setInitialProperties).
@@ -19,7 +19,6 @@ QQC2.ApplicationWindow {
     minimumWidth: Kirigami.Units.gridUnit * 24
     minimumHeight: Kirigami.Units.gridUnit * 24
     visible: true
-    color: Kirigami.Theme.backgroundColor
 
     LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
     LayoutMirroring.childrenInherit: true
@@ -98,7 +97,7 @@ QQC2.ApplicationWindow {
             id: sidebar
             Layout.fillHeight: true
             Layout.preferredWidth: root.compact ? Kirigami.Units.gridUnit * 3.6 : Kirigami.Units.gridUnit * 12.5
-            color: Qt.tint(Kirigami.Theme.backgroundColor, Qt.alpha(Kirigami.Theme.highlightColor, 0.07))
+            color: root.sidebarColor(Qt.tint(Kirigami.Theme.backgroundColor, Qt.alpha(Kirigami.Theme.highlightColor, 0.07)))
 
             Behavior on Layout.preferredWidth {
                 NumberAnimation {

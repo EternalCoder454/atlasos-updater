@@ -16,6 +16,7 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 atlas-core = { path = "../../crates/atlas-core", features = ["flatpak"] }
+atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb" }
 cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = "0.10"

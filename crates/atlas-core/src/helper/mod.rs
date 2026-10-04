@@ -4,7 +4,7 @@
 //! is in [`service`]; everything else here is plain code that unit tests drive
 //! with a fake [`BootcRunner`].
 
-pub mod events;
+pub use atlas_framework_system::events;
 pub mod layered;
 pub mod live;
 pub mod retry;
@@ -1314,7 +1314,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bootc::fixtures::{BOOTED_WITH_UPDATE, PLAIN};
+    use crate::fixtures::{BOOTED_WITH_UPDATE, PLAIN};
     use std::sync::Mutex;
     use std::sync::mpsc;
 
@@ -1717,7 +1717,7 @@ mod tests {
     #[test]
     fn record_boot_off_a_bootc_host_fails() {
         let d = tempfile::tempdir().unwrap();
-        let f = Fake::new(crate::bootc::fixtures::NOT_BOOTC);
+        let f = Fake::new(crate::fixtures::NOT_BOOTC);
         assert!(core(&f).record_boot(&d.path().join("h")).is_err());
     }
 

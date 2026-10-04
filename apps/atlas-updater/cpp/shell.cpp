@@ -32,13 +32,28 @@ Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
     , m_backend(backend)
     , m_trayMode(trayMode)
 {
-    // Tray icon: Passive normally, NeedsAttention while an update is staged.
+    // Tray icon: Passive normally, NeedsAttention while an update is staged
+    // (urgent while a restart is about to happen or has failed).
     m_tray = new KStatusNotifierItem(QStringLiteral("net.eterneon.atlas.updater"), this);
     m_tray->setCategory(KStatusNotifierItem::SystemServices);
     m_tray->setTitle(tr("Atlas Updater"));
-    // Monochrome like the tray's other icons, so they follow light and dark
-    m_tray->setIconByName(QStringLiteral("net.eterneon.atlas.updater-symbolic"));
-    m_tray->setAttentionIconByName(QStringLiteral("net.eterneon.atlas.updater-ready-symbolic"));
+    // The icon theme's own system-update tray icons (Papirus on AtlasOS: two
+    // arrows in a circle, drawn in the panel's text colour; a dot on it when an
+    // update is ready, a red one when it is urgent), so the tray matches the
+    // theme. Papirus's panel names first, then its symbolic ones, then ours,
+    // monochrome, when the theme has none.
+    const auto themed = [](const QStringList &names, const QString &fallback) {
+        for (const QString &name : names) {
+            if (QIcon::hasThemeIcon(name)) {
+                return name;
+            }
+        }
+        return fallback;
+    };
+    m_tray->setIconByName(themed({QStringLiteral("system-software-update-panel"), QStringLiteral("update-none")}, QStringLiteral("net.eterneon.atlas.updater-symbolic")));
+    m_readyIcon = themed({QStringLiteral("software-update-available"), QStringLiteral("update-low"), QStringLiteral("software-update-available-symbolic")}, QStringLiteral("net.eterneon.atlas.updater-ready-symbolic"));
+    m_urgentIcon = themed({QStringLiteral("software-update-urgent"), QStringLiteral("update-high"), QStringLiteral("software-update-urgent-symbolic")}, m_readyIcon);
+    m_tray->setAttentionIconByName(m_readyIcon);
     m_tray->setStatus(KStatusNotifierItem::Passive);
 
     auto *menu = m_tray->contextMenu();
@@ -201,6 +216,10 @@ void Shell::updateTray()
     const bool staged = m_backend->property("hasStaged").toBool();
     const qint64 at = m_backend->property("scheduledAt").toLongLong();
     const QString version = m_backend->property("stagedVersion").toString();
+    if (!staged) {
+        m_restartFailed = false;
+    }
+    m_tray->setAttentionIconByName(staged && ((m_restartSoon && at > 0) || m_restartFailed) ? m_urgentIcon : m_readyIcon);
     m_tray->setStatus(staged ? KStatusNotifierItem::NeedsAttention : KStatusNotifierItem::Passive);
     QString sub = staged ? tr("Update %1 is ready. Restart to install it.").arg(version) : tr("Your system is up to date.");
     if (at > 0) {
@@ -243,15 +262,25 @@ void Shell::onRestartSoon()
     n->setFlags(KNotification::Persistent);
     n->setUrgency(KNotification::CriticalUrgency);
     m_restartSoon = n;
+    // Dismissed or closed: drop the urgent tray icon once it is gone.
+    connect(n, &KNotification::closed, this, [this, n] {
+        if (m_restartSoon == n) {
+            m_restartSoon = nullptr;
+            updateTray();
+        }
+    });
     auto *now = n->addAction(tr("Restart Now"));
     connect(now, &KNotificationAction::activated, this, [this] { restartNow(); });
     auto *cancel = n->addAction(tr("Cancel Restart"));
     connect(cancel, &KNotificationAction::activated, this, [this] { cancelRestart(); });
     n->sendEvent();
+    updateTray();
 }
 
 void Shell::onRestartProblem(const QString &text)
 {
+    m_restartFailed = true;
+    updateTray();
     if (windowIsActive()) {
         return; // The window shows it on the Updates page.
     }
@@ -271,6 +300,11 @@ void Shell::onScheduleChanged()
     const bool scheduled = m_backend->property("scheduledAt").toLongLong() > 0;
     if (!scheduled && m_restartSoon) {
         m_restartSoon->close();
+    }
+    if (scheduled && m_restartFailed) {
+        // A new time replaces the failed restart.
+        m_restartFailed = false;
+        updateTray();
     }
     // Non-tray mode stays alive for a scheduled restart only. A restart that is
     // running keeps scheduledAt set until it fails, so this is the end of a
@@ -292,11 +326,15 @@ void Shell::enableTrayMode()
 
 void Shell::restartNow()
 {
+    m_restartFailed = false;
+    updateTray();
     QMetaObject::invokeMethod(m_backend, "restartNow");
 }
 
 void Shell::cancelRestart()
 {
+    m_restartFailed = false;
+    updateTray();
     QMetaObject::invokeMethod(m_backend, "cancelRestart");
 }
 

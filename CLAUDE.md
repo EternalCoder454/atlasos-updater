@@ -20,6 +20,11 @@ together with the code that implements the change.
   host.** Unit-test the logic (argument validation, ref/tag rewriting, JSON
   parsing, history) with fixtures. The helper's D-Bus and polkit paths are
   tested in the VM.
+- **Atlas.Ui is not here.** It lives in atlas-framework (`~/Documents/Atlas
+  Framework`) and the app builds against the installed module (atlas-ui), so
+  the build container needs its RPMs: build them there
+  (`packaging/build-rpm.sh`), then pass `ATLAS_LOCAL_RPMS=<their dir>` to this
+  repo's `build-rpm.sh`, or `dnf install` them before a CMake build.
 - The system helper accepts only the six methods in DESIGN.md. Never add a
   method that takes a command, path, image ref or argv.
 - Commit only the paths you own (`git commit -- <paths>`). Other agents may be

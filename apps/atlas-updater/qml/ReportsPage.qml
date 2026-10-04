@@ -129,6 +129,15 @@ AtlasPage {
                 }
             }
 
+            QQC2.Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.largeSpacing
+                text: qsTr("Sending posts this report as a public issue on GitHub. Anyone can read it, including the stack trace and your AtlasOS version, kernel, CPU, GPU and memory.")
+                color: Kirigami.Theme.disabledTextColor
+                font: Kirigami.Theme.smallFont
+                wrapMode: Text.WordWrap
+            }
+
             Flow {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing

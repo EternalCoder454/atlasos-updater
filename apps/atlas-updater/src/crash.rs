@@ -69,6 +69,7 @@ pub fn view(r: &Report, with_github: bool) -> Value {
     json!({
         "eventId": r.event_id,
         "sentEventId": r.sent_event_id.clone().unwrap_or_default(),
+        "issueUrl": r.issue_url.clone().filter(|u| crash::is_issue_url(u)).unwrap_or_default(),
         "type": r.report_type,
         "time": r.time,
         "appName": display_name(&r.app_name),
