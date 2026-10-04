@@ -9,6 +9,11 @@
 # No LTO for the C++ app: its link took longer than compiling it.
 %global _lto_cflags %{nil}
 
+# No annobin notes: they record each C file's absolute path (the crates' C,
+# compiled under the temporary build directory), which made every build
+# differ. They only serve annocheck; the hardening flags stay.
+%undefine _annotated_build
+
 # --define "_atlas_build_cache <dir>" (packaging/build-rpm.sh passes it when
 # ATLAS_BUILD_CACHE is set) keeps cargo's downloads, cargo's output and the
 # CMake build in <dir>, so a rebuild only compiles what changed.
@@ -122,7 +127,22 @@ export CARGO_TARGET_DIR=%{cargo_target_dir}
 # Their -Ccodegen-units=1 gives way to Cargo.toml's 4 (the last one wins), and
 # there is no LTO. With them, rebuilding after a change to the engine took 3
 # times as long, for binaries a fifth smaller.
-export RUSTFLAGS="%{build_rustflags} -Ccodegen-units=4"
+#
+# Reproducible: build-rpm.sh builds in a new temporary directory each time,
+# and its path would end up in the binaries (panic and assert locations), so
+# every image would carry a new updater. Every build path is mapped to a
+# fixed name: the sources, cargo's home and output, and the CMake build (for
+# the C++ that cxx-qt, moc and Corrosion generate there).
+remap="--remap-path-prefix=$PWD=. --remap-path-prefix=%{cargo_home}=cargo"
+prefixmap="-ffile-prefix-map=$PWD=. -ffile-prefix-map=%{cargo_home}=cargo"
+%if 0%{?_atlas_build_cache:1}
+# Outside the sources only with the build cache.
+remap="$remap --remap-path-prefix=%{cargo_target_dir}=target --remap-path-prefix=%{_vpath_builddir}=build"
+prefixmap="$prefixmap -ffile-prefix-map=%{cargo_target_dir}=target -ffile-prefix-map=%{_vpath_builddir}=build"
+%endif
+export RUSTFLAGS="%{build_rustflags} -Ccodegen-units=4 $remap"
+export CFLAGS="%{build_cflags} $prefixmap"
+export CXXFLAGS="%{build_cxxflags} $prefixmap"
 export CARGO_PROFILE_RELEASE_STRIP=none
 export CARGO_PROFILE_RELEASE_LTO=false
 # Beside the app's build: each leaves CPUs idle at times. --locked: the root
