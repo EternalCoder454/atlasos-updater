@@ -73,7 +73,10 @@ Rules:
 - Calls take minutes (`Upgrade` downloads the image), so clients use no method
   timeout.
 - `Status` is read-only: it never takes the busy flag, one `bootc status` runs
-  at a time and its result is shared for 2 s.
+  at a time and its result is shared for 2 s. An operation that changes the
+  system shares the status it returns the same way. `Upgrade` and
+  `SwitchChannel` read the status once before they start and reuse it (a
+  system with local rpm-ostree changes goes to rpm-ostree at once).
 - While the helper exits (idle or SIGTERM) it releases its bus name first;
   calls that still reach it get `net.eterneon.atlas.Error.ShuttingDown`, and
   the client retries once. On SIGTERM a running bootc gets 40 s, then SIGTERM.

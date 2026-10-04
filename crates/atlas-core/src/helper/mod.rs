@@ -601,6 +601,25 @@ impl Drop for RefreshGuard<'_> {
 
 struct BusyGuard<'a>(&'a AtomicBool);
 
+/// What [`Core::read_state`] read.
+struct StateRead {
+    /// `bootc status --json` as bootc gave it
+    bootc: String,
+    /// bootc says the system has local rpm-ostree changes
+    layered: bool,
+    /// `rpm-ostree status --json` on such a system, if it could be read
+    rpm: Option<String>,
+    /// [`Core::status_json`]'s answer: `bootc`, with `rpm` filled in
+    json: String,
+}
+
+/// The state an upgrade or switch starts from.
+struct Before {
+    read: StateRead,
+    /// what it must not go back behind (`None` if `read` doesn't parse)
+    status: Option<Status>,
+}
+
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
@@ -741,16 +760,23 @@ impl Core {
         self.invalidate_status();
         // What an upgrade or switch starts from: the staged digest for the
         // event, and the booted and staged images it must not go back behind.
+        // The operation reuses this read instead of reading again.
         let before = matches!(op, Op::Upgrade | Op::SwitchChannel(_))
             // a direct read: the shared one may refuse under a status flood
-            .then(|| Status::from_json(&self.status_json().ok()?).ok())
-            .flatten();
+            .then(|| self.read_state().ok())
+            .flatten()
+            .map(|read| Before {
+                status: Status::from_json(&read.json).ok(),
+                read,
+            });
         let staged_before = before
             .as_ref()
+            .and_then(|b| b.status.as_ref())
             .and_then(|s| s.status.staged.as_ref())
             .and_then(|b| b.digest().map(str::to_string));
         let result = self.run_op(op, before.as_ref());
-        self.invalidate_status();
+        // the app's Status call right after needn't run bootc again
+        self.invalidate_status_with(result.as_ref().ok());
         // (the rollback operations record their own events)
         if !matches!(op, Op::Rollback | Op::CancelRollback) {
             self.record_outcome(op, staged_before.as_deref(), &result);
@@ -758,7 +784,7 @@ impl Core {
         result
     }
 
-    fn run_op(&self, op: &Op, before: Option<&Status>) -> Result<String, HelperError> {
+    fn run_op(&self, op: &Op, before: Option<&Before>) -> Result<String, HelperError> {
         // progress is reported for the two operations that download
         let progress = match op {
             Op::Upgrade => Some(self.progress.begin("upgrade")),
@@ -775,8 +801,9 @@ impl Core {
         &self,
         op: &Op,
         sink: Option<&ProgressSink>,
-        before: Option<&Status>,
+        before: Option<&Before>,
     ) -> Result<String, HelperError> {
+        let before_status = before.and_then(|b| b.status.as_ref());
         match op {
             Op::Status => {}
             // bootc refuses both on a system with local rpm-ostree changes;
@@ -793,20 +820,35 @@ impl Core {
             }
             Op::Upgrade => {
                 // stages only: never --apply (rpm-ostree: never --reboot)
-                if let Err(e) = self.bootc_progress(&["upgrade"], sink) {
-                    let Ok(Some(_)) = self.layered_origin() else {
+                // A system the read before shows with local changes goes to
+                // rpm-ostree at once, without bootc's refusal first.
+                let mut layered =
+                    before.is_some_and(|b| matches!(self.origin_of(&b.read), Ok(Some(_))));
+                if !layered && let Err(e) = self.bootc_progress(&["upgrade"], sink) {
+                    // asked again: the system may have been changed since
+                    if !matches!(self.layered_origin(), Ok(Some(_))) {
                         return Err(e);
-                    };
+                    }
+                    layered = true;
+                }
+                if layered {
                     self.rpm_ostree_progress(&["upgrade"], sink)?;
                     self.forget_update();
                 }
-                return self.refuse_downgrade(before, self.status_json()?);
+                return self.refuse_downgrade(before_status, self.status_json()?);
             }
             Op::Rollback | Op::CancelRollback => return self.toggle_rollback(op),
             Op::SwitchChannel(channel) => {
-                let json = self.bootc(&["status", "--json"])?;
+                let fresh;
+                let read = match before {
+                    Some(b) => &b.read,
+                    None => {
+                        fresh = self.read_state()?;
+                        &fresh
+                    }
+                };
                 // rebase keeps the local changes, which bootc can't switch
-                if let Some(origin) = self.origin_if_layered(&json)? {
+                if let Some(origin) = self.origin_of(read)? {
                     let mut target = layered::origin_with_channel(&origin, channel)
                         .map_err(HelperError::InvalidArgument)?;
                     // never record a weaker check than the policy makes
@@ -819,9 +861,9 @@ impl Core {
                     }
                     self.rpm_ostree_progress(&["rebase", &target], sink)?;
                     self.forget_update();
-                    return self.refuse_downgrade(before, self.status_json()?);
+                    return self.refuse_downgrade(before_status, self.status_json()?);
                 }
-                let current = Status::from_json(&json)
+                let current = Status::from_json(&read.bootc)
                     .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
                 let booted = current.booted_ref().ok_or_else(|| {
                     HelperError::Failed("bootc reports no booted image reference".into())
@@ -859,7 +901,7 @@ impl Core {
                 args.push(&new.image);
                 self.bootc_progress(&args, sink)?;
                 // the channel's tag, even the one followed now, may have gone back
-                return self.refuse_downgrade(before, self.status_json()?);
+                return self.refuse_downgrade(before_status, self.status_json()?);
             }
         }
         self.status_json()
@@ -993,15 +1035,22 @@ impl Core {
     /// Forget the cached status (an operation started or ended). Never waits
     /// for a running status.
     fn invalidate_status(&self) {
+        self.invalidate_status_with(None);
+    }
+
+    /// [`Core::invalidate_status`], sharing `json` as the cached status in
+    /// the same step: an operation's last read, made as it ended.
+    fn invalidate_status_with(&self, json: Option<&String>) {
         let mut st = lock(&self.status_cache.state);
-        st.entry = None;
+        st.entry = json.map(|j| (Instant::now(), Ok(j.clone())));
         st.generation += 1;
     }
 
     /// `bootc status --json`: one process at a time, its result (an error too)
     /// shared for 2 s. Callers that arrive meanwhile wait for it, up to
     /// [`MAX_STATUS_WAITERS`] (then `Busy`); the lock is not held while bootc
-    /// runs, and a changing operation drops the entry (`invalidate_status`).
+    /// runs, and a changing operation drops the entry (`invalidate_status`)
+    /// and shares the status it ended with (`invalidate_status_with`).
     /// Only the `Status` call goes through here: the reads an operation makes
     /// for itself (`status`, `status_json`) always run bootc.
     fn cached_status(&self) -> Result<String, HelperError> {
@@ -1078,34 +1127,51 @@ impl Core {
     /// what bootc leaves out filled in from rpm-ostree (see [`layered`]); if
     /// rpm-ostree can't be read there, bootc's status as it is.
     fn status_json(&self) -> Result<String, HelperError> {
-        let json = self.bootc(&["status", "--json"])?;
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
-            return Ok(json);
+        self.read_state().map(|r| r.json)
+    }
+
+    /// One read of bootc's status, and rpm-ostree's where it fills it in.
+    fn read_state(&self) -> Result<StateRead, HelperError> {
+        let bootc = self.bootc(&["status", "--json"])?;
+        let v = serde_json::from_str::<serde_json::Value>(&bootc).ok();
+        let layered = v.as_ref().is_some_and(layered::is_layered);
+        let rpm = layered
+            .then(|| self.rpm_ostree(&["status", "--json"]).ok())
+            .flatten();
+        let json = match (v, &rpm) {
+            (Some(v), Some(rpm)) => layered::fill(v, rpm, self.saved_update().as_ref())
+                .unwrap_or_else(|_| bootc.clone()),
+            _ => bootc.clone(),
         };
-        if !layered::is_layered(&v) {
-            return Ok(json);
-        }
-        let Ok(rpm) = self.rpm_ostree(&["status", "--json"]) else {
-            return Ok(json);
-        };
-        Ok(layered::fill(v, &rpm, self.saved_update().as_ref()).unwrap_or(json))
+        Ok(StateRead {
+            bootc,
+            layered,
+            rpm,
+            json,
+        })
     }
 
     /// The image rpm-ostree follows on a system with local rpm-ostree
     /// changes; `None` on one without, which bootc handles.
     fn layered_origin(&self) -> Result<Option<String>, HelperError> {
-        self.origin_if_layered(&self.bootc(&["status", "--json"])?)
+        self.origin_of(&self.read_state()?)
     }
 
-    /// [`Core::layered_origin`] from bootc's status `json`.
-    fn origin_if_layered(&self, json: &str) -> Result<Option<String>, HelperError> {
-        let v: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
-        if !layered::is_layered(&v) {
+    /// [`Core::layered_origin`] from a `read` already made (rpm-ostree is
+    /// asked again if it couldn't be read then).
+    fn origin_of(&self, read: &StateRead) -> Result<Option<String>, HelperError> {
+        if !read.layered {
             return Ok(None);
         }
-        let rpm = self.rpm_ostree(&["status", "--json"])?;
-        layered::followed_origin(&rpm)
+        let fresh;
+        let rpm = match &read.rpm {
+            Some(rpm) => rpm,
+            None => {
+                fresh = self.rpm_ostree(&["status", "--json"])?;
+                &fresh
+            }
+        };
+        layered::followed_origin(rpm)
             .map(Some)
             .map_err(HelperError::Failed)
     }
@@ -1444,11 +1510,8 @@ mod tests {
             .execute(&Op::Upgrade)
             .unwrap();
         let calls = l.calls();
-        // bootc's refusal is not a network error: one try
-        assert_eq!(
-            calls.iter().filter(|c| *c == &["bootc", "upgrade"]).count(),
-            1
-        );
+        // the read before shows the local changes: bootc isn't asked
+        assert!(!ran(&calls, &["bootc", "upgrade"]));
         assert_eq!(
             calls
                 .iter()
@@ -1987,8 +2050,10 @@ mod tests {
         assert_eq!(*r.0.lock().unwrap(), 1);
         // a changing operation drops the cache
         c.execute(&Op::Rollback).unwrap();
+        assert_eq!(*r.0.lock().unwrap(), 4); // queued check + rollback + its status
+        // and shares the status it ended with
         c.execute(&Op::Status).unwrap();
-        assert_eq!(*r.0.lock().unwrap(), 5); // queued check + rollback + its status + a fresh status
+        assert_eq!(*r.0.lock().unwrap(), 4);
     }
 
     #[test]
@@ -2627,6 +2692,61 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
                 .flatten()
                 .all(|a| !matches!(a.as_str(), "--apply" | "--reboot" | "-r"))
         );
+    }
+
+    #[test]
+    fn an_upgrade_or_switch_reads_the_status_once_before_and_once_after() {
+        let reads = |calls: &[Vec<String>], program: &str| {
+            calls
+                .iter()
+                .filter(|c| c[0] == program && c[1..] == ["status", "--json"])
+                .count()
+        };
+        for op in [Op::Upgrade, Op::SwitchChannel("testing".into())] {
+            let f = Layered::new();
+            Core::new(f.clone()).execute(&op).unwrap();
+            let calls = f.calls();
+            assert_eq!(reads(&calls, "bootc"), 2, "{op:?} {calls:?}");
+            assert_eq!(reads(&calls, "rpm-ostree"), 2, "{op:?} {calls:?}");
+            let f = Arc::new(Stager {
+                calls: Mutex::default(),
+                before: PLAIN.into(),
+                after: PLAIN.into(),
+                cleanup_fails: false,
+                before_fails: false,
+                flaky: 0,
+            });
+            Core::new(f.clone()).execute(&op).unwrap();
+            let calls = f.calls();
+            let bootc_reads = calls.iter().filter(|c| *c == &["status", "--json"]).count();
+            assert_eq!(bootc_reads, 2, "{op:?} {calls:?}");
+        }
+    }
+
+    #[test]
+    fn without_a_read_before_a_layered_upgrade_still_finds_rpm_ostree() {
+        // the read before fails; bootc's refusal sends it to rpm-ostree
+        struct FirstReadFails(Arc<Layered>, Mutex<bool>);
+        impl BootcRunner for FirstReadFails {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                if args == ["status", "--json"]
+                    && std::mem::replace(&mut *self.1.lock().unwrap(), false)
+                {
+                    return Err("busy".into());
+                }
+                self.0.run(args)
+            }
+            fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+                self.0.rpm_ostree(args)
+            }
+        }
+        let l = Layered::new();
+        Core::new(Arc::new(FirstReadFails(l.clone(), Mutex::new(true))))
+            .execute(&Op::Upgrade)
+            .unwrap();
+        let calls = l.calls();
+        assert!(ran(&calls, &["bootc", "upgrade"]));
+        assert!(ran(&calls, &["rpm-ostree", "upgrade"]));
     }
 
     #[test]
