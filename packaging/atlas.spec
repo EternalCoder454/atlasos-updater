@@ -117,8 +117,10 @@ export RUSTFLAGS="%{build_rustflags} -Ccodegen-units=4"
 export CARGO_PROFILE_RELEASE_STRIP=none
 export CARGO_PROFILE_RELEASE_LTO=false
 # Beside the app's build: the two don't share atlas-core (the app's has the
-# flatpak feature), and each leaves CPUs idle at times.
-cargo build --release -p atlas-core --bin atlas-system-helper &
+# flatpak feature), and each leaves CPUs idle at times. --locked: the root
+# helper is built from exactly the crates in Cargo.lock, never newer ones
+# (--without app drops the app from the workspace, which changes the lock).
+cargo build --release %{?with_app:--locked} -p atlas-core --bin atlas-system-helper &
 helper=$!
 %if %{with app}
 # (checked with rpmspec --eval: %%cmake honours _vpath_srcdir, not __cmake_source_dir)

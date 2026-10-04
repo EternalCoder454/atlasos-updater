@@ -20,9 +20,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::bootc::{Channel, Status};
+use crate::bootc::{Channel, Status, version_cmp};
 use crate::helper_client::{
-    NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED, STATE_UNREAD, STATE_UNREAD_CANCEL,
+    DOWNGRADE_REFUSED, NO_ROLLBACK_QUEUED, ROLLBACK_ALREADY_QUEUED, STATE_UNREAD,
+    STATE_UNREAD_CANCEL,
 };
 use crate::history;
 use crate::progress::{BootcParser, RpmOstreeParser};
@@ -485,21 +486,6 @@ struct BootInfo {
     image: Option<String>,
 }
 
-/// Compare numeric versions like `44.20261008` or `44.20261008-2` (the build
-/// number within the day); `None` if either has a non-numeric part.
-fn version_cmp(a: &str, b: &str) -> Option<Cmp> {
-    let parse = |v: &str| {
-        v.split(['.', '-'])
-            .map(|p| p.parse::<u64>().ok())
-            .collect::<Option<Vec<_>>>()
-    };
-    let (mut a, mut b) = (parse(a)?, parse(b)?);
-    let n = a.len().max(b.len());
-    a.resize(n, 0);
-    b.resize(n, 0);
-    Some(a.cmp(&b))
-}
-
 /// The five operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -543,6 +529,10 @@ pub struct Core {
     /// Where the last update check's result is kept on a system with local
     /// rpm-ostree changes (see [`layered`]); without it, it isn't kept.
     update_file: Option<PathBuf>,
+    /// The containers policy (`policy.json`); a channel switch enforces the
+    /// signatures it demands. Without it, the switch keeps the booted image's
+    /// signature setting.
+    policy: Option<PathBuf>,
     /// `bootc status` shared between callers; see [`Core::cached_status`].
     status_cache: StatusCache,
     /// The `Progress` property while an upgrade or switch runs.
@@ -595,6 +585,7 @@ impl Core {
             busy: AtomicBool::new(false),
             events: None,
             update_file: None,
+            policy: None,
             status_cache: StatusCache::default(),
             progress: ProgressCell::new(),
         }
@@ -615,6 +606,24 @@ impl Core {
     pub fn with_update_file(mut self, path: PathBuf) -> Self {
         self.update_file = Some(path);
         self
+    }
+
+    /// Read the containers policy from this file
+    /// ([`CONTAINERS_POLICY`](crate::bootc::CONTAINERS_POLICY)).
+    pub fn with_policy(mut self, path: PathBuf) -> Self {
+        self.policy = Some(path);
+        self
+    }
+
+    /// True when the containers policy demands a signature for the registry
+    /// image `image` (see [`crate::bootc::policy_requires_signature`]). False
+    /// when it can't be read.
+    fn policy_requires_signature(&self, image: &str) -> bool {
+        self.policy
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .is_some_and(|v| crate::bootc::policy_requires_signature(&v, image))
     }
 
     /// Also record update and rollback events to this file.
@@ -685,22 +694,26 @@ impl Core {
         }
         let _guard = BusyGuard(&self.busy);
         self.invalidate_status();
-        let before = (self.events.is_some() && *op == Op::Upgrade)
+        // What an upgrade or switch starts from: the staged digest for the
+        // event, and the booted and staged images it must not go back behind.
+        let before = matches!(op, Op::Upgrade | Op::SwitchChannel(_))
             // a direct read: the shared one may refuse under a status flood
             .then(|| Status::from_json(&self.status_json().ok()?).ok())
-            .flatten()
-            .and_then(|s| s.status.staged)
+            .flatten();
+        let staged_before = before
+            .as_ref()
+            .and_then(|s| s.status.staged.as_ref())
             .and_then(|b| b.digest().map(str::to_string));
-        let result = self.run_op(op);
+        let result = self.run_op(op, before.as_ref());
         self.invalidate_status();
         // (the rollback operations record their own events)
         if !matches!(op, Op::Rollback | Op::CancelRollback) {
-            self.record_outcome(op, before.as_deref(), &result);
+            self.record_outcome(op, staged_before.as_deref(), &result);
         }
         result
     }
 
-    fn run_op(&self, op: &Op) -> Result<String, HelperError> {
+    fn run_op(&self, op: &Op, before: Option<&Status>) -> Result<String, HelperError> {
         // progress is reported for the two operations that download
         let progress = match op {
             Op::Upgrade => Some(self.progress.begin("upgrade")),
@@ -708,12 +721,17 @@ impl Core {
             _ => None,
         };
         let sink = progress.as_ref().map(|(s, _)| s.clone());
-        let result = self.run_op_with(op, sink.as_ref());
+        let result = self.run_op_with(op, sink.as_ref(), before);
         drop(progress); // clears the property
         result
     }
 
-    fn run_op_with(&self, op: &Op, sink: Option<&ProgressSink>) -> Result<String, HelperError> {
+    fn run_op_with(
+        &self,
+        op: &Op,
+        sink: Option<&ProgressSink>,
+        before: Option<&Status>,
+    ) -> Result<String, HelperError> {
         match op {
             Op::Status => {}
             // bootc refuses both on a system with local rpm-ostree changes;
@@ -737,17 +755,26 @@ impl Core {
                     self.rpm_ostree_progress(&["upgrade"], sink)?;
                     self.forget_update();
                 }
+                return self.refuse_downgrade(before, self.status_json()?);
             }
             Op::Rollback | Op::CancelRollback => return self.toggle_rollback(op),
             Op::SwitchChannel(channel) => {
                 let json = self.bootc(&["status", "--json"])?;
                 // rebase keeps the local changes, which bootc can't switch
                 if let Some(origin) = self.origin_if_layered(&json)? {
-                    let target = layered::origin_with_channel(&origin, channel)
+                    let mut target = layered::origin_with_channel(&origin, channel)
                         .map_err(HelperError::InvalidArgument)?;
+                    // never record a weaker check than the policy makes
+                    if let Some(image) = target
+                        .strip_prefix("ostree-unverified-registry:")
+                        .or_else(|| target.strip_prefix("ostree-unverified-image:docker://"))
+                        && self.policy_requires_signature(image)
+                    {
+                        target = format!("ostree-image-signed:docker://{image}");
+                    }
                     self.rpm_ostree_progress(&["rebase", &target], sink)?;
                     self.forget_update();
-                    return self.status_json();
+                    return self.refuse_downgrade(before, self.status_json()?);
                 }
                 let current = Status::from_json(&json)
                     .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
@@ -758,7 +785,21 @@ impl Core {
                     .with_channel(channel)
                     .map_err(|e| HelperError::InvalidArgument(e.to_string()))?;
                 let mut args = vec!["switch", "--transport", new.transport_or_default()];
+                // An unverified origin is upgraded to a checked one where the
+                // policy demands a signature anyway (as the stager does), so
+                // the switch never records a weaker check than the pulls get.
+                let unverified = match new.signature.as_ref() {
+                    None => true,
+                    Some(serde_json::Value::String(s)) => s == "insecure",
+                    Some(_) => false,
+                };
                 match new.signature.as_ref() {
+                    _ if unverified
+                        && new.transport_or_default() == "registry"
+                        && self.policy_requires_signature(&new.image) =>
+                    {
+                        args.push("--enforce-container-sigpolicy");
+                    }
                     None => {}
                     Some(serde_json::Value::String(s)) if s == "insecure" => {}
                     Some(serde_json::Value::String(s)) if s == "containerPolicy" => {
@@ -772,9 +813,64 @@ impl Core {
                 }
                 args.push(&new.image);
                 self.bootc_progress(&args, sink)?;
+                // the channel's tag, even the one followed now, may have gone back
+                return self.refuse_downgrade(before, self.status_json()?);
             }
         }
         self.status_json()
+    }
+
+    /// After an upgrade or switch: if what is staged now is older than the
+    /// image booted or staged before (a tag moved back, see
+    /// [`Status::is_downgrade`]), take it out again with `rpm-ostree cleanup
+    /// -p` and fail. `json` is the status after it; `before` the one from
+    /// before. Without `before`, the booted image (which an upgrade doesn't
+    /// change) is compared from `json` alone.
+    fn refuse_downgrade(
+        &self,
+        before: Option<&Status>,
+        json: String,
+    ) -> Result<String, HelperError> {
+        let Ok(after) = Status::from_json(&json) else {
+            return Ok(json);
+        };
+        let before = before.unwrap_or(&after);
+        let Some(staged) = after
+            .status
+            .staged
+            .as_ref()
+            .and_then(|e| e.image.as_ref())
+            .filter(|i| before.is_downgrade(i))
+        else {
+            return Ok(json);
+        };
+        let installed = before
+            .status
+            .booted
+            .as_ref()
+            .and_then(|b| b.version())
+            .unwrap_or("unknown");
+        let found = staged.version.as_deref().unwrap_or(&staged.image_digest);
+        let mut msg = format!("{DOWNGRADE_REFUSED} (found {found}, installed {installed})");
+        // `cleanup -p` takes out what was staged before too (an update or a
+        // switch to the other channel): it was replaced by the old image.
+        if before
+            .status
+            .staged
+            .as_ref()
+            .and_then(|e| e.digest())
+            .is_some_and(|d| d != staged.image_digest)
+        {
+            msg.push_str(" What was set to install at the next restart before was removed too; check for updates again.");
+        }
+        // (recorded as failed by `execute`, with this message)
+        match self.rpm_ostree(&["cleanup", "-p"]) {
+            Ok(_) => Err(HelperError::Failed(msg)),
+            Err(e) => Err(HelperError::Failed(format!(
+                "{msg} Removing it failed, so it is still set to install at the next restart: {}",
+                tail(&e.to_string(), 300)
+            ))),
+        }
     }
 
     /// `bootc rollback` toggles: with one queued, a second call cancels it. So
@@ -1171,6 +1267,7 @@ mod tests {
             vec!["status", "--json"],
             vec!["upgrade", "--check"],
             vec!["status", "--json"],
+            vec!["status", "--json"], // what the upgrade must not go back behind
             vec!["upgrade"],
             vec!["status", "--json"],
             vec!["status", "--json"], // the rollback-queued check
@@ -1185,16 +1282,23 @@ mod tests {
         );
     }
 
+    /// The `bootc switch` among `calls` (status reads come before and after).
+    fn switch_call(calls: &[Vec<String>]) -> Vec<String> {
+        calls
+            .iter()
+            .find(|c| c[0] == "switch")
+            .cloned()
+            .unwrap_or_default()
+    }
+
     #[test]
     fn switch_rewrites_only_the_tag_of_the_booted_ref() {
         let f = Fake::new(BOOTED_WITH_UPDATE); // booted :stable
         core(&f)
             .execute(&Op::SwitchChannel("testing".into()))
             .unwrap();
-        let calls = f.calls();
-        assert_eq!(calls[0], ["status", "--json"]);
         assert_eq!(
-            calls[1],
+            switch_call(&f.calls()),
             [
                 "switch",
                 "--transport",
@@ -1236,7 +1340,7 @@ mod tests {
             .execute(&Op::SwitchChannel("stable".into()))
             .unwrap();
         assert_eq!(
-            f.calls()[1],
+            switch_call(&f.calls()),
             ["switch", "--transport", "oci", "/var/img/atlasos:stable"]
         );
     }
@@ -1794,22 +1898,25 @@ mod tests {
         core(&f)
             .execute(&Op::SwitchChannel("testing".into()))
             .unwrap();
-        assert!(f.calls()[1].contains(&"--enforce-container-sigpolicy".to_string()));
+        assert!(switch_call(&f.calls()).contains(&"--enforce-container-sigpolicy".to_string()));
         assert_eq!(
-            f.calls()[1].last().unwrap(),
+            switch_call(&f.calls()).last().unwrap(),
             "ghcr.io/eternalcoder454/atlasos:testing"
         );
         let f = Fake::new(&signed("\"insecure\""));
         core(&f)
             .execute(&Op::SwitchChannel("testing".into()))
             .unwrap();
-        assert!(!f.calls()[1].contains(&"--enforce-container-sigpolicy".to_string()));
+        assert!(!switch_call(&f.calls()).contains(&"--enforce-container-sigpolicy".to_string()));
         let f = Fake::new(&signed("{\"ostreeRemoteSignature\": \"fedora\"}"));
         assert!(matches!(
             core(&f).execute(&Op::SwitchChannel("testing".into())),
             Err(HelperError::Failed(_))
         ));
-        assert_eq!(f.calls().len(), 1, "refused before switching");
+        assert!(
+            f.calls().iter().all(|c| c[0] == "status"),
+            "refused before switching"
+        );
     }
 
     #[test]
@@ -2353,5 +2460,276 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             Err(HelperError::Failed(m)) => assert_eq!(m, "boom"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The plain fixture (booted 44.20261001 on :testing) with `staged` set
+    /// to an image of :testing with this version, build time and digest.
+    fn plain_with_staged(version: &str, time: &str, digest: &str) -> String {
+        let staged = format!(
+            r#""staged": {{"image": {{"image": {{"image": "ghcr.io/eternalcoder454/atlasos:testing",
+                "transport": "registry"}}, "version": "{version}", "timestamp": "{time}",
+                "imageDigest": "{digest}"}}, "incompatible": false, "pinned": false}},"#
+        );
+        PLAIN.replacen("\"staged\": null,", &staged, 1)
+    }
+
+    /// bootc as `Fake`, but with `rpm-ostree` (for `cleanup -p`) and a status
+    /// that changes after `upgrade` or `switch`; with `before_fails`, the
+    /// status can't be read before.
+    struct Stager {
+        calls: Mutex<Vec<Vec<String>>>,
+        before: String,
+        after: String,
+        cleanup_fails: bool,
+        before_fails: bool,
+    }
+
+    impl Stager {
+        fn new(after: String, cleanup_fails: bool) -> Arc<Stager> {
+            Arc::new(Stager {
+                calls: Mutex::default(),
+                before: PLAIN.into(),
+                after,
+                cleanup_fails,
+                before_fails: false,
+            })
+        }
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl BootcRunner for Stager {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            let upgraded = calls.iter().any(|c| c[0] == "upgrade" || c[0] == "switch");
+            let cleaned = calls.iter().any(|c| c == &["rpm-ostree", "cleanup", "-p"]);
+            Ok(match (args, upgraded && !cleaned) {
+                (["status", "--json"], true) => self.after.clone(),
+                (["status", "--json"], false) if self.before_fails => {
+                    return Err("bootc status timed out".into());
+                }
+                (["status", "--json"], false) => self.before.clone(),
+                _ => String::new(),
+            })
+        }
+        fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+            let mut call = vec!["rpm-ostree".to_string()];
+            call.extend(args.iter().map(|s| s.to_string()));
+            self.calls.lock().unwrap().push(call);
+            if self.cleanup_fails {
+                Err("rpm-ostreed is not running".into())
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    #[test]
+    fn an_older_image_staged_by_upgrade_is_taken_out_and_refused() {
+        let d = tempfile::tempdir().unwrap();
+        // the tag went back to a build older than the booted 44.20261001
+        let f = Stager::new(
+            plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            false,
+        );
+        let c = Core::new(f.clone()).with_events(d.path().join("events.jsonl"));
+        match c.execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(
+                    m.contains("44.20260920") && m.contains("44.20261001"),
+                    "{m}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(ran(&f.calls(), &["rpm-ostree", "cleanup", "-p"]));
+        assert_eq!(names(&d), ["update-failed"]);
+        assert!(!c.is_busy());
+    }
+
+    #[test]
+    fn a_failed_removal_says_the_old_image_is_still_staged() {
+        let f = Stager::new(
+            plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            true,
+        );
+        match Core::new(f).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED) && m.contains("still set to install"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_the_status_before_the_booted_image_is_compared() {
+        let f = Arc::new(Stager {
+            calls: Mutex::default(),
+            before: PLAIN.into(),
+            after: plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            cleanup_fails: false,
+            before_fails: true,
+        });
+        match Core::new(f.clone()).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(ran(&f.calls(), &["rpm-ostree", "cleanup", "-p"]));
+    }
+
+    #[test]
+    fn the_refusal_says_what_was_staged_before_is_gone_too() {
+        let f = Arc::new(Stager {
+            calls: Mutex::default(),
+            before: plain_with_staged("44.20261005", "2026-10-05T04:00:00Z", "sha256:s"),
+            after: plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            cleanup_fails: true,
+            before_fails: false,
+        });
+        match Core::new(f).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.contains("was removed too") && m.contains("still set to install"));
+                // (the fake's cleanup error is short; `tail` keeps it whole)
+                assert!(m.ends_with("rpm-ostreed is not running"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_switch_to_the_followed_channel_cannot_go_back_either() {
+        let d = tempfile::tempdir().unwrap();
+        // booted :testing 44.20261001; the testing tag went back
+        let f = Stager::new(
+            plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            false,
+        );
+        let c = Core::new(f.clone()).with_events(d.path().join("events.jsonl"));
+        match c.execute(&Op::SwitchChannel("testing".into())) {
+            Err(HelperError::Failed(m)) => assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(ran(&f.calls(), &["rpm-ostree", "cleanup", "-p"]));
+        assert_eq!(names(&d), ["channel-switch-failed"]);
+        // a newer build stays
+        let after = plain_with_staged("44.20261008", "2026-10-08T04:00:00Z", "sha256:new");
+        let f = Stager::new(after.clone(), false);
+        let got = Core::new(f).execute(&Op::SwitchChannel("testing".into()));
+        assert_eq!(got.unwrap(), after);
+    }
+
+    #[test]
+    fn a_newer_or_incomparable_image_stays_staged() {
+        for after in [
+            plain_with_staged("44.20261008", "2026-10-08T04:00:00Z", "sha256:new"),
+            // a rebuild of the same version
+            plain_with_staged("44.20261001", "2026-10-01T04:12:09Z", "sha256:re"),
+            // no version label and no build time: nothing to go on
+            plain_with_staged("x", "", "sha256:odd"),
+        ] {
+            let f = Stager::new(after.clone(), false);
+            assert_eq!(Core::new(f.clone()).execute(&Op::Upgrade).unwrap(), after);
+            assert!(!f.calls().iter().any(|c| c[0] == "rpm-ostree"));
+        }
+        // without a version label, by build time
+        let f = Stager::new(
+            plain_with_staged("x", "2026-09-01T00:00:00Z", "sha256:old"),
+            false,
+        );
+        assert!(Core::new(f).execute(&Op::Upgrade).is_err());
+    }
+
+    #[test]
+    fn a_staged_switch_to_the_other_channel_is_not_a_downgrade() {
+        // booted :testing 44.20261001; a stable build from before is staged
+        // by a channel switch, then upgraded to a newer stable build
+        let stable = |v: &str, t: &str, d: &str| {
+            plain_with_staged(v, t, d).replacen(
+                "\"image\": \"ghcr.io/eternalcoder454/atlasos:testing\",\n                \"transport\"",
+                "\"image\": \"ghcr.io/eternalcoder454/atlasos:stable\",\n                \"transport\"",
+                1,
+            )
+        };
+        let after = stable("44.20260925", "2026-09-25T04:00:00Z", "sha256:s2");
+        assert!(after.contains("atlasos:stable"));
+        let f = Stager::new(after.clone(), false);
+        assert_eq!(Core::new(f).execute(&Op::Upgrade).unwrap(), after);
+    }
+
+    const POLICY: &str = r#"{"default": [{"type": "reject"}],
+        "transports": {"docker": {"": [{"type": "insecureAcceptAnything"}],
+            "ghcr.io/eternalcoder454/atlasos": [{"type": "sigstoreSigned",
+                "keyPaths": ["/etc/pki/containers/atlasos.pub"],
+                "signedIdentity": {"type": "matchRepository"}}]}}}"#;
+
+    fn with_policy(c: Core, d: &tempfile::TempDir, policy: &str) -> Core {
+        let p = d.path().join("policy.json");
+        std::fs::write(&p, policy).unwrap();
+        c.with_policy(p)
+    }
+
+    #[test]
+    fn a_switch_enforces_the_signature_the_policy_demands() {
+        let d = tempfile::tempdir().unwrap();
+        // unverified (no signature setting) and "insecure" both get enforced
+        for json in [BOOTED_WITH_UPDATE.to_string(), signed("\"insecure\"")] {
+            let f = Fake::new(&json);
+            with_policy(core(&f), &d, POLICY)
+                .execute(&Op::SwitchChannel("testing".into()))
+                .unwrap();
+            assert_eq!(
+                switch_call(&f.calls()),
+                [
+                    "switch",
+                    "--transport",
+                    "registry",
+                    "--enforce-container-sigpolicy",
+                    "ghcr.io/eternalcoder454/atlasos:testing"
+                ]
+            );
+        }
+        // a policy that accepts anything by default, or none: as before
+        for policy in [
+            POLICY.replace(
+                r#"[{"type": "reject"}]"#,
+                r#"[{"type": "insecureAcceptAnything"}]"#,
+            ),
+            "not json".to_string(),
+        ] {
+            let f = Fake::new(BOOTED_WITH_UPDATE);
+            with_policy(core(&f), &d, &policy)
+                .execute(&Op::SwitchChannel("testing".into()))
+                .unwrap();
+            assert!(
+                !switch_call(&f.calls()).contains(&"--enforce-container-sigpolicy".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn a_layered_switch_records_the_signature_check_too() {
+        let d = tempfile::tempdir().unwrap();
+        let rpm = include_str!("../../tests/fixtures/rpm-ostree-layered.json").replace(
+            "ostree-unverified-image:oci:/var/mnt/atlasreg/registry:stable",
+            "ostree-unverified-registry:ghcr.io/eternalcoder454/atlasos:stable",
+        );
+        let f = Arc::new(Layered {
+            calls: Mutex::default(),
+            rpm_ostree_status: Ok(rpm),
+        });
+        with_policy(Core::new(f.clone()), &d, POLICY)
+            .execute(&Op::SwitchChannel("testing".into()))
+            .unwrap();
+        assert!(ran(
+            &f.calls(),
+            &[
+                "rpm-ostree",
+                "rebase",
+                "ostree-image-signed:docker://ghcr.io/eternalcoder454/atlasos:testing"
+            ]
+        ));
     }
 }

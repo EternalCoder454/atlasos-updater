@@ -48,14 +48,15 @@ without calls.
 |---|---|---|---|---|
 | `Status()` | `s` JSON | `bootc status --json` | `net.eterneon.atlas.system.status` | yes (any) |
 | `CheckForUpdate()` | `s` JSON | `bootc upgrade --check`, then `bootc status --json` | `net.eterneon.atlas.system.check` | yes (active) |
-| `Upgrade()` | `s` JSON | `bootc upgrade` (stages only; never `--apply`) | `net.eterneon.atlas.system.upgrade` | auth_admin_keep; wheel: yes (rules.d) |
+| `Upgrade()` | `s` JSON | `bootc upgrade` (stages only; never `--apply`); refuses a downgrade (below) | `net.eterneon.atlas.system.upgrade` | auth_admin_keep; wheel: yes (rules.d) |
 | `Rollback()` | `s` JSON | `bootc rollback` | `net.eterneon.atlas.system.rollback` | auth_admin_keep |
-| `SwitchChannel(s channel)` | `s` JSON | `bootc switch <ref with tag = channel>` | `net.eterneon.atlas.system.switch-channel` | auth_admin_keep |
+| `CancelRollback()` | `s` JSON | `bootc rollback` again, only while one is queued | `net.eterneon.atlas.system.rollback` | auth_admin_keep |
+| `SwitchChannel(s channel)` | `s` JSON | `bootc switch <ref with tag = channel>`; refuses a downgrade (below) | `net.eterneon.atlas.system.switch-channel` | auth_admin_keep |
 
 The returned JSON string is `bootc status --json` after the action.
 
 Rules:
-- **Only these five methods.** No method takes a command, path, image ref or
+- **Only these six methods.** No method takes a command, path, image ref or
   argument list. `channel` must be exactly `stable` or `testing`. The new ref
   is the booted image's own ref with only the tag replaced
   (`ghcr.io/eternalcoder454/atlasos:stable` → `:testing`; an `oci:` or
@@ -83,8 +84,40 @@ Rules:
   60 min upgrade/rollback/switch) and 4 MiB output caps.
 - D-Bus policy: anyone may call the interface (polkit decides). Only root may own the name.
 
+**Downgrades.** Signatures prove who built an image, not that it is the
+newest: a tag moved back to an older signed build (with its old security
+holes) would install like an update. So an image older than the booted or
+the staged image of the same reference (and not that image itself) is not
+an update (`Status::is_downgrade`; `ImageStatus::is_older_than`: the version labels,
+compared as numbers, or the build times say it is older and neither says
+the opposite; nothing comparable means not older). `available_update`
+leaves it out, so the app never offers it; `Upgrade` and `SwitchChannel`
+(a switch to the followed channel pulls its tag too) check what they staged
+against the status from before (or, if that couldn't be read, the booted
+image after) and, for a downgrade, remove it again with `rpm-ostree cleanup
+-p` and fail with `helper_client::DOWNGRADE_REFUSED` and the two versions
+(recorded as `update-failed` / `channel-switch-failed`). That also removes
+what was staged before (it was replaced), and the message says so. The
+background stager skips it the same way (AtlasOS side), asking the registry
+with skopeo when the image ref points at no deployment (as after such a
+removal), and skipping the run if it can't. Go Back and a switch to the
+other channel remain the ways to an older build; an image of another
+reference is never compared.
+
+**Signatures on a switch.** `SwitchChannel` keeps the booted image's
+signature setting (`containerPolicy` → `--enforce-container-sigpolicy`; an
+other one it can't carry is refused). An unverified one (none, or
+`insecure`) becomes `--enforce-container-sigpolicy` when
+`/etc/containers/policy.json` demands a signature (`signedBy` or
+`sigstoreSigned`) for the new image under its most specific matching scope
+and its `default` does not accept anything (`bootc::policy_requires_signature`);
+on a system with local rpm-ostree changes the rebase target becomes
+`ostree-image-signed:docker://…` the same way. Every pull is checked under
+that policy anyway; recording it in the origin keeps `bootc status` honest
+and saves the stager a second deployment to record it.
+
 **Progress.** The interface has one read-only property, `Progress` (`s`, not a
-method, so the five-method rule stands): while `Upgrade` or `SwitchChannel`
+method, so the six-method rule stands): while `Upgrade` or `SwitchChannel`
 runs, the JSON of `atlas_core::progress::Progress`, otherwise `""`.
 
 ```json
@@ -233,7 +266,9 @@ Screens:
   `44.YYYYMMDD-N` (N: the build's number that day; older ones are plain
   `44.YYYYMMDD`). The image label `org.opencontainers.image.version` = the
   version, which `bootc status` shows.
-- Ships `atlasos-update-stage.timer`, autostarts `atlas-updater --tray`,
+- Ships `atlasos-update-stage.timer`, whose condition skips the newest image
+  when it is the rollback image, a bad image or a downgrade (as above), and
+  autostarts `atlas-updater --tray`,
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.
 

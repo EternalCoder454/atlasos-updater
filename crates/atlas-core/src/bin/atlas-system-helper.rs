@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use atlas_core::helper::service::{IDLE_TIMEOUT, Service, serve};
 use atlas_core::helper::{Core, SystemBootc, events, layered};
-use atlas_core::history;
+use atlas_core::{bootc, history};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -51,7 +51,8 @@ async fn main() -> ExitCode {
             };
             let core = Core::new(Arc::new(SystemBootc))
                 .with_events(events::DEFAULT_PATH.into())
-                .with_update_file(layered::UPDATE_FILE.into());
+                .with_update_file(layered::UPDATE_FILE.into())
+                .with_policy(bootc::CONTAINERS_POLICY.into());
             let service = Service::from_core(core);
             match serve(builder, service, IDLE_TIMEOUT).await {
                 Ok(()) => ExitCode::SUCCESS,

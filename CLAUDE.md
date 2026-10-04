@@ -20,7 +20,7 @@ together with the code that implements the change.
   host.** Unit-test the logic (argument validation, ref/tag rewriting, JSON
   parsing, history) with fixtures. The helper's D-Bus and polkit paths are
   tested in the VM.
-- The system helper accepts only the five methods in DESIGN.md. Never add a
+- The system helper accepts only the six methods in DESIGN.md. Never add a
   method that takes a command, path, image ref or argv.
 - Commit only the paths you own (`git commit -- <paths>`). Other agents may be
   committing in this repo at the same time; retry if `index.lock` exists.

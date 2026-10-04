@@ -177,6 +177,52 @@ pub struct ImageStatus {
     pub image_digest: String,
 }
 
+impl ImageStatus {
+    /// True when this image was built before `other`: of the version labels
+    /// (when both are numeric, `44.20261008-2`) and the build times (RFC 3339
+    /// UTC, to the second), one says so and neither says the opposite. A replayed older
+    /// build is older by both; images whose two disagree (test images with
+    /// made-up versions), or that can't be compared at all, are not held back.
+    pub fn is_older_than(&self, other: &ImageStatus) -> bool {
+        let by_version = self
+            .version
+            .as_deref()
+            .zip(other.version.as_deref())
+            .and_then(|(a, b)| version_cmp(a, b));
+        let by_time = (|| {
+            let a = self.timestamp.as_deref().and_then(utc_second)?;
+            let b = other.timestamp.as_deref().and_then(utc_second)?;
+            Some(a.cmp(b))
+        })();
+        let signals = [by_version, by_time];
+        signals.contains(&Some(std::cmp::Ordering::Less))
+            && !signals.contains(&Some(std::cmp::Ordering::Greater))
+    }
+}
+
+/// Compare numeric versions like `44.20261008` or `44.20261008-2` (the build
+/// number within the day); `None` if either has a non-numeric part.
+pub fn version_cmp(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parse = |v: &str| {
+        v.split(['.', '-'])
+            .map(|p| p.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    let (mut a, mut b) = (parse(a)?, parse(b)?);
+    let n = a.len().max(b.len());
+    a.resize(n, 0);
+    b.resize(n, 0);
+    Some(a.cmp(&b))
+}
+
+/// An RFC 3339 time in UTC to the second (`2026-10-02T18:54:39`), which
+/// orders as text; `None` for any other form.
+pub(crate) fn utc_second(t: &str) -> Option<&str> {
+    let s = t.get(..19)?;
+    let b = s.as_bytes();
+    (t.ends_with('Z') && b[4] == b'-' && b[10] == b'T' && b[13] == b':').then_some(s)
+}
+
 /// A container image reference: a name (with tag) plus a transport.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ImageReference {
@@ -302,6 +348,50 @@ impl ImageReference {
     }
 }
 
+/// The system's containers policy (containers-policy.json(5)).
+pub const CONTAINERS_POLICY: &str = "/etc/containers/policy.json";
+
+/// True when the containers `policy` (the parsed policy.json) demands a
+/// signature (`signedBy` or `sigstoreSigned`) for the registry image `image`,
+/// under the most specific scope that matches it (the reference, the
+/// repository, each namespace, the host, `*.domain` wildcards, then the
+/// transport's `""`), and its `default` does not accept anything (bootc
+/// refuses `--enforce-container-sigpolicy` under such a default). Then a
+/// switch to `image` can record the signature check in the origin at no
+/// cost: every pull of it is checked anyway.
+pub fn policy_requires_signature(policy: &serde_json::Value, image: &str) -> bool {
+    let first_type = |reqs: &serde_json::Value| reqs[0]["type"].as_str().map(str::to_string);
+    if first_type(&policy["default"]).is_none_or(|t| t == "insecureAcceptAnything") {
+        return false;
+    }
+    let scopes = &policy["transports"]["docker"];
+    let name = split_tag(image).0;
+    let mut candidates = vec![image.to_string(), name.to_string()];
+    let mut ns = name;
+    while let Some(i) = ns.rfind('/') {
+        ns = &ns[..i];
+        candidates.push(ns.to_string());
+    }
+    // `*.example.com` matches any host under example.com
+    // (the port is not part of a wildcard's match)
+    let host = name.split('/').next().unwrap_or("");
+    let mut domain = host.split(':').next().unwrap_or(host);
+    while let Some(i) = domain.find('.') {
+        domain = &domain[i + 1..];
+        candidates.push(format!("*.{domain}"));
+    }
+    candidates.push(String::new());
+    candidates
+        .iter()
+        .find_map(|c| scopes.get(c.as_str()).filter(|r| r.is_array()))
+        .unwrap_or(&policy["default"])
+        .as_array()
+        .is_some_and(|rs| {
+            rs.iter()
+                .any(|r| matches!(r["type"].as_str(), Some("signedBy" | "sigstoreSigned")))
+        })
+}
+
 /// Split `name:tag` where the tag is the part after a colon that follows the
 /// last `/` (so `host:5000/img` has no tag). A `@digest` suffix is not a tag.
 fn split_tag(image: &str) -> (&str, Option<&str>) {
@@ -381,14 +471,39 @@ impl Status {
     /// [`Status::latest_image`] when it is neither the booted nor the staged
     /// image: an update `upgrade --check` found that is not staged yet. It can
     /// be the rollback image (the version the user went back from).
+    /// An image older than the booted or staged one is not an update (see
+    /// [`Status::is_downgrade`]).
     pub fn available_update(&self) -> Option<&ImageStatus> {
         let latest = self.latest_image()?;
         let d = latest.image_digest.as_str();
         let is = |e: Option<&BootEntry>| e.and_then(BootEntry::digest) == Some(d);
-        if d.is_empty() || is(self.status.booted.as_ref()) || is(self.status.staged.as_ref()) {
+        if d.is_empty()
+            || is(self.status.booted.as_ref())
+            || is(self.status.staged.as_ref())
+            || self.is_downgrade(latest)
+        {
             return None;
         }
         Some(latest)
+    }
+
+    /// True when `candidate` is older than the booted or the staged image of
+    /// the same reference: a tag moved back to an older build (signatures
+    /// prove who built an image, not that it is the newest). Such an image is
+    /// never offered or staged as an update; Go Back and a channel switch are
+    /// the ways to an older build. Images of another reference (the other
+    /// channel, with a switch staged) don't count, nor does the booted or
+    /// staged image itself (its build times can be read from two places).
+    pub fn is_downgrade(&self, candidate: &ImageStatus) -> bool {
+        [self.status.booted.as_ref(), self.status.staged.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.image.as_ref())
+            .any(|i| {
+                i.image.same_image(&candidate.image)
+                    && i.image_digest != candidate.image_digest
+                    && candidate.is_older_than(i)
+            })
     }
 
     /// True when `digest` failed its boot health checks on this machine.
@@ -737,6 +852,131 @@ mod tests {
         assert!(matches!(
             r("x:stable", Some("--apply")).with_channel("stable"),
             Err(RefError::BadTransport(_))
+        ));
+    }
+
+    fn image(version: Option<&str>, time: Option<&str>) -> ImageStatus {
+        ImageStatus {
+            image: r("ghcr.io/e/atlasos:stable", Some("registry")),
+            version: version.map(Into::into),
+            timestamp: time.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn older_by_version_then_by_build_time() {
+        let a = image(Some("44.20261001"), Some("2026-10-05T00:00:00Z"));
+        let b = image(Some("44.20261002"), Some("2026-10-01T00:00:00Z"));
+        // the version and the build time disagree: neither is held back
+        assert!(!a.is_older_than(&b) && !b.is_older_than(&a));
+        let a = image(Some("44.20261001"), Some("2026-09-30T00:00:00Z"));
+        assert!(a.is_older_than(&b) && !b.is_older_than(&a));
+        // one signal alone is enough
+        let a = image(Some("44.20261001"), None);
+        assert!(a.is_older_than(&b));
+        let a = image(Some("44.x"), Some("2026-10-01T00:00:00.5Z"));
+        let b = image(Some("44.20261002"), Some("2026-10-02T00:00:00Z"));
+        assert!(a.is_older_than(&b) && !b.is_older_than(&a));
+        // nothing comparable: not older
+        let a = image(None, Some("yesterday"));
+        let b = image(None, Some("2026-10-02T00:00:00Z"));
+        assert!(!a.is_older_than(&b) && !b.is_older_than(&a));
+        assert!(!a.is_older_than(&a));
+    }
+
+    #[test]
+    fn an_older_image_on_the_tag_is_not_an_update() {
+        // the registry's :stable went back from booted 44.24 to 44.20
+        let s = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", Some(("44.20", "sha256:old"))),
+            "null",
+            &["c-i"],
+        );
+        assert_eq!(latest(&s), Some("sha256:old"));
+        assert!(s.is_downgrade(s.latest_image().unwrap()));
+        assert_eq!(available(&s), None);
+        // nor older than a staged one
+        let s = host(
+            &entry("44.25", "sha256:s", "c-s", Some(("44.24", "sha256:mid"))),
+            &entry("44.23", "sha256:i", "c-i", None),
+            "null",
+            &["c-s"],
+        );
+        assert_eq!(available(&s), None);
+    }
+
+    #[test]
+    fn an_image_of_another_reference_is_not_compared() {
+        let s = host(
+            "null",
+            &entry("44.24", "sha256:i", "c-i", None),
+            "null",
+            &[],
+        );
+        let mut other = image(Some("44.01"), None);
+        other.image = r("ghcr.io/e/atlasos:testing", Some("registry"));
+        assert!(!s.is_downgrade(&other));
+        other.image = r("ghcr.io/e/atlasos:stable", None); // registry by default
+        assert!(s.is_downgrade(&other));
+        // the booted image itself, whatever its times say
+        other.image_digest = "sha256:i".into();
+        assert!(!s.is_downgrade(&other));
+    }
+
+    fn policy(scopes: &str, default: &str) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{"default": [{{"type": "{default}"}}], "transports": {{"docker": {{{scopes}}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    const SIGNED: &str = r#"[{"type": "sigstoreSigned", "keyPaths": ["/k.pub"]}]"#;
+    const ANY: &str = r#"[{"type": "insecureAcceptAnything"}]"#;
+
+    #[test]
+    fn the_policy_scope_that_matches_best_decides() {
+        let p = policy(
+            &format!(r#""": {ANY}, "ghcr.io/e/atlasos": {SIGNED}"#),
+            "reject",
+        );
+        assert!(policy_requires_signature(&p, "ghcr.io/e/atlasos:stable"));
+        assert!(policy_requires_signature(&p, "ghcr.io/e/atlasos:testing"));
+        assert!(!policy_requires_signature(
+            &p,
+            "ghcr.io/e/atlasos-other:stable"
+        ));
+        assert!(!policy_requires_signature(&p, "quay.io/x/y:1"));
+        // a more specific scope wins over a namespace, host or wildcard
+        let p = policy(
+            &format!(
+                r#""ghcr.io/e": {SIGNED}, "ghcr.io/e/open": {ANY}, "*.example.com": {SIGNED}"#
+            ),
+            "reject",
+        );
+        assert!(policy_requires_signature(&p, "ghcr.io/e/atlasos:stable"));
+        assert!(!policy_requires_signature(&p, "ghcr.io/e/open:stable"));
+        assert!(policy_requires_signature(&p, "reg.example.com/a:b"));
+        assert!(policy_requires_signature(&p, "reg.example.com:5000/a:b"));
+        // no scope: the transport's "", then the default
+        let p = policy(
+            r#""ghcr.io/e/open": [{"type": "insecureAcceptAnything"}]"#,
+            "reject",
+        );
+        assert!(!policy_requires_signature(&p, "ghcr.io/x:y"));
+    }
+
+    #[test]
+    fn a_default_that_accepts_anything_never_enforces() {
+        let p = policy(
+            &format!(r#""ghcr.io/e/atlasos": {SIGNED}"#),
+            "insecureAcceptAnything",
+        );
+        assert!(!policy_requires_signature(&p, "ghcr.io/e/atlasos:stable"));
+        assert!(!policy_requires_signature(
+            &serde_json::json!({}),
+            "ghcr.io/e/atlasos:stable"
         ));
     }
 }

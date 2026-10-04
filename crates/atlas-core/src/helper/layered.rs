@@ -21,7 +21,7 @@
 
 use serde_json::{Value, json};
 
-use crate::bootc::{ImageReference, ImageStatus, TRANSPORTS};
+use crate::bootc::{ImageReference, ImageStatus, TRANSPORTS, utc_second};
 use crate::history::rfc3339_from_unix;
 
 /// Where the helper keeps the last update check's result on such a system
@@ -154,14 +154,6 @@ fn same_deployment(d: &Value, ostree: &Value) -> bool {
         && ostree["stateroot"]
             .as_str()
             .is_none_or(|s| d["osname"].as_str().is_none_or(|t| t == s))
-}
-
-/// An RFC 3339 time in UTC to the second (`2026-10-02T18:54:39`), which
-/// orders as text; `None` for any other form.
-fn utc_second(t: &str) -> Option<&str> {
-    let s = t.get(..19)?;
-    let b = s.as_bytes();
-    (t.ends_with('Z') && b[4] == b'-' && b[10] == b'T' && b[13] == b':').then_some(s)
 }
 
 /// True when `update` was built after every one of `images`: it is still
@@ -378,6 +370,8 @@ mod tests {
         let newer = ImageStatus {
             image: r.clone(),
             version: Some("44.20261009".into()),
+            // built after the booted image (whose test version is higher)
+            timestamp: Some("2026-10-09T04:00:00Z".into()),
             image_digest: "sha256:ccc".into(),
             ..Default::default()
         };

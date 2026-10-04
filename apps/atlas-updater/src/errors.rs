@@ -49,6 +49,12 @@ pub fn friendly(e: &Error) -> OpError {
             {
                 OpError::Message(message.clone())
             }
+            // an older build on the server: taken out again, said plainly
+            HelperErrorKind::Failed
+                if message.starts_with(atlas_core::helper_client::DOWNGRADE_REFUSED) =>
+            {
+                OpError::Message(message.clone())
+            }
             HelperErrorKind::Failed => {
                 let detail = tail(message, 4);
                 if detail.is_empty() {
@@ -148,5 +154,18 @@ mod tests {
         );
         assert!(dbus_message(&denied).contains("did not allow"));
         assert!(dbus_message(&zbus::Error::Unsupported).contains("Can't reach"));
+    }
+
+    #[test]
+    fn a_refused_downgrade_is_said_as_the_helper_says_it() {
+        let message = format!(
+            "{} (found 44.20260920, installed 44.20261001)",
+            atlas_core::helper_client::DOWNGRADE_REFUSED
+        );
+        let e = Error::Helper {
+            kind: HelperErrorKind::Failed,
+            message: message.clone(),
+        };
+        assert_eq!(friendly(&e), OpError::Message(message));
     }
 }
