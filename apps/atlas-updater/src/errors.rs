@@ -1,6 +1,6 @@
 //! Helper errors in plain language.
 
-use atlas_core::helper_client::{Error, HelperErrorKind};
+use atlas_update_engine::helper_client::{Error, HelperErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpError {
@@ -30,28 +30,28 @@ pub fn friendly(e: &Error) -> OpError {
             ),
             // bootc did it, only the follow-up read failed: not a failure
             HelperErrorKind::Failed
-                if message.starts_with(atlas_core::helper_client::STATE_UNREAD) =>
+                if message.starts_with(atlas_update_engine::helper_client::STATE_UNREAD) =>
             {
                 OpError::Message(format!(
                     "{} Restart to finish going back, or check again in a moment.",
-                    atlas_core::helper_client::STATE_UNREAD
+                    atlas_update_engine::helper_client::STATE_UNREAD
                 ))
             }
             HelperErrorKind::Failed
-                if message.starts_with(atlas_core::helper_client::STATE_UNREAD_CANCEL) =>
+                if message.starts_with(atlas_update_engine::helper_client::STATE_UNREAD_CANCEL) =>
             {
-                OpError::Message(atlas_core::helper_client::STATE_UNREAD_CANCEL.into())
+                OpError::Message(atlas_update_engine::helper_client::STATE_UNREAD_CANCEL.into())
             }
             // the helper's own plain refusals (nothing was run)
             HelperErrorKind::Failed
-                if message == atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED
-                    || message == atlas_core::helper_client::NO_ROLLBACK_QUEUED =>
+                if message == atlas_update_engine::helper_client::ROLLBACK_ALREADY_QUEUED
+                    || message == atlas_update_engine::helper_client::NO_ROLLBACK_QUEUED =>
             {
                 OpError::Message(message.clone())
             }
             // an older build on the server: taken out again, said plainly
             HelperErrorKind::Failed
-                if message.starts_with(atlas_core::helper_client::DOWNGRADE_REFUSED) =>
+                if message.starts_with(atlas_update_engine::helper_client::DOWNGRADE_REFUSED) =>
             {
                 OpError::Message(message.clone())
             }
@@ -68,9 +68,9 @@ pub fn friendly(e: &Error) -> OpError {
 /// anything else as the tool's last lines.
 fn failure(message: &str) -> OpError {
     // judged by the last try's error, not the note about an earlier one
-    let lower = atlas_core::helper::retry::final_error(message).to_lowercase();
+    let lower = atlas_update_engine::helper::retry::final_error(message).to_lowercase();
     let has = |phrases: &[&str]| phrases.iter().any(|p| lower.contains(p));
-    if has(atlas_core::helper::retry::SIGNATURE_REFUSED) {
+    if has(atlas_update_engine::helper::retry::SIGNATURE_REFUSED) {
         return OpError::Message(
             "The update's signature couldn't be verified, so it wasn't installed. Nothing was changed."
                 .into(),
@@ -83,7 +83,7 @@ fn failure(message: &str) -> OpError {
         );
     }
     // the helper already tried a few times
-    if atlas_core::helper::retry::is_transient(message) {
+    if atlas_update_engine::helper::retry::is_transient(message) {
         return OpError::Message(
             "Couldn't reach the update server. Check the internet connection and try again.".into(),
         );
@@ -145,11 +145,11 @@ mod tests {
     fn rollback_refusals_are_shown_plainly() {
         let e = Error::Helper {
             kind: HelperErrorKind::Failed,
-            message: atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED.into(),
+            message: atlas_update_engine::helper_client::ROLLBACK_ALREADY_QUEUED.into(),
         };
         assert_eq!(
             friendly(&e),
-            OpError::Message(atlas_core::helper_client::ROLLBACK_ALREADY_QUEUED.into())
+            OpError::Message(atlas_update_engine::helper_client::ROLLBACK_ALREADY_QUEUED.into())
         );
     }
 
@@ -208,7 +208,7 @@ mod tests {
         assert!(said("boom").starts_with("The update tool reported a problem"));
         let after_reset = format!(
             "error: Transaction in progress: upgrade{}connection reset by peer)",
-            atlas_core::helper::retry::AFTER_NOTE
+            atlas_update_engine::helper::retry::AFTER_NOTE
         );
         assert!(said(&after_reset).starts_with("The update tool reported a problem"));
     }
@@ -217,7 +217,7 @@ mod tests {
     fn a_refused_downgrade_is_said_as_the_helper_says_it() {
         let message = format!(
             "{} (found 44.20260920, installed 44.20261001)",
-            atlas_core::helper_client::DOWNGRADE_REFUSED
+            atlas_update_engine::helper_client::DOWNGRADE_REFUSED
         );
         let e = Error::Helper {
             kind: HelperErrorKind::Failed,

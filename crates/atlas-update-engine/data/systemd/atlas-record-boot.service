@@ -6,6 +6,8 @@ ConditionPathExists=/usr/bin/bootc
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/atlas-system-helper record-boot
+# /var/lib/atlas-core: the name from before the package was atlas-system-helper,
+# kept because the previous image (after a rollback) uses the same /var.
 StateDirectory=atlas-core
 # The history must be readable by every user (see the helper, mode 0644).
 # Sandboxed like the helper (see atlas-system-helper.service for what is left

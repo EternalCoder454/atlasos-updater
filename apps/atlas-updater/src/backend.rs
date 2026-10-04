@@ -258,8 +258,8 @@ pub mod qobject {
 use core::pin::Pin;
 use std::path::PathBuf;
 
-use atlas_core::bootc::{Channel, Status};
-use atlas_core::crash::Report;
+use atlas_framework_system::bootc::{Channel, Status};
+use atlas_framework_system::crash::Report;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use serde_json::json;
@@ -388,11 +388,11 @@ pub struct BackendRust {
 }
 
 /// This machine's history, newest first (developer fixtures: theirs).
-fn read_history(fixtures: Option<&std::path::Path>) -> Vec<atlas_core::history::Entry> {
+fn read_history(fixtures: Option<&std::path::Path>) -> Vec<atlas_framework_system::history::Entry> {
     match fixtures {
         Some(dir) => config::read_fixture(dir, "history.jsonl")
             .map(|t| {
-                let mut v: Vec<atlas_core::history::Entry> = t
+                let mut v: Vec<atlas_framework_system::history::Entry> = t
                     .lines()
                     .filter_map(|l| serde_json::from_str(l).ok())
                     .collect();
@@ -400,7 +400,7 @@ fn read_history(fixtures: Option<&std::path::Path>) -> Vec<atlas_core::history::
                 v
             })
             .unwrap_or_default(),
-        None => atlas_core::history::read_default().unwrap_or_default(),
+        None => atlas_framework_system::history::read_default().unwrap_or_default(),
     }
 }
 
@@ -547,7 +547,7 @@ impl qobject::Backend {
         let cfg = Config::load();
         let fixtures = config::fixtures_dir();
         let schedule = self.rust().schedule.clone();
-        if let Some(logo) = atlas_core::osrelease::logo_icon() {
+        if let Some(logo) = atlas_framework_core::osrelease::logo_icon() {
             self.as_mut().set_os_logo(QString::from(logo.as_str()));
         }
         {
@@ -611,7 +611,7 @@ impl qobject::Backend {
         // Crash reports are opt-in: read the setting, and only when on look for new ones.
         let on = match &self.rust().fixtures {
             Some(d) => config::read_fixture(d, "crash-enabled").is_some(),
-            None => atlas_core::crash::Settings::load().enabled,
+            None => atlas_framework_system::crash::Settings::load().enabled,
         };
         self.as_mut().set_crash_enabled(on);
         let fix = self.rust().fixtures.is_some();
@@ -756,7 +756,7 @@ impl qobject::Backend {
 
     /// The helper's progress, while a foreground op runs (a late one,
     /// queued before the op finished, is dropped).
-    fn show_progress(mut self: Pin<&mut Self>, p: Option<atlas_core::progress::Progress>) {
+    fn show_progress(mut self: Pin<&mut Self>, p: Option<atlas_update_engine::progress::Progress>) {
         let p = p.filter(|_| *self.busy()).unwrap_or_default();
         self.as_mut().set_progress_stage(q(&p.stage));
         self.as_mut().set_progress_done(p.done as f64);
@@ -1299,7 +1299,7 @@ impl qobject::Backend {
                         let failed = done.error.clone();
                         // Noted before listing, so the rows show it.
                         obj.as_mut().apps_noted(&done.held_back);
-                        let left = rows.as_ref().map(Vec::clone).unwrap_or_default();
+                        let left = rows.clone().unwrap_or_default();
                         obj.as_mut().apps_listed(rows);
                         if !done.held_back.is_empty() {
                             obj.as_mut()
@@ -1514,12 +1514,7 @@ impl qobject::Backend {
 
     /// An update the user started from a notice left apps out: say which,
     /// and don't say it again for the same set.
-    fn held_notice(
-        mut self: Pin<&mut Self>,
-        rows: &[apps::Row],
-        held: &[apps::HeldApp],
-        failed: bool,
-    ) {
+    fn held_notice(self: Pin<&mut Self>, rows: &[apps::Row], held: &[apps::HeldApp], failed: bool) {
         if self.rust().fixtures.is_none() {
             let key = apps::notice_key(rows, held, failed);
             rc::set(RC_APPS, "Notified", Some(&key));
@@ -1630,7 +1625,7 @@ impl qobject::Backend {
 
     pub fn enable_crash_reports(mut self: Pin<&mut Self>, on: bool) {
         if self.rust().fixtures.is_none()
-            && let Err(e) = (atlas_core::crash::Settings { enabled: on }).save()
+            && let Err(e) = (atlas_framework_system::crash::Settings { enabled: on }).save()
         {
             // Not saved: collection would still see "off", so do not claim "on".
             self.as_mut().set_error(
@@ -1660,11 +1655,11 @@ impl qobject::Backend {
             let (reports, has_server) = guarded(|| {
                 let reports = match &fixtures {
                     Some(dir) => fixture_reports(dir, "crash-pending.json"),
-                    None => atlas_core::crash::pending(),
+                    None => atlas_framework_system::crash::pending(),
                 };
                 let has_server = match &fixtures {
                     Some(d) => config::read_fixture(d, "crash-server").is_some(),
-                    None => atlas_core::crash::Endpoint::load().is_some(),
+                    None => atlas_framework_system::crash::Endpoint::load().is_some(),
                 };
                 (reports, has_server)
             })
@@ -1700,7 +1695,7 @@ impl qobject::Backend {
             let text = guarded(|| {
                 let mut sent = match &fixtures {
                     Some(dir) => fixture_reports(dir, "crash-sent.json"),
-                    None => atlas_core::crash::sent(),
+                    None => atlas_framework_system::crash::sent(),
                 };
                 sent.reverse(); // newest first
                 let views: Vec<_> = sent.iter().map(|r| crash::view(r, false)).collect();
@@ -1722,8 +1717,8 @@ impl qobject::Backend {
                 return;
             }
             let first = guarded(|| {
-                let mut new = atlas_core::crash::collect_coredumps(None);
-                new.extend(atlas_core::crash::collect_events(None));
+                let mut new = atlas_framework_system::crash::collect_coredumps(None);
+                new.extend(atlas_framework_system::crash::collect_events(None));
                 new.first().map(|r| {
                     (
                         crate::crash::display_name(&r.app_name).to_string(),
@@ -1799,7 +1794,7 @@ impl qobject::Backend {
                     }
                     Ok(())
                 } else {
-                    atlas_core::crash::send(&r)
+                    atlas_framework_system::crash::send(&r)
                 }
             })
             .unwrap_or_else(|| Err(std::io::Error::other(INTERNAL)));
@@ -1822,7 +1817,7 @@ impl qobject::Backend {
         let id = event_id.to_string();
         if let Some(r) = self.rust().pending.iter().find(|r| r.event_id == id)
             && self.rust().fixtures.is_none()
-            && let Err(e) = atlas_core::crash::discard(r)
+            && let Err(e) = atlas_framework_system::crash::discard(r)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             // Still on disk: keep it listed rather than let it come back later.

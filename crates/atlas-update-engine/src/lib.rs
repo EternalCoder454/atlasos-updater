@@ -6,19 +6,10 @@
 //! - [`helper_client`]: async client for the `atlas-system-helper` D-Bus service.
 //! - [`progress`]: the live progress of an update and the parsers behind it.
 //!
-//! What every Atlas app shares lives in atlas-framework
-//! (github.com/EternalCoder454/atlas-framework); it is re-exported here under
-//! its old paths:
-//!
-//! - [`bootc`], [`history`], [`crash`] (and `helper::events`):
-//!   atlas-framework-system.
-//! - [`osrelease`] comes from atlas-framework-core.
-//! - `flatpak` (cargo feature `flatpak`): atlas-framework-flatpak.
+//! What every Atlas app shares (bootc status, history, events, crash reports,
+//! os-release, Flatpak) is in atlas-framework
+//! (github.com/EternalCoder454/atlas-framework); use its crates directly.
 
-pub use atlas_framework_core::osrelease;
-#[cfg(feature = "flatpak")]
-pub use atlas_framework_flatpak as flatpak;
-pub use atlas_framework_system::{bootc, crash, history};
 pub mod helper;
 pub mod helper_client;
 pub mod progress;

@@ -16,11 +16,11 @@ find_package(KF6Notifications REQUIRED)
 find_package(KF6StatusNotifierItem REQUIRED)
 find_package(KF6DBusAddons REQUIRED)
 find_package(Corrosion REQUIRED)
-# atlas-core's flatpak module links libflatpak and GLib into the Rust library.
+# atlas-framework-flatpak links libflatpak and GLib into the Rust library.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FLATPAK REQUIRED IMPORTED_TARGET flatpak gio-2.0)
 
-# Rust library (CXX-Qt QObjects, atlas-core). cxx-qt-build finds Qt via $QMAKE.
+# Rust library (CXX-Qt QObjects, atlas-update-engine). cxx-qt-build finds Qt via $QMAKE.
 find_program(QMAKE6 NAMES qmake6 qmake REQUIRED)
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../Cargo.toml
     CRATES atlas-updater LOCKED)

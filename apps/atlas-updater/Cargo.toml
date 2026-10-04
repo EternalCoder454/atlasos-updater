@@ -19,8 +19,13 @@ crate-type = ["staticlib", "rlib"]
 fixtures = []
 
 [dependencies]
-atlas-core = { path = "../../crates/atlas-core", features = ["flatpak"] }
-atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb" }
+# The update engine (the system helper's client and the progress parser).
+atlas-update-engine = { path = "../../crates/atlas-update-engine" }
+# What Atlas apps share. Pinned: move the rev forward on purpose, together
+# with crates/atlas-update-engine's.
+atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
+atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
+atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
 cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = "0.10"

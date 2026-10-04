@@ -1,8 +1,8 @@
-# Atlas Updater and atlas-core
+# Atlas Updater and its system helper
 
 Rust + Qt 6.11 + Kirigami (CXX-Qt) apps for AtlasOS, a Fedora Kinoite 44 bootc
 image (repo `~/Documents/AtlasOS`). Read `docs/DESIGN.md` first: it fixes the
-layout, the system helper's D-Bus API and the atlas-core API. Change it only
+layout, the system helper's D-Bus API and the atlas-update-engine API. Change it only
 together with the code that implements the change.
 
 ## Hard rules

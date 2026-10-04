@@ -263,7 +263,7 @@ pub fn read(fixtures: Option<&Path>) -> Vec<Entry> {
 /// Any app with access to the home folder can write the file: entries are
 /// cleaned like text from a remote, and impossible ones are dropped.
 fn sane(mut e: Entry, now: i64) -> Option<Entry> {
-    use atlas_core::flatpak::{clean, clean_to};
+    use atlas_framework_flatpak::{clean, clean_to};
     // A day of clock difference is fine; a date in the far future isn't.
     if e.at < 0 || e.at > now + 86_400 {
         return None;

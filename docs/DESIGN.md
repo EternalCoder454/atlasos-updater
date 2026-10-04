@@ -1,16 +1,20 @@
-# Atlas Updater and atlas-core: design
+# Atlas Updater and its system helper: design
 
 AtlasOS is a Fedora Kinoite 44 bootc image (`ghcr.io/eternalcoder454/atlasos`).
 This repo holds two things:
 
-- **atlas-core**: the shared Rust library and the privileged system helper that
-  Atlas apps reuse (Atlas Store later depends on it through git).
+- **atlas-update-engine**: the privileged system helper, its D-Bus client and
+  the progress parser (packaged as atlas-system-helper; it was atlas-core).
 - **atlas-updater**: the Atlas Updater app (`net.eterneon.atlas.updater`).
 
 Atlas.Ui, the QML module every Atlas app shares, its Material Symbols fonts,
 the design rules for Atlas apps and the app template live in
 **atlas-framework** (`EternalCoder454/atlas-framework`, `~/Documents/Atlas
-Framework`). The app uses the installed Atlas.Ui (the atlas-ui package).
+Framework`). The app uses the installed Atlas.Ui (the atlas-ui package). The
+Rust code Atlas apps share is there too: atlas-framework-core (os-release),
+atlas-framework-system (bootc types, history, events, crash reports) and
+atlas-framework-flatpak (the libflatpak wrapper). Both crates here use them
+directly, pinned to one git rev.
 
 Stack: Rust + Qt 6.11 + Kirigami 6.30 through CXX-Qt. Everything builds and runs
 on Fedora 44 (Qt 6.11.2, KF6 6.30, bootc 1.16.13, flatpak 1.18.2, polkit 127,
@@ -19,24 +23,21 @@ Rust 1.98).
 ## Layout
 
 ```
-Cargo.toml                    workspace: crates/atlas-core, apps/atlas-updater
-crates/atlas-core/            lib + bin `atlas-system-helper`
-  src/bootc.rs                serde types for `bootc status --json`, ref/tag helpers
+Cargo.toml                    workspace: crates/atlas-update-engine, apps/atlas-updater
+crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-helper`
   src/helper_client.rs        zbus proxy for the system helper (what apps call)
-  src/flatpak.rs              libflatpak wrapper (cargo feature "flatpak")
-  src/history.rs              reads /var/lib/atlas-core/history.jsonl
-  src/crash.rs                opt-in crash reports (see Privacy and crash reports)
-  src/helper/                 helper logic: bootc runner, polkit, events.jsonl
-  src/bin/atlas-system-helper.rs  (or src/helper/*) the D-Bus system service
+  src/progress.rs             progress of a running Upgrade/SwitchChannel
+  src/helper/                 helper logic: bootc runner, polkit, retry, layered
+  src/bin/atlas-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
 apps/atlas-updater/           the app (CMake + Corrosion, or cxx-qt-build)
   qml/                        Kirigami UI, compiled ahead of time (qmlcachegen)
   data/                       .desktop, autostart .desktop, .notifyrc, metainfo, icon
-packaging/atlas.spec          one spec, subpackages `atlas-core` and `atlas-updater`
+packaging/atlas.spec          one spec, subpackages `atlas-system-helper` and `atlas-updater`
 packaging/build-rpm.sh        builds the RPMs inside fedora:44: build-rpm.sh <out dir>
 ```
 
-## System helper (atlas-core)
+## System helper (atlas-system-helper)
 
 bootc has no D-Bus API and needs root, so apps go through a small system
 service. It is D-Bus activated, so nothing runs at idle; it exits after 60 s
@@ -143,7 +144,7 @@ and saves the stager a second deployment to record it.
 
 **Progress.** The interface has one read-only property, `Progress` (`s`, not a
 method, so the six-method rule stands): while `Upgrade` or `SwitchChannel`
-runs, the JSON of `atlas_core::progress::Progress`, otherwise `""`.
+runs, the JSON of `atlas_update_engine::progress::Progress`, otherwise `""`.
 
 ```json
 {"op":"upgrade","stage":"downloading","done":123,"total":300028591,"detail":""}
@@ -209,7 +210,12 @@ the last line:
 The file is world-readable (0644), and the directory comes from
 `StateDirectory=atlas-core`.
 
-## Flatpak wrapper (atlas-core, feature `flatpak`)
+**State directory name.** `/var/lib/atlas-core` keeps the package's old name on
+purpose. `/var` is shared by every deployment, so after a rollback the previous
+image's helper reads and writes the same files; a new path would split the
+history and events between images. Don't rename it.
+
+## Flatpak wrapper (atlas-framework-flatpak)
 
 This uses libflatpak through the `libflatpak` crate (gtk-rs style). System
 installs go through flatpak's own system helper, which asks polkit itself, so
@@ -413,16 +419,16 @@ Screens:
 
 ## System app
 
-atlas-core and atlas-updater are required parts of AtlasOS, not optional apps.
+atlas-system-helper and atlas-updater are required parts of AtlasOS, not optional apps.
 They come with the image in the read-only `/usr`, which Discover and dnf
-can't remove. `/etc/dnf/protected.d/atlas.conf` (shipped by atlas-core)
+can't remove. `/etc/dnf/protected.d/atlas.conf` (shipped by atlas-system-helper)
 protects them from dnf in mutable contexts, and the image build fails without
 them. Root can still `rpm-ostree override remove` them; that's the limit on
 an open system.
 
 ## Privacy and crash reports
 
-Crash reports are the only telemetry. `atlas_core::crash` (opt-in, off by
+Crash reports are the only telemetry. `atlas_framework_system::crash` (opt-in, off by
 default; when off nothing is collected or written):
 
 - **Settings.** Per user, `~/.config/atlas/crash-reporting.toml`,

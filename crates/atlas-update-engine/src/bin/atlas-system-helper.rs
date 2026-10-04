@@ -6,9 +6,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use atlas_core::helper::service::{IDLE_TIMEOUT, Service, serve};
-use atlas_core::helper::{Core, SystemBootc, events, layered};
-use atlas_core::{bootc, history};
+use atlas_framework_system::{bootc, history};
+use atlas_update_engine::helper::service::{IDLE_TIMEOUT, Service, serve};
+use atlas_update_engine::helper::{Core, SystemBootc, events, layered};
 
 #[tokio::main]
 async fn main() -> ExitCode {

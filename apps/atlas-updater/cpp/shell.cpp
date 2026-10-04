@@ -21,6 +21,8 @@ const QString kAppIcon = QStringLiteral("net.eterneon.atlas.updater");
 const QString kComponent = QStringLiteral("atlas-updater");
 const QString kOstreeRunDir = QStringLiteral("/run/ostree");
 const QString kCoredumpDir = QStringLiteral("/var/lib/systemd/coredump");
+// The helper's state directory keeps the name from before the package was
+// atlas-system-helper (atlas_framework_system::events::DEFAULT_PATH).
 const QString kEventsFile = QStringLiteral("/var/lib/atlas-core/events.jsonl");
 // Watched in place of a source that does not exist yet.
 const QStringList kCoredumpParents = {QStringLiteral("/var/lib/systemd"), QStringLiteral("/var/lib")};

@@ -1,8 +1,8 @@
-//! Flatpak app updates (through atlas-core's flatpak module).
+//! Flatpak app updates (through atlas-framework-flatpak).
 
 use std::path::Path;
 
-use atlas_core::flatpak::{self, AppUpdate, InstallationKind};
+use atlas_framework_flatpak::{self as flatpak, AppUpdate, InstallationKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{apphistory, config, power};
