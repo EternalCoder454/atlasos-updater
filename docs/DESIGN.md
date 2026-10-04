@@ -104,6 +104,21 @@ removal), and skipping the run if it can't. Go Back and a switch to the
 other channel remain the ways to an older build; an image of another
 reference is never compared.
 
+**Retries.** The steps that fetch from the registry (`bootc upgrade
+--check`, `bootc upgrade`, `bootc switch`, `rpm-ostree upgrade`/`rebase`,
+`skopeo inspect`) are run up to 3 times, 3 s and then 10 s apart, when
+the last lines of their error name a passing network problem (a dropped
+or refused connection, DNS, a timeout, the registry's 5xx or 429) and
+nothing in it says retrying can't help (a signature or policy refusal, a
+denied login, a missing image, a full disk) (`helper::retry`). Each is
+idempotent: ostree keeps what was fetched and stages atomically, and the
+downgrade check runs after the last try. Rollback and CancelRollback are
+never retried (`bootc rollback` toggles). On SIGTERM a waiting retry
+gives up at once and the operation ends as interrupted (not recorded as
+failed). A later try that fails another way keeps the first network error
+in its message. The app says the common failures plainly (network, disk
+space, signature) instead of the tool's last lines.
+
 **Signatures on a switch.** `SwitchChannel` keeps the booted image's
 signature setting (`containerPolicy` → `--enforce-container-sigpolicy`; an
 other one it can't carry is refused). An unverified one (none, or
@@ -268,6 +283,9 @@ Screens:
   version, which `bootc status` shows.
 - Ships `atlasos-update-stage.timer`, whose condition skips the newest image
   when it is the rollback image, a bad image or a downgrade (as above), and
+  whose service tries a download that failed with a network error again
+  after 15 minutes (`update-stage` exits 75; at most 4 tries in 3 hours),
+  and
   autostarts `atlas-updater --tray`,
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.

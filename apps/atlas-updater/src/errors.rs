@@ -55,19 +55,44 @@ pub fn friendly(e: &Error) -> OpError {
             {
                 OpError::Message(message.clone())
             }
-            HelperErrorKind::Failed => {
-                let detail = tail(message, 4);
-                if detail.is_empty() {
-                    OpError::Message("The update tool failed without saying why.".into())
-                } else {
-                    OpError::Message(format!("The update tool reported a problem:\n{detail}"))
-                }
-            }
+            HelperErrorKind::Failed => failure(message),
         },
         Error::DBus(e) => OpError::Message(dbus_message(e)),
         Error::Parse(_) => OpError::Message(
             "The system helper sent an answer Atlas Updater could not read.".into(),
         ),
+    }
+}
+
+/// A bootc, rpm-ostree or skopeo failure: the common causes said plainly,
+/// anything else as the tool's last lines.
+fn failure(message: &str) -> OpError {
+    // judged by the last try's error, not the note about an earlier one
+    let lower = atlas_core::helper::retry::final_error(message).to_lowercase();
+    let has = |phrases: &[&str]| phrases.iter().any(|p| lower.contains(p));
+    if has(atlas_core::helper::retry::SIGNATURE_REFUSED) {
+        return OpError::Message(
+            "The update's signature couldn't be verified, so it wasn't installed. Nothing was changed."
+                .into(),
+        );
+    }
+    if has(&["no space left", "min-free-space"]) {
+        return OpError::Message(
+            "There isn't enough free disk space for the update. Free up some space and try again."
+                .into(),
+        );
+    }
+    // the helper already tried a few times
+    if atlas_core::helper::retry::is_transient(message) {
+        return OpError::Message(
+            "Couldn't reach the update server. Check the internet connection and try again.".into(),
+        );
+    }
+    let detail = tail(message, 4);
+    if detail.is_empty() {
+        OpError::Message("The update tool failed without saying why.".into())
+    } else {
+        OpError::Message(format!("The update tool reported a problem:\n{detail}"))
     }
 }
 
@@ -154,6 +179,38 @@ mod tests {
         );
         assert!(dbus_message(&denied).contains("did not allow"));
         assert!(dbus_message(&zbus::Error::Unsupported).contains("Can't reach"));
+    }
+
+    #[test]
+    fn common_failures_are_said_plainly() {
+        let said = |message: &str| match friendly(&Error::Helper {
+            kind: HelperErrorKind::Failed,
+            message: message.into(),
+        }) {
+            OpError::Message(m) => m,
+            OpError::Cancelled => panic!(),
+        };
+        assert!(
+            said("error: Fetching: dial tcp: lookup ghcr.io: Temporary failure in name resolution")
+                .starts_with("Couldn't reach the update server")
+        );
+        assert!(
+            said("writing blob: No space left on device")
+                .starts_with("There isn't enough free disk space")
+        );
+        // a signature failure is never put down to the network
+        assert!(
+            said(
+                "Source image rejected: Signature for identity x is not accepted; connection reset"
+            )
+            .starts_with("The update's signature couldn't be verified")
+        );
+        assert!(said("boom").starts_with("The update tool reported a problem"));
+        let after_reset = format!(
+            "error: Transaction in progress: upgrade{}connection reset by peer)",
+            atlas_core::helper::retry::AFTER_NOTE
+        );
+        assert!(said(&after_reset).starts_with("The update tool reported a problem"));
     }
 
     #[test]

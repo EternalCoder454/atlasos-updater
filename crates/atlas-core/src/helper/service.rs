@@ -307,6 +307,9 @@ pub async fn serve(
         }
     };
     activity.begin_close();
+    if terminated {
+        super::stop_retrying();
+    }
     let _ = conn.release_name(BUS_NAME).await;
     let limit = if terminated {
         TERM_GRACE

@@ -7,6 +7,7 @@
 pub mod events;
 pub mod layered;
 pub mod live;
+pub mod retry;
 pub mod service;
 
 use std::cmp::Ordering as Cmp;
@@ -137,6 +138,16 @@ static RUNNING: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 /// Set once the helper asks bootc to stop; a bootc that dies after that was
 /// interrupted, not broken.
 static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// Set when the helper is told to stop (SIGTERM): a step waiting to be tried
+/// again gives up at once rather than start a fetch that the shutdown would
+/// cut off.
+static STOP_RETRY: AtomicBool = AtomicBool::new(false);
+
+/// No more retries (see [`retry`]); the running step goes on.
+pub fn stop_retrying() {
+    STOP_RETRY.store(true, Ordering::Release);
+}
 
 /// What a stopped bootc reports (and what is never logged as an update failure).
 pub const INTERRUPTED: &str = "bootc was interrupted before it finished";
@@ -537,6 +548,24 @@ pub struct Core {
     status_cache: StatusCache,
     /// The `Progress` property while an upgrade or switch runs.
     progress: Arc<ProgressCell>,
+    /// Waits between tries of a step that fetched from the registry (see
+    /// [`retry`]); false stops the retrying.
+    retry_wait: fn(Duration) -> bool,
+}
+
+/// Sleep `d`, unless the helper is shutting down: then stop at once (false).
+fn wait_unless_closing(d: Duration) -> bool {
+    let end = Instant::now() + d;
+    loop {
+        if CLOSING.load(Ordering::Acquire) || STOP_RETRY.load(Ordering::Acquire) {
+            return false;
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(200)));
+    }
 }
 
 /// The last `bootc status` result (failures too, so a broken bootc is not
@@ -588,7 +617,23 @@ impl Core {
             policy: None,
             status_cache: StatusCache::default(),
             progress: ProgressCell::new(),
+            retry_wait: wait_unless_closing,
         }
+    }
+
+    /// Wait between retries with `wait` (tests: without sleeping).
+    pub fn with_retry_wait(mut self, wait: fn(Duration) -> bool) -> Self {
+        self.retry_wait = wait;
+        self
+    }
+
+    /// Run `step`, a fetch from the registry, again while it fails with a
+    /// passing network error (see [`retry`]).
+    fn fetching(
+        &self,
+        step: impl FnMut() -> Result<String, String>,
+    ) -> Result<String, HelperError> {
+        retry::retrying(step, self.retry_wait).map_err(HelperError::Failed)
     }
 
     /// The `Progress` property: JSON of the current progress, `""` when none.
@@ -739,7 +784,7 @@ impl Core {
             // If the system turns out not to be one, or can't be asked,
             // bootc's own error stands.
             Op::CheckForUpdate => {
-                if let Err(e) = self.bootc(&["upgrade", "--check"]) {
+                if let Err(e) = self.fetching(|| self.runner.run(&["upgrade", "--check"])) {
                     let Ok(Some(origin)) = self.layered_origin() else {
                         return Err(e);
                     };
@@ -1001,28 +1046,28 @@ impl Core {
         self.runner.run(args).map_err(HelperError::Failed)
     }
 
+    /// bootc `upgrade` or `switch`, which fetch: retried (see [`retry`]).
     fn bootc_progress(
         &self,
         args: &[&str],
         sink: Option<&ProgressSink>,
     ) -> Result<String, HelperError> {
-        match sink {
+        self.fetching(|| match sink {
             Some(s) => self.runner.run_progress(args, s),
             None => self.runner.run(args),
-        }
-        .map_err(HelperError::Failed)
+        })
     }
 
+    /// rpm-ostree `upgrade` or `rebase`, which fetch: retried likewise.
     fn rpm_ostree_progress(
         &self,
         args: &[&str],
         sink: Option<&ProgressSink>,
     ) -> Result<String, HelperError> {
-        match sink {
+        self.fetching(|| match sink {
             Some(s) => self.runner.rpm_ostree_progress(args, s),
             None => self.runner.rpm_ostree(args),
-        }
-        .map_err(HelperError::Failed)
+        })
     }
 
     fn rpm_ostree(&self, args: &[&str]) -> Result<String, HelperError> {
@@ -1070,10 +1115,8 @@ impl Core {
     fn layered_check(&self, origin: &str) -> Result<(), HelperError> {
         let r = layered::parse_origin(origin)
             .ok_or_else(|| HelperError::Failed(format!("unusable rpm-ostree origin {origin:?}")))?;
-        let out = self
-            .runner
-            .skopeo(&["inspect", "--", &layered::skopeo_ref(&r)])
-            .map_err(HelperError::Failed)?;
+        let image = layered::skopeo_ref(&r);
+        let out = self.fetching(|| self.runner.skopeo(&["inspect", "--", &image]))?;
         let found = layered::image_from_skopeo(&out, &r).map_err(HelperError::Failed)?;
         let Some(path) = &self.update_file else {
             return Ok(());
@@ -1253,6 +1296,191 @@ mod tests {
 
     fn core(f: &Arc<Fake>) -> Core {
         Core::new(f.clone())
+    }
+
+    /// bootc whose first `fails` calls other than `status` fail with `error`.
+    struct Flaky {
+        calls: Mutex<Vec<Vec<String>>>,
+        fails: usize,
+        error: &'static str,
+    }
+
+    impl Flaky {
+        fn new(fails: usize, error: &'static str) -> Arc<Flaky> {
+            Arc::new(Flaky {
+                calls: Mutex::default(),
+                fails,
+                error,
+            })
+        }
+        fn count(&self, args: &[&str]) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| *c == args)
+                .count()
+        }
+    }
+
+    impl BootcRunner for Flaky {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(args.iter().map(|s| s.to_string()).collect());
+            if args[0] == "status" {
+                return Ok(PLAIN.into());
+            }
+            let n = calls.iter().filter(|c| c[0] != "status").count();
+            if n <= self.fails {
+                Err(self.error.into())
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    const RESET: &str = "error: Upgrading: reading blob sha256:abc: read tcp 10.0.0.2:51234->185.199.108.154:443: read: connection reset by peer";
+
+    #[test]
+    fn a_dropped_connection_is_tried_again() {
+        let no_sleep: fn(Duration) -> bool = |_| true;
+        for (op, args) in [
+            (Op::Upgrade, vec!["upgrade"]),
+            (Op::CheckForUpdate, vec!["upgrade", "--check"]),
+        ] {
+            let f = Flaky::new(2, RESET);
+            let c = Core::new(f.clone()).with_retry_wait(no_sleep);
+            assert!(c.execute(&op).is_ok(), "{op:?}");
+            assert_eq!(f.count(&args), 3, "{op:?}");
+        }
+        // the third failure is the last
+        let f = Flaky::new(3, RESET);
+        let e = Core::new(f.clone())
+            .with_retry_wait(no_sleep)
+            .execute(&Op::Upgrade);
+        assert!(matches!(e, Err(HelperError::Failed(m)) if m == RESET));
+        assert_eq!(f.count(&["upgrade"]), retry::ATTEMPTS);
+        // a switch too
+        let f = Flaky::new(1, RESET);
+        let c = Core::new(f.clone()).with_retry_wait(no_sleep);
+        c.execute(&Op::SwitchChannel("stable".into())).unwrap();
+        assert_eq!(
+            f.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c[0] == "switch")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_rollback_a_lasting_error_or_a_shutdown_is_not_tried_again() {
+        let f = Flaky::new(1, RESET);
+        let c = Core::new(f.clone()).with_retry_wait(|_| true);
+        assert!(c.execute(&Op::Rollback).is_err());
+        assert_eq!(f.count(&["rollback"]), 1);
+        let f = Flaky::new(1, "error: Upgrading: no space left on device");
+        let c = Core::new(f.clone()).with_retry_wait(|_| true);
+        assert!(c.execute(&Op::Upgrade).is_err());
+        assert_eq!(f.count(&["upgrade"]), 1);
+        // the wait is cut short when the helper is told to stop: an
+        // interrupted update, not a failed one
+        let d = tempfile::tempdir().unwrap();
+        let f = Flaky::new(1, RESET);
+        let c = Core::new(f.clone())
+            .with_retry_wait(|_| false)
+            .with_events(d.path().join("events.jsonl"));
+        let e = c.execute(&Op::Upgrade);
+        assert!(matches!(e, Err(HelperError::Failed(m)) if m == INTERRUPTED));
+        assert_eq!(f.count(&["upgrade"]), 1);
+        assert!(names(&d).is_empty());
+    }
+
+    #[test]
+    fn an_upgrade_that_got_through_on_a_retry_is_still_checked() {
+        // the first try's connection drops; the second stages an older build
+        let f = Arc::new(Stager {
+            calls: Mutex::default(),
+            before: PLAIN.into(),
+            after: plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            cleanup_fails: false,
+            before_fails: false,
+            flaky: 1,
+        });
+        let c = Core::new(f.clone()).with_retry_wait(|_| true);
+        match c.execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(f.calls().iter().filter(|c| c[0] == "upgrade").count(), 2);
+        assert!(ran(&f.calls(), &["rpm-ostree", "cleanup", "-p"]));
+    }
+
+    #[test]
+    fn a_layered_upgrade_goes_to_rpm_ostree_at_once_and_retries_there() {
+        struct FlakyRpm(Arc<Layered>, Mutex<usize>);
+        impl BootcRunner for FlakyRpm {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                self.0.run(args)
+            }
+            fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+                if args == ["upgrade"] {
+                    let mut n = self.1.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        self.0.record("rpm-ostree", args);
+                        return Err(RESET.into());
+                    }
+                }
+                self.0.rpm_ostree(args)
+            }
+        }
+        let l = Layered::new();
+        let f = Arc::new(FlakyRpm(l.clone(), Mutex::new(0)));
+        Core::new(f)
+            .with_retry_wait(|_| true)
+            .execute(&Op::Upgrade)
+            .unwrap();
+        let calls = l.calls();
+        // bootc's refusal is not a network error: one try
+        assert_eq!(
+            calls.iter().filter(|c| *c == &["bootc", "upgrade"]).count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| *c == &["rpm-ostree", "upgrade"])
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_layered_check_asks_the_registry_again() {
+        struct FlakySkopeo(Arc<Layered>, Mutex<usize>);
+        impl BootcRunner for FlakySkopeo {
+            fn run(&self, args: &[&str]) -> Result<String, String> {
+                self.0.run(args)
+            }
+            fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+                self.0.rpm_ostree(args)
+            }
+            fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+                let mut n = self.1.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    return Err("pinging container registry ghcr.io: i/o timeout".into());
+                }
+                self.0.skopeo(args)
+            }
+        }
+        let f = Arc::new(FlakySkopeo(Layered::new(), Mutex::new(0)));
+        let c = Core::new(f.clone()).with_retry_wait(|_| true);
+        c.execute(&Op::CheckForUpdate).unwrap();
+        assert_eq!(*f.1.lock().unwrap(), 2);
     }
 
     #[test]
@@ -2482,6 +2710,8 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         after: String,
         cleanup_fails: bool,
         before_fails: bool,
+        /// the first this many `upgrade`/`switch` calls drop the connection
+        flaky: usize,
     }
 
     impl Stager {
@@ -2492,6 +2722,7 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
                 after,
                 cleanup_fails,
                 before_fails: false,
+                flaky: 0,
             })
         }
         fn calls(&self) -> Vec<Vec<String>> {
@@ -2503,7 +2734,14 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         fn run(&self, args: &[&str]) -> Result<String, String> {
             let mut calls = self.calls.lock().unwrap();
             calls.push(args.iter().map(|s| s.to_string()).collect());
-            let upgraded = calls.iter().any(|c| c[0] == "upgrade" || c[0] == "switch");
+            let fetches = calls
+                .iter()
+                .filter(|c| c[0] == "upgrade" || c[0] == "switch")
+                .count();
+            if matches!(args[0], "upgrade" | "switch") && fetches <= self.flaky {
+                return Err(RESET.into());
+            }
+            let upgraded = fetches > self.flaky;
             let cleaned = calls.iter().any(|c| c == &["rpm-ostree", "cleanup", "-p"]);
             Ok(match (args, upgraded && !cleaned) {
                 (["status", "--json"], true) => self.after.clone(),
@@ -2572,6 +2810,7 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             after: plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
             cleanup_fails: false,
             before_fails: true,
+            flaky: 0,
         });
         match Core::new(f.clone()).execute(&Op::Upgrade) {
             Err(HelperError::Failed(m)) => assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}"),
@@ -2588,6 +2827,7 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             after: plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
             cleanup_fails: true,
             before_fails: false,
+            flaky: 0,
         });
         match Core::new(f).execute(&Op::Upgrade) {
             Err(HelperError::Failed(m)) => {
