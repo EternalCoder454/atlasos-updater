@@ -13,9 +13,10 @@ rust-version.workspace = true
 
 [dependencies]
 atlas-updater-base = { path = "../../crates/atlas-updater-base" }
-# Pinned: move the rev forward on purpose, together with the other crates'.
-atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
-atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
+# Pinned to a release tag (Cargo.lock holds its commit: build with
+# --locked); move it forward on purpose, together with the other crates'.
+atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
+atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }

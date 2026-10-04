@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use atlas_framework_system::bootc::Status;
-use atlas_updater_base::notify::{self, Note, Urgency};
+use atlas_updater_base::notify::{self, Note, Notifier, Urgency};
 use atlas_updater_base::ops::{self, Op};
 use atlas_updater_base::schedule::{self, Event, Schedule};
 use atlas_updater_base::view::{self, View};
@@ -34,7 +34,7 @@ use zbus::{MatchRule, MessageStream};
 
 use sni::{Item, Look, Menu};
 
-pub const APP_ICON: &str = notify::APP_ICON;
+pub const APP_ICON: &str = crash::APP_ID;
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
 /// The first app round after background updates are switched on.
@@ -93,6 +93,7 @@ struct Tray {
     /// A Reload is queued; more calls until it is handled add nothing.
     reload_pending: Arc<AtomicBool>,
     conn: zbus::Connection,
+    notifier: Notifier,
     tx: mpsc::UnboundedSender<Msg>,
     schedule: Schedule,
     icons: icons::Icons,
@@ -294,7 +295,7 @@ impl Tray {
     /// `Ok(None)`: the user turned this event's popup off. `Err`: it could
     /// not be shown (logged).
     async fn try_notify(&mut self, kind: Kind, n: Note) -> Result<Option<u32>, ()> {
-        let sent = match notify::send(&self.conn, &n).await {
+        let sent = match self.notifier.send(&self.conn, &n).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("atlas-updater-tray: cannot show a notification: {e}");
@@ -437,7 +438,7 @@ impl Tray {
                         "AtlasOS {} is downloaded. Restart to finish installing it.",
                         notify::escape(&staged.version)
                     ),
-                    icon: APP_ICON,
+                    icon: String::new(),
                     actions: vec![
                         ("restart", "Restart to Update".into()),
                         (notify::DEFAULT_ACTION, "Open Atlas Updater".into()),
@@ -544,7 +545,7 @@ impl Tray {
             event: "restartSoon",
             title,
             text: "Your computer will restart soon to finish updating. Save your work.".into(),
-            icon: APP_ICON,
+            icon: String::new(),
             actions: vec![
                 ("restart-now", "Restart Now".into()),
                 ("cancel-restart", "Cancel Restart".into()),
@@ -559,6 +560,10 @@ impl Tray {
                 self.soon_owner = id.and(self.notify_owner.clone());
                 self.warn_missing = false;
             }
+            // Also a server that did not answer in 10 s: it may still show
+            // the warning later, untracked. Its buttons then do nothing
+            // (only tracked ids count), and the restart does not happen
+            // unwarned (warn_missing).
             Err(()) => {
                 self.soon_id = None;
                 self.soon_owner = None;
@@ -586,7 +591,7 @@ impl Tray {
             event: "restartFailed",
             title: "Restart did not happen".into(),
             text: notify::escape(text),
-            icon: APP_ICON,
+            icon: String::new(),
             actions: vec![(notify::DEFAULT_ACTION, "Open Atlas Updater".into())],
             urgency: Some(Urgency::High),
             persistent: false,
@@ -729,7 +734,7 @@ impl Tray {
                 event: "crashReport",
                 title: "Crash report ready".into(),
                 text,
-                icon: "tools-report-bug",
+                icon: "tools-report-bug".into(),
                 actions: vec![("review", "Review".into())],
                 urgency: None,
                 persistent: false,
@@ -868,7 +873,7 @@ impl Tray {
                 },
                 // App names come from Flatpak metadata: never markup.
                 text: notify::escape(&notice.text),
-                icon: APP_ICON,
+                icon: String::new(),
                 actions,
                 urgency: None,
                 persistent: false,
@@ -1023,6 +1028,7 @@ async fn run() -> Result<(), String> {
     let mut t = Tray {
         reload_pending: reload_pending.clone(),
         conn: conn.clone(),
+        notifier: atlas_updater_base::notifier(),
         tx: tx.clone(),
         schedule: Schedule::default(),
         look: Look::default(),

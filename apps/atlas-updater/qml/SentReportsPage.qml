@@ -29,7 +29,7 @@ AtlasPage {
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(Kirigami.Units.gridUnit * 18, payloadDialog.parent ? payloadDialog.parent.height * 0.5 : 100)
-            QQC2.TextArea {
+            AtlasTextArea {
                 readOnly: true
                 text: payloadDialog.payload
                 font: Kirigami.Theme.fixedWidthFont
@@ -39,13 +39,13 @@ AtlasPage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.sent.length === 0
-        icon.name: "mail-sent"
-        text: qsTr("No reports sent")
-        explanation: qsTr("Reports you send are listed here for 90 days.")
+        iconName: "mail-sent"
+        title: qsTr("No reports sent")
+        text: qsTr("Reports you send are listed here for 90 days.")
     }
 
     Section {

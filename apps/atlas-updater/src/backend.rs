@@ -1326,7 +1326,7 @@ impl qobject::Backend {
             event: "appUpdatesReady",
             title: "App updates ready".into(),
             text: notify::escape(&apps::ready_text(rows, held, failed, false)),
-            icon: notify::APP_ICON,
+            icon: String::new(),
             actions: Vec::new(),
             urgency: None,
             persistent: false,
@@ -1335,7 +1335,9 @@ impl qobject::Backend {
         NOTIFY_CALLS.fetch_add(1, Ordering::SeqCst);
         let started = spawn_named("atlas-notify", move || {
             // guarded: the count must come down even if the send panics.
-            match guarded(|| notify::send_blocking(&n)).unwrap_or_else(|| Err(INTERNAL.into())) {
+            match guarded(|| atlas_updater_base::notifier().send_blocking(&n))
+                .unwrap_or_else(|| Err(INTERNAL.into()))
+            {
                 // Told: not again for the same set.
                 Ok(()) => rc::set(
                     RC_APPS,

@@ -226,16 +226,23 @@ AtlasPage {
             wrapMode: Text.Wrap
             Accessible.role: Accessible.AlertMessage
         }
+        // ConfirmDialog is at most 25 grid units wide: the Atlas controls'
+        // own widths (12 + 9 + 9) would not fit, so the row shares it out.
         RowLayout {
+            Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
-            QQC2.ComboBox {
+            AtlasComboBox {
                 id: dayBox
+                Layout.fillWidth: true
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 6
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
                 onActivated: scheduleDialog.problem = ""
                 model: [qsTr("Today"), qsTr("Tomorrow")]
                 Accessible.name: qsTr("Day")
             }
-            QQC2.SpinBox {
+            AtlasSpinBox {
                 id: hourSpin
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
                 from: 0
                 to: 23
                 editable: true
@@ -246,8 +253,9 @@ AtlasPage {
             QQC2.Label {
                 text: ":"
             }
-            QQC2.SpinBox {
+            AtlasSpinBox {
                 id: minuteSpin
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
                 from: 0
                 to: 59
                 stepSize: 5
@@ -583,7 +591,7 @@ AtlasPage {
         SectionRow {
             visible: page.backend.appsBusy
             title: page.backend.appsStatus
-            QQC2.BusyIndicator {
+            AtlasSpinner {
                 running: page.backend.appsBusy
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium
                 implicitHeight: implicitWidth

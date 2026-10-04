@@ -62,7 +62,7 @@ BuildRequires:  pkgconfig(gio-2.0)
 # from atlas-framework, which is in no repository: install its RPMs first
 # (build-rpm.sh does, given ATLAS_LOCAL_RPMS).
 BuildRequires:  kf6-kirigami-devel
-BuildRequires:  atlas-ui >= 1.1.0
+BuildRequires:  atlas-ui >= 1.3.0
 %endif
 
 %description
@@ -96,9 +96,10 @@ removal by dnf.
 %package -n atlas-updater
 Summary:        Atlas Updater for AtlasOS
 Requires:       atlas-system-helper = %{version}-%{release}
-# Atlas.Ui, the shared look (atlas-framework). 1.1.0 also ships
-# %{_datadir}/atlas/crash-reporting.toml, the crash report server.
-Requires:       atlas-ui >= 1.1.0
+# Atlas.Ui, the shared look (atlas-framework). 1.3.0 has the form controls
+# and AtlasSpinner the pages use; 1.1.0 and later ship
+# /usr/share/atlas/crash-reporting.toml, the crash report server.
+Requires:       atlas-ui >= 1.3.0
 Requires:       kf6-kirigami
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative
@@ -110,9 +111,6 @@ go back to the previous version and switch update channel.
 
 %prep
 %autosetup -n atlas-%{version}
-%if %{without app}
-sed -i 's|^members = .*|members = ["crates/atlas-update-engine"]|' Cargo.toml
-%endif
 
 %build
 # NETWORK: cargo (and Corrosion, which runs cargo with --locked) fetch the
@@ -145,11 +143,12 @@ export CFLAGS="%{build_cflags} $prefixmap"
 export CXXFLAGS="%{build_cxxflags} $prefixmap"
 export CARGO_PROFILE_RELEASE_STRIP=none
 export CARGO_PROFILE_RELEASE_LTO=false
-# Beside the app's build: each leaves CPUs idle at times. --locked: the root
-# helper is built from exactly the crates in Cargo.lock, never newer ones
-# (--without app drops the app from the workspace, which changes the lock).
+# Beside the app's build: each leaves CPUs idle at times. --locked, with or
+# without the app: the root helper is built from exactly the commits in
+# Cargo.lock, never from wherever a framework tag points now. -p builds only
+# the helper's crates, so the app staying in the workspace costs nothing.
 # The tray (atlas-updater-tray, no Qt) is a plain Cargo binary: built here too.
-cargo build --release %{?with_app:--locked} -p atlas-update-engine --bin atlas-system-helper \
+cargo build --release --locked -p atlas-update-engine --bin atlas-system-helper \
     %{?with_app:-p atlas-updater-tray --bin atlas-updater-tray} &
 helper=$!
 %if %{with app}

@@ -26,13 +26,13 @@ AtlasPage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.entries.length === 0 && page.appEntries.length === 0
-        icon.name: "view-history"
-        text: qsTr("No history yet")
-        explanation: qsTr("Each version this computer starts, and each app update, is listed here, newest first.")
+        iconName: "view-history"
+        title: qsTr("No history yet")
+        text: qsTr("Each version this computer starts, and each app update, is listed here, newest first.")
     }
 
     Section {

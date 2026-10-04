@@ -23,11 +23,12 @@ fixtures = ["atlas-updater-base/fixtures"]
 atlas-update-engine = { path = "../../crates/atlas-update-engine" }
 # What the window shares with atlas-updater-tray (settings, ops, schedule).
 atlas-updater-base = { path = "../../crates/atlas-updater-base" }
-# What Atlas apps share. Pinned: move the rev forward on purpose, together
+# What Atlas apps share. Pinned to a release tag (Cargo.lock holds its commit:
+# build with --locked); move it forward on purpose, together
 # with crates/atlas-update-engine's.
-atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
-atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
-atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }
+atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
+atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
+atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
 cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = "0.10"

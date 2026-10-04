@@ -25,13 +25,13 @@ AtlasPage {
         backend: page.backend
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.reports.length === 0
-        icon.name: "tools-report-bug"
-        text: qsTr("No crash reports waiting")
-        explanation: qsTr("When something crashes, the report shows up here and nothing is sent unless you say so.")
+        iconName: "tools-report-bug"
+        title: qsTr("No crash reports waiting")
+        text: qsTr("When something crashes, the report shows up here and nothing is sent unless you say so.")
     }
 
     Repeater {
@@ -87,7 +87,7 @@ AtlasPage {
                     QQC2.ScrollView {
                         anchors.fill: parent
                         anchors.margins: Kirigami.Units.smallSpacing
-                        QQC2.TextArea {
+                        AtlasTextArea {
                             readOnly: true
                             text: card.modelData.stacktrace
                             font: Kirigami.Theme.fixedWidthFont
@@ -116,7 +116,7 @@ AtlasPage {
                     QQC2.ScrollView {
                         anchors.fill: parent
                         anchors.margins: Kirigami.Units.smallSpacing
-                        QQC2.TextArea {
+                        AtlasTextArea {
                             readOnly: true
                             text: card.modelData.payload
                             font: Kirigami.Theme.fixedWidthFont

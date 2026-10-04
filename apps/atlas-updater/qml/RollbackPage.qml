@@ -33,13 +33,13 @@ AtlasPage {
         backend: page.backend
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.backend.loaded && !page.backend.hasRollback
-        icon.name: "edit-undo"
-        text: qsTr("There is no previous version to go back to")
-        explanation: qsTr("After the next update, the version you have now is kept here.")
+        iconName: "edit-undo"
+        title: qsTr("There is no previous version to go back to")
+        text: qsTr("After the next update, the version you have now is kept here.")
     }
 
     readonly property bool queued: page.backend.rollbackQueued === true

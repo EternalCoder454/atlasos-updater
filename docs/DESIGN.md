@@ -31,7 +31,8 @@ crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-help
   src/bin/atlas-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
 crates/atlas-updater-base/    what the window and the tray share: settings (rc), ops,
-                              schedule, view, restart, notifications, locks, worker result
+                              schedule, view, restart, locks, worker result, and the
+                              notifier (atlas_framework_system::notify, feature `notify`)
 apps/atlas-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
                               app jobs it runs for the tray (`--worker`, no Qt)
 apps/atlas-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
@@ -314,8 +315,9 @@ what was held back.
   registers again whenever the StatusNotifierWatcher (Plasma) comes back.
   Icon names come from the icon theme in `kdeglobals` (Papirus's update
   icons when present, else ours), looked up once at start.
-- Notifications go straight to `org.freedesktop.Notifications` with
-  KNotification's hints (`desktop-entry`, `x-kde-appname=atlas-updater`,
+- Notifications go straight to `org.freedesktop.Notifications`, through
+  atlas-framework's sender (`atlas_framework_system::notify`, a 10 s
+  timeout per call), with KNotification's hints (`desktop-entry`, `x-kde-appname=atlas-updater`,
   `x-kde-eventId`), so Plasma's per-event settings in
   `atlas-updater.notifyrc` keep working; an event whose popup the user
   turned off there is not sent. Action signals count only from the server

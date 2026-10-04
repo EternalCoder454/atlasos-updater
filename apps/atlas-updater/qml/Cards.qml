@@ -17,70 +17,44 @@ ColumnLayout {
     spacing: Kirigami.Units.smallSpacing
     visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showBusy)
 
-    component Banner: Rectangle {
-        id: banner
-        property string message
-        property color tint
-        property string iconName
-        property bool dismissable: true
-        property string dismissName: qsTr("Dismiss")
+    InfoBanner {
         Layout.fillWidth: true
-        visible: message.length > 0
-        Accessible.role: Accessible.AlertMessage
-        Accessible.name: message
-        implicitHeight: bannerRow.implicitHeight + Kirigami.Units.largeSpacing * 2
-        radius: 10
-        color: Qt.alpha(tint, 0.14)
-        border.width: 1
-        border.color: Qt.alpha(tint, 0.35)
-        RowLayout {
-            id: bannerRow
-            anchors.fill: parent
-            anchors.margins: Kirigami.Units.largeSpacing
-            spacing: Kirigami.Units.largeSpacing
-            Kirigami.Icon {
-                source: banner.iconName
-                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-            }
-            QQC2.Label {
-                Layout.fillWidth: true
-                text: banner.message
-                wrapMode: Text.Wrap
-                textFormat: Text.PlainText
-            }
-            SecondaryButton {
-                visible: banner.dismissable
-                text: qsTr("Dismiss")
-                Accessible.name: banner.dismissName
-                onClicked: root.backend.dismissMessages()
-            }
+        type: "warning"
+        text: qsTr("Developer test data: this is not your real system.")
+        shown: root.backend.fixturesActive
+    }
+    InfoBanner {
+        id: errorBanner
+        Layout.fillWidth: true
+        type: "error"
+        text: root.showError ? root.backend.errorText : ""
+        closable: true
+        onClosed: root.backend.dismissMessages()
+        // Closing breaks a plain binding; this one re-applies on the next message.
+        Binding {
+            target: errorBanner
+            property: "shown"
+            value: errorBanner.text.length > 0
         }
     }
-
-    Banner {
-        message: root.backend.fixturesActive ? qsTr("Developer test data: this is not your real system.") : ""
-        tint: Kirigami.Theme.neutralTextColor
-        iconName: "dialog-information"
-        dismissable: false
-    }
-    Banner {
-        message: root.showError ? root.backend.errorText : ""
-        tint: Kirigami.Theme.negativeTextColor
-        iconName: "dialog-error"
-        dismissName: qsTr("Dismiss error")
-    }
-    Banner {
-        message: root.backend.infoText
-        tint: Kirigami.Theme.highlightColor
-        iconName: "dialog-information"
-        dismissName: qsTr("Dismiss message")
+    InfoBanner {
+        id: infoBanner
+        Layout.fillWidth: true
+        type: "info"
+        text: root.backend.infoText
+        closable: true
+        onClosed: root.backend.dismissMessages()
+        Binding {
+            target: infoBanner
+            property: "shown"
+            value: infoBanner.text.length > 0
+        }
     }
     RowLayout {
         Layout.fillWidth: true
         visible: root.backend.busy && root.showBusy
         spacing: Kirigami.Units.largeSpacing
-        QQC2.BusyIndicator {
+        AtlasSpinner {
             running: root.backend.busy
         }
         QQC2.Label {

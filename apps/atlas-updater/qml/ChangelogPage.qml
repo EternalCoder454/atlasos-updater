@@ -75,35 +75,32 @@ AtlasPage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && (page.loadState === "loading" || page.loadState === "")
-        icon.name: "view-list-text"
-        text: qsTr("Loading the changelog…")
+        iconName: "view-list-text"
+        title: qsTr("Loading the changelog…")
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && page.loadState === "error"
-        icon.name: "dialog-error"
-        text: qsTr("Could not load the changelog")
-        explanation: page.backend.changelogNote.length > 0 ? page.backend.changelogNote : qsTr("Check your internet connection.")
-        helpfulAction: Kirigami.Action {
-            text: qsTr("Try Again")
-            icon.name: "view-refresh"
-            onTriggered: page.backend.loadChangelog()
-        }
+        iconName: "dialog-error"
+        title: qsTr("Could not load the changelog")
+        text: page.backend.changelogNote.length > 0 ? page.backend.changelogNote : qsTr("Check your internet connection.")
+        actionText: qsTr("Try Again")
+        onTriggered: page.backend.loadChangelog()
     }
 
-    Kirigami.PlaceholderMessage {
+    AtlasEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && page.loadState === "ready"
-        icon.name: "view-list-text"
-        text: qsTr("No versions to show yet")
-        explanation: qsTr("Each version this computer starts, and the one waiting for it, is listed here with its release notes.")
+        iconName: "view-list-text"
+        title: qsTr("No versions to show yet")
+        text: qsTr("Each version this computer starts, and the one waiting for it, is listed here with its release notes.")
     }
 
     // A list saved earlier, shown while offline.
