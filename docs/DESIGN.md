@@ -220,9 +220,57 @@ pub struct AppUpdate { pub id: String, pub name: String, pub branch: String,
                        pub installation: Installation /* System | User */,
                        pub download_size: u64, pub current_version: Option<String>,
                        pub new_version: Option<String> }
-pub fn list_updates() -> Result<Vec<AppUpdate>>;   // system + user, apps and runtimes
-pub fn update_all(progress: impl FnMut(Progress)) -> Result<()>;  // one transaction per installation
+pub fn list_updates(refresh: bool) -> Result<Vec<AppUpdate>>;   // system + user, apps and runtimes
+pub fn list_updates_with(refresh: bool, no_interaction: bool) -> Result<Vec<AppUpdate>>;
+pub fn update_all(progress: impl FnMut(Progress)) -> Result<()>;  // one transaction per installation,
+                                                                   // other installations as dependency sources
+pub fn update(opts: &UpdateOptions, progress: impl FnMut(Progress)) -> Outcome;
+// UpdateOptions { no_interaction, hold_new_permissions, check_only }
+// Outcome { updated: Vec<Updated>, held_back: Vec<Held { app, permissions }>, error: Option<Error> }
 ```
+
+`update` is for runs nobody asked for: `no_interaction` makes a step that
+would need a password fail instead of asking, and `hold_new_permissions`
+aborts each transaction in `ready-pre-auth` (before anything downloads or
+asks polkit) when an update's metadata grants more than the installed one,
+then runs it again without those apps. The metadata is parsed with GKeyFile,
+as flatpak parses it. Every group counts except the ones that grant nothing
+(`[Application]`, `[Runtime]`, `[ExtensionOf]`, `[Build]`, `[Extension *]`,
+`[Extra Data]`):
+a `[Context]` list that grants something new once its items are folded in
+order (`x` grants, a later `!x` takes it away; `filesystems` items by path
+without trailing slashes, `:ro` < `:rw` < `:create`; a `:reset`, a `!` with
+a suffix or a backslash escape counts as unreadable rather than guessed
+at), D-Bus names at a higher
+level (an unknown level counts as the highest), any other value that
+changed at all (`[Environment]`, `[USB Devices]`, `[Policy *]` and groups
+flatpak may add later), and a different runtime or SDK ID (a new branch of
+the same runtime is routine). A new file or value that can't be read counts
+as new permissions. An app the update would install (an end-of-life rename)
+is held too, put down to the update that brought it in (its related
+operations, else the app the rename uninstalls); if it can't be put down to
+one, that pass's apps are all held ("new permissions somewhere in this
+update") and runtimes go on. A runtime's own `[Context]` applies to its
+apps, so a runtime update that grants more (any group but
+`[Environment]`, which changes routinely) is held as well, and so is a
+runtime branch an update would install that grants anything (measured
+against nothing; Flathub's and Fedora's runtimes grant nothing). A
+runtime with any group beyond what it is, where its extensions mount and
+its environment (a `[Context]`, a bus policy, USB devices, anything newer)
+is read as strictly as an app, and measured against nothing when its
+installed metadata can't be found. One without goes on even if part of it
+can't be read, as does one with no new metadata at all (runtimes update
+often and routinely). A list item with spaces around it is unreadable, as
+flatpak keeps them.
+Everything one app asks for, however it was found, is one held entry.
+`no_interaction` is also set on the installations, so the listing and
+remote refresh before the transaction can't prompt either.
+Text from remotes (app names, versions, permission items, error messages)
+is cleaned with `clean`/`clean_to` before it is shown or logged: control
+characters become spaces, invisible and direction-changing ones (Unicode
+Cf, Zl, Zp) go, at most 80 characters (300 for errors). Every installation
+is tried; the first error is returned with what was updated before it and
+what was held back.
 
 `list_updates` reads cached metadata unless asked to refresh: it takes
 `refresh: bool`, which updates appstream and summary first.
@@ -271,6 +319,58 @@ Screens:
     `/etc/atlas-updater/updater.toml`. If no release exists: "No release
     notes for this version".
   - Flatpak app updates on the same screen, with an "Update Apps" button.
+  - "Download app updates in the background" (Automatic Updates section),
+    **off by default**, saved per user in `atlas-updaterrc`
+    (`[AppUpdates] Automatic`). The process (tray or window) looks for app
+    updates 10 minutes after it starts, then every 6 hours, and a minute
+    after the switch is turned on. Nothing is looked up while NetworkManager
+    says the connection is metered or offline. Not knowing counts as
+    metered: NetworkManager there but silent or saying "unknown", installed
+    but not running at the moment, the system bus not answering, or the
+    8-second limit on the whole read. Only a system without NetworkManager
+    installed goes ahead (the download then says whether there is a
+    network). The battery is checked only before installing, not before
+    looking. Off: the waiting updates are checked the same way without
+    downloading or installing anything (`check_only`: each run stops before
+    it would start), as is every "Check for App Updates", so rows say what
+    an update asks for before the user presses "Update Apps"; then a
+    notification (`appUpdatesReady`, with "Update Apps" unless something
+    asks for new permissions or the check failed, whose error the page
+    shows) when updates wait, once per set
+    (`[AppUpdates] Notified` holds a hash of the set, cleared when nothing
+    waits). On: they install by themselves through `update` with both
+    options set, unless UPower says the battery is below 30% while unplugged
+    (then nothing is shown). A round that waited tries again in 30 minutes;
+    failed rounds back off: 30 minutes, 1, 2, 4, then every 6 hours, until
+    one succeeds. A failed run gets the notification too, and its error
+    shows on the Updates page until a later round works or the user acts.
+    A run that fails before it could check an app's permissions installs
+    nothing of it, and pressing "Update Apps" then installs it as any
+    manual update would: the user chose it. If the list can't be read again
+    after installing, what waited before less what was installed stands in. Apps
+    held back for new permissions get it without the "Update Apps" button,
+    naming what they ask for; their rows on the Updates page say "Asks for
+    new permissions: ..." (at most five, the weightiest first: the
+    home folder or all files and ways out of the sandbox such as
+    `org.freedesktop.Flatpak` or owning a bus name, then devices and
+    sockets, then the rest) until they are updated, so the
+    user sees it before pressing "Update Apps". Each notice is given once:
+    the key covers the waiting set, the held apps and whether it failed.
+    The held notes live in memory only: after a restart the next round
+    finds them again. A round, a check or an "Update Apps" press that comes
+    while another app operation runs waits for it; a queued "Update Apps"
+    is dropped when that round held apps back, so nothing asking for new
+    permissions installs before the user saw it. If the switch can't be
+    saved, it stays as it was and the page says why. "Update Apps" on a
+    notification, or one pressed while another app operation runs, leaves
+    out what asks for new permissions, as a background run does (the check
+    behind a notice may be hours old, or have failed); what it left out
+    gets a notice and its row's note. The page's "Update Apps" installs
+    everything listed, as the user sees the notes there, after checking
+    again: if anything now asks for more than its row showed (a version
+    published since), or the check fails, nothing installs and the rows
+    get the new notes for the user to press again. It asks for a password
+    as usual.
   - "Restart to Update", and "Restart Later…" (pick a time today or
     tomorrow; the tray process restarts then, with a notification 5 minutes
     before; the setting persists in `~/.config/atlas-updaterrc`; can be
@@ -283,7 +383,18 @@ Screens:
 - **Channel**: stable or testing (from the booted ref's tag) →
   `SwitchChannel`, then offers the restart.
 - **History**: the versions this machine has booted, newest first, from
-  `history.jsonl`.
+  `history.jsonl`; below them the app updates this user installed, by hand
+  or in the background, from `~/.local/state/atlas-updater/app-updates.jsonl`
+  (one JSON object per line, cut to the newest 500 past 256 KB). Any app
+  with home access can write there, so the file is opened without following
+  symlinks and without blocking, must be a regular file of this user, and
+  only its last 512 KB are read; the folder is made 0700 (and tightened if
+  it is looser). Entries are cleaned like remote text when read, and lines
+  over 4 KB or dated in the future are dropped. Writers (the tray and the
+  window) take an exclusive `flock`, giving up after 5 seconds in all, and
+  check the file wasn't replaced meanwhile; the trim, under that lock,
+  writes a temporary file with a fresh name (`create_new`, 0600) and
+  renames it.
 
 ## AtlasOS side (the AtlasOS repo, not here)
 

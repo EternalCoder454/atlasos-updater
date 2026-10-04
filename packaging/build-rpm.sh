@@ -59,6 +59,12 @@ main() {
             rm -rf "$cache/target" "$cache/cmake"
             printf '%s\n' "$toolchain" >"$cache/toolchain"
         fi
+        # The sources unpack to a directory named after the version, and
+        # CMake refuses a build tree made for another source directory.
+        if [ "$(cat "$cache/version" 2>/dev/null)" != "$version" ]; then
+            rm -rf "$cache/cmake"
+            printf '%s\n' "$version" >"$cache/version"
+        fi
         # The app's QML is compiled against the installed Atlas.Ui (its
         # qmltypes and .qml files), which CMake doesn't track: rebuild the
         # CMake side, not cargo's, whenever that changes. (--without app

@@ -65,6 +65,11 @@ pub mod qobject {
         #[qproperty(bool, apps_busy, cxx_name = "appsBusy")]
         #[qproperty(QString, apps_status, cxx_name = "appsStatus")]
         #[qproperty(QString, apps_error, cxx_name = "appsError")]
+        /// "Download app updates in the background": off by default, saved
+        /// per user.
+        #[qproperty(bool, apps_auto, cxx_name = "appsAuto")]
+        /// App updates installed here (apphistory::Entry as JSON), newest first.
+        #[qproperty(QString, app_history_json, cxx_name = "appHistoryJson")]
         #[qproperty(QString, history_json, cxx_name = "historyJson")]
         /// The Changelog page's versions (changelog::Item as JSON), newest first.
         #[qproperty(QString, changelog_json, cxx_name = "changelogJson")]
@@ -102,6 +107,14 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "updateStaged"]
         fn update_staged(self: Pin<&mut Backend>, version: QString);
+
+        /// App updates wait for the user (background updates off, or some
+        /// held back): the tray shows `text` as a notification. Once per set.
+        #[qsignal]
+        #[cxx_name = "appUpdatesReady"]
+        /// `can_update`: false when an app asks for new permissions, which
+        /// the user should see before agreeing (no "Update Apps" button then).
+        fn app_updates_ready(self: Pin<&mut Backend>, text: QString, can_update: bool);
 
         /// A new report is waiting for review (tray notification).
         #[qsignal]
@@ -182,6 +195,15 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "updateApps"]
         fn update_apps(self: Pin<&mut Backend>);
+        /// "Update Apps" on a notification: what asks for new permissions
+        /// waits, as the check behind the notice may be hours old.
+        #[qinvokable]
+        #[cxx_name = "updateAppsChecked"]
+        fn update_apps_checked(self: Pin<&mut Backend>);
+        /// The "Download app updates in the background" switch.
+        #[qinvokable]
+        #[cxx_name = "enableBackgroundApps"]
+        fn enable_background_apps(self: Pin<&mut Backend>, on: bool);
 
         #[qinvokable]
         #[cxx_name = "restartNow"]
@@ -248,11 +270,23 @@ use crate::notes::{self, Notes};
 use crate::ops::{self, Op};
 use crate::schedule::{self, Event, Schedule};
 use crate::view::{self, View};
-use crate::{apps, changelog, crash, rc, restart};
+use crate::{apphistory, apps, changelog, crash, rc, restart};
 
 const RC_RESTART: &str = "Restart";
 const RC_NOTIFIED: &str = "Notified";
 const RC_CHECKED: &str = "Checked";
+const RC_APPS: &str = "AppUpdates";
+/// The first app round after the switch is turned on.
+const APPS_SOON: std::time::Duration = std::time::Duration::from_secs(60);
+/// The next app round after one that had to wait or failed.
+const APPS_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// When to try again after `failures` failed background rounds in a row:
+/// 30 minutes, doubling each time, at most 6 hours.
+fn apps_retry_after(failures: u32) -> std::time::Duration {
+    let doubled = APPS_RETRY.saturating_mul(1 << failures.clamp(1, 5).saturating_sub(1));
+    doubled.min(std::time::Duration::from_secs(6 * 3600))
+}
 
 #[derive(Default)]
 pub struct BackendRust {
@@ -293,6 +327,8 @@ pub struct BackendRust {
     apps_busy: bool,
     apps_status: QString,
     apps_error: QString,
+    apps_auto: bool,
+    app_history_json: QString,
     history_json: QString,
     changelog_json: QString,
     changelog_state: QString,
@@ -333,6 +369,22 @@ pub struct BackendRust {
     changelog_dirty: bool,
     /// When fetching the release list last failed.
     changelog_failed: Option<std::time::Instant>,
+    /// `apps_auto` for worker threads, which read it just before installing.
+    apps_auto_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// "Update Apps" arrived while another app operation ran: run it after.
+    apps_update_requested: bool,
+    /// The scheduled app round came while another app operation ran.
+    apps_round_pending: bool,
+    /// "Check for updates" was pressed during another app operation.
+    apps_check_requested: bool,
+    /// Background rounds that failed in a row, for the back-off.
+    apps_failures: u32,
+    /// The error shown came from a background round: the next round that
+    /// works takes it away.
+    apps_round_error: bool,
+    /// Apps a background round held back (`apps::row_key`) → what they ask
+    /// for, shown on their rows until they are updated.
+    apps_held: std::collections::HashMap<String, apps::HeldApp>,
 }
 
 /// This machine's history, newest first (developer fixtures: theirs).
@@ -518,6 +570,15 @@ impl qobject::Backend {
         if let Some(t) = checked.and_then(|v| v.trim().parse::<i64>().ok()) {
             self.as_mut().set_last_checked(t);
         }
+        // Background app updates are off unless the user turned them on.
+        let auto = match &self.rust().fixtures {
+            Some(d) => config::read_fixture(d, "apps-auto").is_some(),
+            None => rc::get(RC_APPS, "Automatic").as_deref() == Some("true"),
+        };
+        self.as_mut().set_apps_auto(auto);
+        self.rust()
+            .apps_auto_flag
+            .store(auto, std::sync::atomic::Ordering::Relaxed);
         if let Some(at) = saved {
             // A time that passed while we were not running is dropped: never
             // restart the machine unexpectedly at login.
@@ -571,6 +632,7 @@ impl qobject::Backend {
         let current = |this: &Self, t: i64| *this.scheduled_at() == t;
         match ev {
             Event::Poll => self.refresh_status(),
+            Event::Apps => self.apps_round(),
             Event::RestartWarning(t) => {
                 if current(&self, t) {
                     self.restart_soon();
@@ -1030,7 +1092,12 @@ impl qobject::Backend {
                 })
                 .collect();
             let text = serde_json::Value::Array(rows).to_string();
-            let _ = qt.queue(move |mut obj| obj.as_mut().set_history_json(q(&text)));
+            let apps_text = serde_json::to_string(&apphistory::read(fixtures.as_deref()))
+                .unwrap_or_else(|_| "[]".into());
+            let _ = qt.queue(move |mut obj| {
+                obj.as_mut().set_history_json(q(&text));
+                obj.as_mut().set_app_history_json(q(&apps_text));
+            });
         });
     }
 
@@ -1038,11 +1105,20 @@ impl qobject::Backend {
 
     pub fn check_apps(mut self: Pin<&mut Self>) {
         if *self.apps_busy() {
+            self.as_mut().rust_mut().apps_check_requested = true;
             return;
         }
+        self.start_check(true);
+    }
+
+    /// `fresh`: the user asked just now, so an old error goes. A check
+    /// queued behind another operation keeps the error that one left.
+    fn start_check(mut self: Pin<&mut Self>, fresh: bool) {
         self.as_mut().set_apps_busy(true);
         self.as_mut().set_apps_op(q("checkApps"));
-        self.as_mut().set_apps_error(QString::default());
+        if fresh {
+            self.as_mut().clear_apps_error();
+        }
         self.as_mut().set_apps_status(q("Looking for app updates…"));
         let fixtures = self.rust().fixtures.clone();
         let qt = self.qt_thread();
@@ -1050,11 +1126,78 @@ impl qobject::Backend {
             if fixtures.is_some() && config::fixture_hold("checkApps") {
                 config::hold_forever();
             }
-            let res = guarded(|| apps::list(true, fixtures.as_deref()))
-                .unwrap_or_else(|| Err(INTERNAL.to_string()));
-            let _ = qt.queue(move |obj| obj.apps_listed(res));
+            let res = guarded(|| {
+                let rows = apps::list(true, false, fixtures.as_deref())?;
+                // What the waiting updates ask for, shown before the user
+                // presses "Update Apps".
+                // (Fixture runs keep the notes they were given.)
+                let checked = (!rows.is_empty() && fixtures.is_none())
+                    .then(|| apps::check(fixtures.as_deref()));
+                if let Some(e) = checked.as_ref().and_then(|c| c.error.as_ref()) {
+                    eprintln!("atlas-updater: could not check what app updates ask for: {e}");
+                }
+                Ok((rows, checked))
+            })
+            .unwrap_or_else(|| Err(INTERNAL.to_string()));
+            let _ = qt.queue(move |mut obj| {
+                let mut unchecked = None;
+                let res = res.map(|(rows, checked)| {
+                    if let Some(c) = checked {
+                        obj.as_mut().apps_checked(&c);
+                        unchecked = c.error;
+                    }
+                    rows
+                });
+                obj.as_mut().apps_listed(res);
+                if let Some(e) = unchecked {
+                    obj.as_mut().user_error(q(&format!(
+                        "Could not check which app updates ask for new permissions: {e}"
+                    )));
+                }
+                obj.after_apps();
+            });
         }) {
-            self.apps_listed(Err("could not start a worker thread".into()));
+            self.as_mut()
+                .apps_listed(Err("could not start a worker thread".into()));
+            self.after_apps();
+        }
+    }
+
+    /// An app operation ended: run what was asked for meanwhile.
+    fn after_apps(mut self: Pin<&mut Self>) {
+        if *self.apps_busy() {
+            return;
+        }
+        if std::mem::take(&mut self.as_mut().rust_mut().apps_update_requested) {
+            // Pressed while something else ran: on a notice, whose check
+            // may be out of date or have failed.
+            self.start_update(true);
+        } else if std::mem::take(&mut self.as_mut().rust_mut().apps_check_requested) {
+            self.start_check(false);
+        } else if std::mem::take(&mut self.as_mut().rust_mut().apps_round_pending) {
+            self.apps_round();
+        }
+    }
+
+    /// Notes what a check found asking for new permissions. One that ran
+    /// to the end replaces the earlier notes.
+    fn apps_checked(mut self: Pin<&mut Self>, done: &apps::Done) {
+        if done.error.is_none() {
+            self.as_mut().rust_mut().apps_held.clear();
+        }
+        self.as_mut().apps_noted(&done.held_back);
+    }
+
+    /// Notes apps that ask for new permissions, for their rows.
+    fn apps_noted(mut self: Pin<&mut Self>, held: &[apps::HeldApp]) {
+        let mut this = self.as_mut().rust_mut();
+        for h in held {
+            this.apps_held.insert(h.key.clone(), h.clone());
+        }
+        if !held.is_empty() {
+            // An "Update Apps" asked for before these were found would
+            // install them before the user saw what they ask for.
+            this.apps_update_requested = false;
         }
     }
 
@@ -1063,27 +1206,59 @@ impl qobject::Backend {
         self.as_mut().set_apps_op(QString::default());
         self.as_mut().set_apps_status(QString::default());
         match res {
-            Ok(rows) => {
+            Ok(mut rows) => {
+                // Nothing waits: the next set, even the same apps again, is news.
+                if rows.is_empty() && self.rust().fixtures.is_none() {
+                    rc::set(RC_APPS, "Notified", None);
+                }
+                // Held apps keep their note until they are updated.
+                let keys: std::collections::HashSet<String> =
+                    rows.iter().map(apps::row_key).collect();
+                let mut this = self.as_mut().rust_mut();
+                this.apps_held.retain(|k, _| keys.contains(k));
+                for r in &mut rows {
+                    if let Some(h) = this.apps_held.get(&apps::row_key(r)) {
+                        r.asks = apps::asks_text(&h.asks);
+                    }
+                }
                 self.as_mut().set_apps_count(rows.len() as i32);
                 let text = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into());
                 self.as_mut().set_apps_json(q(&text));
             }
             Err(e) => {
                 self.as_mut()
-                    .set_apps_error(q(&format!("Could not check app updates: {e}")));
+                    .user_error(q(&format!("Could not check app updates: {e}")));
             }
         }
     }
 
+    /// The Updates page's button: the user sees each row's note there.
     pub fn update_apps(mut self: Pin<&mut Self>) {
         if *self.apps_busy() {
+            self.as_mut().rust_mut().apps_update_requested = true;
             return;
         }
+        self.start_update(false);
+    }
+
+    pub fn update_apps_checked(mut self: Pin<&mut Self>) {
+        if *self.apps_busy() {
+            // The notification's button during a background round, say.
+            self.as_mut().rust_mut().apps_update_requested = true;
+            return;
+        }
+        self.start_update(true);
+    }
+
+    /// `hold`: leave out what asks for new permissions, and say so.
+    fn start_update(mut self: Pin<&mut Self>, hold: bool) {
         self.as_mut().set_apps_busy(true);
         self.as_mut().set_apps_op(q("updateApps"));
-        self.as_mut().set_apps_error(QString::default());
+        self.as_mut().clear_apps_error();
         self.as_mut().set_apps_status(q("Updating apps…"));
         let fixtures = self.rust().fixtures.clone();
+        // What the page showed when the user pressed it.
+        let shown = self.rust().apps_held.clone();
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         if !spawn_named("atlas-apps-update", move || {
@@ -1092,34 +1267,266 @@ impl qobject::Backend {
                 config::hold_forever();
             }
             let res = guarded(|| {
-                apps::update_all(fixtures.as_deref(), move |line| {
-                    let _ =
-                        qt_progress.queue(move |mut obj| obj.as_mut().set_apps_status(q(&line)));
-                })
-                .and_then(|()| apps::list(false, fixtures.as_deref()))
-            })
-            .unwrap_or_else(|| Err(INTERNAL.to_string()));
-            let _ = qt.queue(move |mut obj| {
-                if let Err(e) = &res {
-                    obj.as_mut().set_apps_busy(false);
-                    obj.as_mut().set_apps_op(QString::default());
-                    obj.as_mut().set_apps_status(QString::default());
-                    obj.as_mut()
-                        .set_apps_error(q(&format!("Could not update apps: {e}")));
+                // The page's notes may be hours old: look again, and install
+                // nothing if something now asks for more than it showed.
+                let unseen = if hold || fixtures.is_some() {
+                    None
                 } else {
-                    obj.apps_listed(res);
-                    // Fixture runs keep their list; a real run is now empty.
+                    apps::unseen(apps::check(None), &shown)
+                };
+                let done = match unseen {
+                    Some(done) => done,
+                    None => apps::update(fixtures.as_deref(), false, hold, move |line| {
+                        let _ = qt_progress
+                            .queue(move |mut obj| obj.as_mut().set_apps_status(q(&line)));
+                    }),
+                };
+                if let Err(e) = apphistory::record(&done.updated, fixtures.as_deref()) {
+                    eprintln!("atlas-updater: could not save the app update history: {e}");
                 }
+                // Fixture runs keep their list; a real run lists what is left.
+                let rows = apps::list(false, false, fixtures.as_deref());
+                (done, rows)
+            });
+            let _ = qt.queue(move |mut obj| {
+                match res {
+                    None => {
+                        obj.as_mut().apps_idle();
+                        obj.as_mut()
+                            .user_error(q(&format!("Could not update apps: {INTERNAL}")));
+                    }
+                    Some((done, rows)) => {
+                        let failed = done.error.clone();
+                        // Noted before listing, so the rows show it.
+                        obj.as_mut().apps_noted(&done.held_back);
+                        let left = rows.as_ref().map(Vec::clone).unwrap_or_default();
+                        obj.as_mut().apps_listed(rows);
+                        if !done.held_back.is_empty() {
+                            obj.as_mut()
+                                .held_notice(&left, &done.held_back, failed.is_some());
+                        }
+                        if let Some(e) = failed {
+                            obj.as_mut()
+                                .user_error(q(&format!("Could not update apps: {e}")));
+                        }
+                        if !done.updated.is_empty() {
+                            obj.as_mut().load_history();
+                        }
+                    }
+                }
+                obj.after_apps();
             });
         }) {
             let _ = qt_fail.queue(|mut obj| {
-                obj.as_mut().set_apps_busy(false);
-                obj.as_mut().set_apps_op(QString::default());
-                obj.as_mut().set_apps_status(QString::default());
+                obj.as_mut().apps_idle();
                 obj.as_mut()
-                    .set_apps_error(q("Could not update apps: could not start a worker thread"));
+                    .user_error(q("Could not update apps: could not start a worker thread"));
+                obj.after_apps();
             });
         }
+    }
+
+    fn clear_apps_error(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().apps_round_error = false;
+        self.as_mut().set_apps_error(QString::default());
+    }
+
+    /// An error from something the user did: it stays until they act again.
+    fn user_error(mut self: Pin<&mut Self>, text: QString) {
+        self.as_mut().rust_mut().apps_round_error = false;
+        self.as_mut().set_apps_error(text);
+    }
+
+    /// An error from a background round, which nobody is waiting on.
+    fn round_error(mut self: Pin<&mut Self>, text: String) {
+        eprintln!("atlas-updater: {text}");
+        self.as_mut().set_apps_error(q(&text));
+        self.as_mut().rust_mut().apps_round_error = true;
+    }
+
+    fn apps_idle(mut self: Pin<&mut Self>) {
+        self.as_mut().set_apps_busy(false);
+        self.as_mut().set_apps_op(QString::default());
+        self.as_mut().set_apps_status(QString::default());
+    }
+
+    pub fn enable_background_apps(mut self: Pin<&mut Self>, on: bool) {
+        if self.rust().fixtures.is_none() {
+            let value = Some(if on { "true" } else { "false" });
+            if let Err(e) = rc::try_set(RC_APPS, "Automatic", value) {
+                // The switch goes back to what is in effect.
+                eprintln!("atlas-updater: could not save the app update setting: {e}");
+                self.as_mut()
+                    .user_error(q(&format!("Could not save the setting: {e}")));
+                return;
+            }
+            if on {
+                // Don't make the user wait up to 6 hours to see it work.
+                self.rust().schedule.apps_in(APPS_SOON);
+            }
+        }
+        self.rust()
+            .apps_auto_flag
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+        self.as_mut().set_apps_auto(on);
+    }
+
+    /// The scheduled app round: look for app updates, and install them if
+    /// the user turned that on. Whatever is left waiting for the user is
+    /// announced once per set.
+    fn apps_round(mut self: Pin<&mut Self>) {
+        // Fixture mode never acts on its own.
+        if self.rust().fixtures.is_some() {
+            return;
+        }
+        if *self.apps_busy() {
+            // Run when the user's own operation ends.
+            self.as_mut().rust_mut().apps_round_pending = true;
+            return;
+        }
+        let auto = *self.apps_auto();
+        let flag = self.rust().apps_auto_flag.clone();
+        self.as_mut().set_apps_busy(true);
+        self.as_mut().set_apps_op(q("autoApps"));
+        // An error already shown stays until something replaces it.
+        self.as_mut().set_apps_status(q(if auto {
+            "Updating apps in the background…"
+        } else {
+            "Looking for app updates…"
+        }));
+        let qt = self.qt_thread();
+        let qt_fail = qt.clone();
+        if !spawn_named("atlas-apps-auto", move || {
+            let res = guarded(|| {
+                let round =
+                    apps::background(|| flag.load(std::sync::atomic::Ordering::Relaxed), None);
+                if let Ok(r) = &round {
+                    if let Err(e) = apphistory::record(&r.done.updated, None) {
+                        eprintln!("atlas-updater: could not save the app update history: {e}");
+                    }
+                    if let Some(why) = r.waited {
+                        eprintln!("atlas-updater: app updates wait: {why}");
+                    }
+                    if let Some(e) = &r.done.error {
+                        eprintln!("atlas-updater: background app update failed: {e}");
+                    }
+                    if let Some(e) = &r.unchecked {
+                        eprintln!("atlas-updater: could not check what app updates ask for: {e}");
+                    }
+                }
+                round
+            })
+            .unwrap_or_else(|| Err(INTERNAL.to_string()));
+            let _ = qt.queue(move |obj| obj.apps_round_done(res));
+        }) {
+            let _ = qt_fail.queue(|mut obj| {
+                obj.as_mut().apps_idle();
+                obj.as_mut().round_error(
+                    "Could not check app updates: could not start a worker thread".into(),
+                );
+                obj.as_mut().apps_failed();
+                obj.after_apps();
+            });
+        }
+    }
+
+    fn apps_round_done(mut self: Pin<&mut Self>, res: Result<apps::Round, String>) {
+        self.as_mut().apps_round_finish(res);
+        self.after_apps();
+    }
+
+    /// A background round failed: try again later, later each time.
+    fn apps_failed(mut self: Pin<&mut Self>) {
+        let mut this = self.as_mut().rust_mut();
+        this.apps_failures = this.apps_failures.saturating_add(1);
+        this.schedule.apps_in(apps_retry_after(this.apps_failures));
+    }
+
+    fn apps_round_finish(mut self: Pin<&mut Self>, res: Result<apps::Round, String>) {
+        let round = match res {
+            Ok(r) => r,
+            Err(e) => {
+                self.as_mut().apps_idle();
+                self.as_mut()
+                    .round_error(format!("Could not check app updates: {e}"));
+                self.as_mut().apps_failed();
+                return;
+            }
+        };
+        let failed = round.done.error.is_some();
+        if failed {
+            self.as_mut().apps_failed();
+        } else {
+            self.as_mut().rust_mut().apps_failures = 0;
+            if round.waited.is_some() {
+                self.rust().schedule.apps_in(APPS_RETRY);
+            }
+        }
+        if !round.done.updated.is_empty() {
+            self.as_mut().load_history();
+        }
+        if round.ran {
+            // This run checked every update: its held set is the whole one.
+            self.as_mut().rust_mut().apps_held.clear();
+        }
+        self.as_mut().apps_noted(&round.done.held_back);
+        let Some(rows) = round.rows else {
+            // Not listed: a metered or offline connection. Nothing to say.
+            self.as_mut().apps_idle();
+            return;
+        };
+        self.as_mut().apps_listed(Ok(rows.clone()));
+        if let Some(e) = &round.done.error {
+            // Logged by the worker already.
+            self.as_mut()
+                .set_apps_error(q(&format!("Could not update apps in the background: {e}")));
+            self.as_mut().rust_mut().apps_round_error = true;
+        } else if let Some(e) = &round.unchecked {
+            self.as_mut().set_apps_error(q(&format!(
+                "Could not check which app updates ask for new permissions: {e}"
+            )));
+            self.as_mut().rust_mut().apps_round_error = true;
+        } else if self.rust().apps_round_error {
+            // This round worked: an earlier round's error is out of date.
+            self.as_mut().clear_apps_error();
+        }
+        // A low-battery wait is quiet: it tries again later.
+        if rows.is_empty() || round.waited.is_some() {
+            return;
+        }
+        // Each notice once: the same apps, held or failed the same way, are
+        // not news.
+        let key = apps::notice_key(
+            &rows,
+            &round.done.held_back,
+            failed || round.unchecked.is_some(),
+        );
+        if rc::get(RC_APPS, "Notified").as_deref() == Some(key.as_str()) {
+            return;
+        }
+        rc::set(RC_APPS, "Notified", Some(&key));
+        let text = apps::ready_text(&rows, &round.done.held_back, failed, round.auto);
+        // Nothing asking for new permissions, or not knowing, installs from
+        // a notification: the user sees it on the Updates page first.
+        let can_update = round.done.held_back.is_empty() && round.unchecked.is_none();
+        self.app_updates_ready(q(&text), can_update);
+    }
+
+    /// An update the user started from a notice left apps out: say which,
+    /// and don't say it again for the same set.
+    fn held_notice(
+        mut self: Pin<&mut Self>,
+        rows: &[apps::Row],
+        held: &[apps::HeldApp],
+        failed: bool,
+    ) {
+        if self.rust().fixtures.is_none() {
+            let key = apps::notice_key(rows, held, failed);
+            rc::set(RC_APPS, "Notified", Some(&key));
+        }
+        // Not "on its own": the user started it.
+        let text = apps::ready_text(rows, held, failed, false);
+        self.app_updates_ready(q(&text), false);
     }
 
     // ---- restart ----
@@ -1456,5 +1863,14 @@ mod tests {
     fn a_panicking_worker_is_reported_not_lost() {
         assert_eq!(guarded(|| 7), Some(7));
         assert_eq!(guarded(|| -> i32 { panic!("boom") }), None);
+    }
+
+    #[test]
+    fn failed_rounds_back_off() {
+        let m = |n| apps_retry_after(n).as_secs() / 60;
+        assert_eq!(
+            [m(0), m(1), m(2), m(3), m(4), m(5), m(99)],
+            [30, 30, 60, 120, 240, 360, 360]
+        );
     }
 }

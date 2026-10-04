@@ -105,6 +105,7 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "libc",
  "pulldown-cmark",
  "serde",
  "serde_json",

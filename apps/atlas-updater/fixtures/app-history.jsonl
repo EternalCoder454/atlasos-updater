@@ -1,0 +1,3 @@
+{"at":1759380000,"id":"com.github.tchx84.Flatseal","name":"Flatseal","branch":"stable","runtime":false,"system":true,"from":"2.3.0","to":"2.3.1","auto":false}
+{"at":1759500000,"id":"org.kde.Platform","name":"KDE Application Platform","branch":"6.9","runtime":true,"system":true,"from":null,"to":null,"auto":true}
+{"at":1759500000,"id":"org.mozilla.firefox","name":"Firefox","branch":"stable","runtime":false,"system":true,"from":"143.0","to":"143.0.4","auto":true}

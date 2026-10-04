@@ -31,6 +31,7 @@ public:
 private Q_SLOTS:
     void updateTray();
     void onUpdateStaged(const QString &version);
+    void onAppUpdatesReady(const QString &text, bool canUpdate);
     void onRestartSoon();
     void onRestartProblem(const QString &text);
     void onScheduleChanged();

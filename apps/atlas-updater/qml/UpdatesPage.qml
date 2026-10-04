@@ -566,6 +566,13 @@ AtlasPage {
             title: qsTr("Updates download on their own")
             subtitle: qsTr("In the background, when you're online and not on a metered connection. Restart when it suits you.")
         }
+        SectionRow {
+            title: qsTr("Download app updates in the background")
+            subtitle: page.backend.appsAuto ? qsTr("Apps update by themselves, but not on a metered connection or a low battery. An app that asks for new permissions waits for you.") : qsTr("Off: you get a notification when app updates are ready, and Update Apps installs them.")
+            showSwitch: true
+            switchChecked: page.backend.appsAuto
+            onSwitchToggled: checked => page.backend.enableBackgroundApps(checked)
+        }
     }
 
     // ---- flatpak apps ----
@@ -599,7 +606,11 @@ AtlasPage {
                 required property var modelData
                 iconName: appRow.modelData.icon ? appRow.modelData.icon : (appRow.modelData.runtime ? "preferences-system-plugin" : "applications-all")
                 title: appRow.modelData.name
-                subtitle: (appRow.modelData.runtime ? qsTr("Runtime") : qsTr("App")) + " · " + appRow.modelData.branch + " · " + (appRow.modelData.system ? qsTr("System") : qsTr("User"))
+                // Held back by a background round: say what it wants before
+                // the user presses Update Apps.
+                subtitle: appRow.modelData.asks
+                    ? qsTr("Asks for new permissions: %1").arg(appRow.modelData.asks)
+                    : (appRow.modelData.runtime ? qsTr("Runtime") : qsTr("App")) + " · " + appRow.modelData.branch + " · " + (appRow.modelData.system ? qsTr("System") : qsTr("User"))
                 value: appRow.modelData.size_text
             }
         }

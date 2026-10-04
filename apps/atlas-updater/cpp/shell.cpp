@@ -74,6 +74,7 @@ Shell::Shell(QObject *backend, bool trayMode, QObject *parent)
     connect(m_backend, SIGNAL(restartProblem(QString)), this, SLOT(onRestartProblem(QString)));
     connect(m_backend, SIGNAL(scheduledAtChanged()), this, SLOT(onScheduleChanged()));
     connect(m_backend, SIGNAL(reportFound(QString,QString)), this, SLOT(onReportFound(QString,QString)));
+    connect(m_backend, SIGNAL(appUpdatesReady(QString, bool)), this, SLOT(onAppUpdatesReady(QString, bool)));
     connect(m_backend, SIGNAL(crashEnabledChanged()), this, SLOT(updateCollectors()));
     updateTray();
 
@@ -242,6 +243,26 @@ void Shell::onUpdateStaged(const QString &version)
     n->setIconName(kAppIcon);
     auto *restart = n->addAction(tr("Restart to Update"));
     connect(restart, &KNotificationAction::activated, this, [this] { restartNow(); });
+    auto *open = n->addDefaultAction(tr("Open Atlas Updater"));
+    connect(open, &KNotificationAction::activated, this, [this] { openWindow(); });
+    n->sendEvent();
+}
+
+void Shell::onAppUpdatesReady(const QString &text, bool canUpdate)
+{
+    // Sent even while the window is open: the backend announces each set
+    // once, so skipping it here would lose it.
+    auto *n = new KNotification(QStringLiteral("appUpdatesReady"));
+    n->setComponentName(kComponent);
+    n->setTitle(tr("App updates ready"));
+    // App names come from Flatpak metadata: never markup.
+    n->setText(text.toHtmlEscaped());
+    n->setIconName(kAppIcon);
+    // An app asking for new permissions is reviewed in the window first.
+    if (canUpdate) {
+        auto *update = n->addAction(tr("Update Apps"));
+        connect(update, &KNotificationAction::activated, this, [this] { QMetaObject::invokeMethod(m_backend, "updateAppsChecked"); });
+    }
     auto *open = n->addDefaultAction(tr("Open Atlas Updater"));
     connect(open, &KNotificationAction::activated, this, [this] { openWindow(); });
     n->sendEvent();

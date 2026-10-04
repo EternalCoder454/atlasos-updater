@@ -16,5 +16,10 @@ pub fn get(group: &str, key: &str) -> Option<String> {
 /// `None` removes the key. A failed write is ignored: these values are
 /// conveniences, and the app works without them.
 pub fn set(group: &str, key: &str, value: Option<&str>) {
-    let _ = settings().set(group, key, value);
+    let _ = try_set(group, key, value);
+}
+
+/// [`set`] for a choice the user made: the error says why it wasn't saved.
+pub fn try_set(group: &str, key: &str, value: Option<&str>) -> std::io::Result<()> {
+    settings().set(group, key, value)
 }

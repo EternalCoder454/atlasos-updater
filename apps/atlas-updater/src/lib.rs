@@ -1,6 +1,7 @@
 //! Atlas Updater, Rust side. `cpp/` holds the thin Qt glue (tray, notifications,
 //! window lifecycle); every QObject QML talks to is in `backend.rs`.
 
+mod apphistory;
 mod apps;
 mod backend;
 mod changelog;
@@ -9,6 +10,7 @@ mod crash;
 mod errors;
 mod notes;
 mod ops;
+mod power;
 mod rc;
 mod restart;
 mod schedule;

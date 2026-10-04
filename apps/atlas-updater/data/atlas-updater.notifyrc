@@ -9,6 +9,11 @@ Name=Update Ready
 Comment=An AtlasOS update has been downloaded and is waiting for a restart
 Action=Popup
 
+[Event/appUpdatesReady]
+Name=App Updates Ready
+Comment=Updates for your apps are waiting for you to install them
+Action=Popup
+
 [Event/restartSoon]
 Name=Restart Coming Up
 Comment=A scheduled restart to finish updating is about to happen

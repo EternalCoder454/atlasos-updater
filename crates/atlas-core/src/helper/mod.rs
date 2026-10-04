@@ -1307,10 +1307,10 @@ impl Core {
             done?;
             // make the rename itself durable; the file is in place either
             // way, so a failure here only loses the rename at a power cut
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
-                    eprintln!("atlas-system-helper: cannot sync {}: {e}", dir.display());
-                }
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
+                && let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all())
+            {
+                eprintln!("atlas-system-helper: cannot sync {}: {e}", dir.display());
             }
             Ok(())
         };
@@ -3259,7 +3259,12 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             }
             other => panic!("{other:?}"),
         }
-        assert!(!f.inner.calls().iter().any(|c| c[..2] == ["rpm-ostree", "rebase"]));
+        assert!(
+            !f.inner
+                .calls()
+                .iter()
+                .any(|c| c[..2] == ["rpm-ostree", "rebase"])
+        );
     }
 
     #[test]
