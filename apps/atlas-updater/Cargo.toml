@@ -16,11 +16,13 @@ crate-type = ["staticlib", "rlib"]
 
 [features]
 # Honour ATLAS_UPDATER_FIXTURES in a release build (screenshots, UI tests).
-fixtures = []
+fixtures = ["atlas-updater-base/fixtures"]
 
 [dependencies]
 # The update engine (the system helper's client and the progress parser).
 atlas-update-engine = { path = "../../crates/atlas-update-engine" }
+# What the window shares with atlas-updater-tray (settings, ops, schedule).
+atlas-updater-base = { path = "../../crates/atlas-updater-base" }
 # What Atlas apps share. Pinned: move the rev forward on purpose, together
 # with crates/atlas-update-engine's.
 atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "bf9acc1a0d638dad25be535d58b809b0c1371f20" }

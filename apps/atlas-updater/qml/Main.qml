@@ -61,8 +61,8 @@ AtlasWindow {
         }
     }
 
-    // A restart did not happen. The Updates page explains it; the shell
-    // sends a notification instead when the window is not active.
+    // A restart did not happen (asked for on the Go Back or channel page):
+    // the Updates page explains it.
     Connections {
         target: root.backend
         function onRestartProblem(text) {

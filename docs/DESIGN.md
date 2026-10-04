@@ -23,14 +23,19 @@ Rust 1.98).
 ## Layout
 
 ```
-Cargo.toml                    workspace: crates/atlas-update-engine, apps/atlas-updater
+Cargo.toml                    workspace: the crates and apps below
 crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-helper`
   src/helper_client.rs        zbus proxy for the system helper (what apps call)
   src/progress.rs             progress of a running Upgrade/SwitchChannel
   src/helper/                 helper logic: bootc runner, polkit, retry, layered
   src/bin/atlas-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
-apps/atlas-updater/           the app (CMake + Corrosion, or cxx-qt-build)
+crates/atlas-updater-base/    what the window and the tray share: settings (rc), ops,
+                              schedule, view, restart, notifications, locks, worker result
+apps/atlas-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
+                              app jobs it runs for the tray (`--worker`, no Qt)
+apps/atlas-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
+  data/                       its D-Bus session service file
   qml/                        Kirigami UI, compiled ahead of time (qmlcachegen)
   data/                       .desktop, autostart .desktop, .notifyrc, metainfo, icon
 packaging/atlas.spec          one spec, subpackages `atlas-system-helper` and `atlas-updater`
@@ -284,16 +289,42 @@ what was held back.
 ## Atlas Updater app
 
 - Binary and package: `atlas-updater`. App ID: `net.eterneon.atlas.updater`.
-- `atlas-updater`: opens the window. `atlas-updater --tray`: autostarts at
-  login, puts a KStatusNotifierItem in the tray, and loads no QML until the
-  window opens. Closing the window frees the QML engine. A second launch
-  raises the existing instance (single instance through D-Bus on the session
-  bus, `net.eterneon.atlas.updater`).
+- Two programs. `atlas-updater-tray` autostarts at login and runs all
+  session: the panel icon, the schedule and the notifications. It has no Qt
+  and loads no libflatpak, so it stays at a few MB (2.5 MB PSS idle in the
+  test rig, against 94 MB for the Qt tray it replaced). `atlas-updater` is
+  the window: started when the user opens it (from the panel icon, a
+  notification or the menu), it quits once the window is closed and no
+  operation runs. A second launch raises the existing window (single
+  instance through D-Bus on the session bus, `net.eterneon.atlas.updater`),
+  passing on `--page <updates|settings|reports|sent>` and `--check`.
+  `atlas-updater --tray`, from older autostart entries, hands over to
+  `atlas-updater-tray`.
+- The tray owns the session bus name `net.eterneon.atlas.updater.Tray`
+  (one tray per session; a second one exits) with one method, `Reload()`
+  at `/net/eterneon/atlas/updater/Tray`: read `atlas-updaterrc` and the
+  crash report setting again. The window calls it after changing the
+  scheduled restart, background app updates or crash reports, and once at
+  start; a D-Bus service file starts the tray if the user quit it. The
+  window follows what the tray changes by watching the config folder.
+- Panel icon: a StatusNotifierItem (`org.kde.StatusNotifierItem-<pid>-1`,
+  Id `net.eterneon.atlas.updater`, as KStatusNotifierItem exported it) with
+  a com.canonical.dbusmenu menu: Open, Check for Updates, Restart to Update
+  (while staged), Cancel Scheduled Restart (while one is set), Quit. It
+  registers again whenever the StatusNotifierWatcher (Plasma) comes back.
+  Icon names come from the icon theme in `kdeglobals` (Papirus's update
+  icons when present, else ours), looked up once at start.
+- Notifications go straight to `org.freedesktop.Notifications` with
+  KNotification's hints (`desktop-entry`, `x-kde-appname=atlas-updater`,
+  `x-kde-eventId`), so Plasma's per-event settings in
+  `atlas-updater.notifyrc` keep working; an event whose popup the user
+  turned off there is not sent. Action signals count only from the server
+  that showed the notification.
 - Staged-update detection at idle: an inotify watch on `/run/ostree/`
   (bootc/ostree creates `/run/ostree/staged-deployment` when an update is
   staged), plus a fallback `Status()` call every 6 h. When something new is
-  staged, it sends a KNotification (event `updateStaged` in
-  `atlas-updater.notifyrc`) with a "Restart to Update" action, and the tray
+  staged, the tray sends a notification (event `updateStaged`) with a
+  "Restart to Update" action, unless the window is open, and the panel
   icon goes to NeedsAttention.
 - The background download and staging is the OS's job
   (`atlasos-update-stage.timer` in the AtlasOS image runs `bootc upgrade`, or
@@ -327,9 +358,16 @@ Screens:
   - Flatpak app updates on the same screen, with an "Update Apps" button.
   - "Download app updates in the background" (Automatic Updates section),
     **off by default**, saved per user in `atlas-updaterrc`
-    (`[AppUpdates] Automatic`). The process (tray or window) looks for app
-    updates 10 minutes after it starts, then every 6 hours, and a minute
-    after the switch is turned on. Nothing is looked up while NetworkManager
+    (`[AppUpdates] Automatic`). The tray looks for app updates 10 minutes
+    after it starts, then every 6 hours, and a minute after the switch is
+    turned on, each time in a short-lived `atlas-updater --worker
+    apps-round` (no Qt; it prints its result as one JSON line, dies with
+    the tray, and is ended after 6 hours). A notice counts as given once
+    it is on screen: one that could not be shown comes again next round. One app operation runs at a time: the worker and the window
+    take `$XDG_RUNTIME_DIR/atlas-updater-apps.lock` (a round finding it
+    taken tries again in 5 minutes). A round's error is kept in
+    `[AppUpdates] RoundError` for the window, and `RoundAt` tells an open
+    window to list the apps again. Nothing is looked up while NetworkManager
     says the connection is metered or offline. Not knowing counts as
     metered: NetworkManager there but silent or saying "unknown", installed
     but not running at the moment, the system bus not answering, or the
@@ -378,9 +416,11 @@ Screens:
     get the new notes for the user to press again. It asks for a password
     as usual.
   - "Restart to Update", and "Restart Later…" (pick a time today or
-    tomorrow; the tray process restarts then, with a notification 5 minutes
-    before; the setting persists in `~/.config/atlas-updaterrc`; can be
-    cancelled).
+    tomorrow; the tray restarts then, with a notification 5 minutes
+    before, and never without it: a warning that could not be shown, or
+    an update it could not check, turns the restart into a "did not
+    happen" notice; before acting, the tray reads the saved time again; the setting persists in `~/.config/atlas-updaterrc`; can be
+    cancelled, from the window, the menu or the notification).
   - Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
     session bus, so apps can save first.
 - **Go Back**: "Go Back to <rollback version> (<date>)" → `Rollback()`, then
@@ -413,7 +453,8 @@ Screens:
   whose service tries a download that failed with a network error again
   after 15 minutes (`update-stage` exits 75; at most 4 tries in 3 hours),
   and
-  autostarts `atlas-updater --tray`,
+  autostarts the tray (`atlas-updater-tray`; an image that still names
+  `atlas-updater --tray` works too),
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.
 

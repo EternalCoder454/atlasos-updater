@@ -1,20 +1,20 @@
-//! Atlas Updater, Rust side. `cpp/` holds the thin Qt glue (tray, notifications,
-//! window lifecycle); every QObject QML talks to is in `backend.rs`.
+//! Atlas Updater, Rust side. `cpp/` holds the thin Qt glue (window
+//! lifecycle); every QObject QML talks to is in `backend.rs`. The panel icon,
+//! the schedule and the notifications are atlas-updater-tray's; app rounds it
+//! runs in this program as `--worker` (`worker.rs`), without Qt.
 
 mod apphistory;
 mod apps;
 mod backend;
 mod changelog;
-mod config;
 mod crash;
-mod errors;
 mod notes;
-mod ops;
 mod power;
-mod rc;
-mod restart;
-mod schedule;
-mod view;
+mod worker;
+
+pub use atlas_updater_base::{
+    config, errors, lock, notify, ops, rc, restart, schedule, tray, view,
+};
 
 use std::ffi::c_void;
 

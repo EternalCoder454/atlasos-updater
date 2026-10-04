@@ -12,8 +12,6 @@ include(GNUInstallDirs)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Widgets)
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
-find_package(KF6Notifications REQUIRED)
-find_package(KF6StatusNotifierItem REQUIRED)
 find_package(KF6DBusAddons REQUIRED)
 find_package(Corrosion REQUIRED)
 # atlas-framework-flatpak links libflatpak and GLib into the Rust library.
@@ -56,11 +54,12 @@ qt_add_qml_module(atlas-updater-app
 target_link_libraries(atlas-updater-app PRIVATE
     atlas_updater PkgConfig::FLATPAK
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets
-    KF6::Notifications KF6::StatusNotifierItem KF6::DBusAddons)
+    KF6::DBusAddons)
 
 install(TARGETS atlas-updater-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/net.eterneon.atlas.updater.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+# atlas-updater-tray itself is a plain Cargo binary (packaging/atlas.spec).
 install(FILES data/net.eterneon.atlas.updater-tray.desktop
         DESTINATION /etc/xdg/autostart)
 install(FILES data/atlas-updater.notifyrc

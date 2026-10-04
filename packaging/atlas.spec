@@ -51,8 +51,6 @@ BuildRequires:  cmake(Qt6QuickControls2)
 BuildRequires:  cmake(Qt6Widgets)
 BuildRequires:  cmake(Qt6QmlTools)
 BuildRequires:  qt6-qtbase-devel
-BuildRequires:  cmake(KF6Notifications)
-BuildRequires:  cmake(KF6StatusNotifierItem)
 BuildRequires:  cmake(KF6DBusAddons)
 BuildRequires:  pkgconfig(gio-2.0)
 # QML modules qmlcachegen resolves at build time (not linked). atlas-ui comes
@@ -130,7 +128,9 @@ export CARGO_PROFILE_RELEASE_LTO=false
 # Beside the app's build: each leaves CPUs idle at times. --locked: the root
 # helper is built from exactly the crates in Cargo.lock, never newer ones
 # (--without app drops the app from the workspace, which changes the lock).
-cargo build --release %{?with_app:--locked} -p atlas-update-engine --bin atlas-system-helper &
+# The tray (atlas-updater-tray, no Qt) is a plain Cargo binary: built here too.
+cargo build --release %{?with_app:--locked} -p atlas-update-engine --bin atlas-system-helper \
+    %{?with_app:-p atlas-updater-tray --bin atlas-updater-tray} &
 helper=$!
 %if %{with app}
 # (checked with rpmspec --eval: %%cmake honours _vpath_srcdir, not __cmake_source_dir)
@@ -157,6 +157,9 @@ install -Dpm0644 $d/polkit-1/rules.d/50-atlas-system.rules \
 install -Dpm0644 $d/dnf/protected.d/atlas.conf %{buildroot}%{_sysconfdir}/dnf/protected.d/atlas.conf
 %if %{with app}
 %cmake_install
+install -Dpm0755 %{cargo_target_dir}/release/atlas-updater-tray %{buildroot}%{_bindir}/atlas-updater-tray
+install -Dpm0644 apps/atlas-updater-tray/data/net.eterneon.atlas.updater.Tray.service \
+    %{buildroot}%{_datadir}/dbus-1/services/net.eterneon.atlas.updater.Tray.service
 %endif
 
 %if %{with app}
@@ -197,6 +200,8 @@ systemctl --no-reload preset atlas-record-boot.service >/dev/null 2>&1 || :
 %files -n atlas-updater
 %license LICENSE
 %{_bindir}/atlas-updater
+%{_bindir}/atlas-updater-tray
+%{_datadir}/dbus-1/services/net.eterneon.atlas.updater.Tray.service
 %{_datadir}/applications/net.eterneon.atlas.updater.desktop
 %{_sysconfdir}/xdg/autostart/net.eterneon.atlas.updater-tray.desktop
 %{_datadir}/knotifications6/atlas-updater.notifyrc

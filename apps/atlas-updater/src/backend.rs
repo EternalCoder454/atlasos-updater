@@ -103,43 +103,21 @@ pub mod qobject {
         #[namespace = "atlas_updater"]
         type Backend = super::BackendRust;
 
-        /// A staged update we have not told the user about yet.
-        #[qsignal]
-        #[cxx_name = "updateStaged"]
-        fn update_staged(self: Pin<&mut Backend>, version: QString);
-
-        /// App updates wait for the user (background updates off, or some
-        /// held back): the tray shows `text` as a notification. Once per set.
-        #[qsignal]
-        #[cxx_name = "appUpdatesReady"]
-        /// `can_update`: false when an app asks for new permissions, which
-        /// the user should see before agreeing (no "Update Apps" button then).
-        fn app_updates_ready(self: Pin<&mut Backend>, text: QString, can_update: bool);
-
-        /// A new report is waiting for review (tray notification).
-        #[qsignal]
-        #[cxx_name = "reportFound"]
-        fn report_found(self: Pin<&mut Backend>, app_name: QString, report_type: QString);
-
-        /// The scheduled restart is 5 minutes away (`scheduledAt` has the time).
-        #[qsignal]
-        #[cxx_name = "restartSoon"]
-        fn restart_soon(self: Pin<&mut Backend>);
-
-        /// A scheduled restart did not happen (missed while asleep, or Plasma
-        /// refused it); the tray shows this as a notification.
+        /// A restart did not happen; the Updates page shows why.
         #[qsignal]
         #[cxx_name = "restartProblem"]
         fn restart_problem(self: Pin<&mut Backend>, text: QString);
 
-        /// Starts the scheduler thread and the first status read.
+        /// Reads the settings and the first status.
         #[qinvokable]
         fn start(self: Pin<&mut Backend>);
-        /// Stops the scheduler thread (before the app quits).
+        /// The settings file changed (the tray cleared a scheduled restart,
+        /// a background round ran): show what it says now.
         #[qinvokable]
-        fn shutdown(self: Pin<&mut Backend>);
+        #[cxx_name = "reloadSettings"]
+        fn reload_settings(self: Pin<&mut Backend>);
 
-        /// Silent status read (inotify hit, 6 h poll, window opened).
+        /// Silent status read (inotify hit, window opened).
         #[qinvokable]
         #[cxx_name = "refreshStatus"]
         fn refresh_status(self: Pin<&mut Backend>);
@@ -195,11 +173,6 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "updateApps"]
         fn update_apps(self: Pin<&mut Backend>);
-        /// "Update Apps" on a notification: what asks for new permissions
-        /// waits, as the check behind the notice may be hours old.
-        #[qinvokable]
-        #[cxx_name = "updateAppsChecked"]
-        fn update_apps_checked(self: Pin<&mut Backend>);
         /// The "Download app updates in the background" switch.
         #[qinvokable]
         #[cxx_name = "enableBackgroundApps"]
@@ -227,10 +200,6 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "loadSentReports"]
         fn load_sent_reports(self: Pin<&mut Backend>);
-        /// Tray: new systemd-coredump entries and helper events (only when on).
-        #[qinvokable]
-        #[cxx_name = "collectReports"]
-        fn collect_reports(self: Pin<&mut Backend>);
         /// "Send": the user saw the exact data. `event_id` is the report's
         /// `eventId` in `reportsJson`.
         #[qinvokable]
@@ -257,6 +226,7 @@ pub mod qobject {
 
 use core::pin::Pin;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use atlas_framework_system::bootc::{Channel, Status};
 use atlas_framework_system::crash::Report;
@@ -268,25 +238,14 @@ use crate::config::{self, Config};
 use crate::errors::{self, OpError};
 use crate::notes::{self, Notes};
 use crate::ops::{self, Op};
-use crate::schedule::{self, Event, Schedule};
+use crate::schedule;
 use crate::view::{self, View};
-use crate::{apphistory, apps, changelog, crash, rc, restart};
+use crate::worker::{ROUND_AT, ROUND_ERROR};
+use crate::{apphistory, apps, changelog, crash, lock, notify, rc, restart, tray};
 
-const RC_RESTART: &str = "Restart";
-const RC_NOTIFIED: &str = "Notified";
-const RC_CHECKED: &str = "Checked";
-const RC_APPS: &str = "AppUpdates";
-/// The first app round after the switch is turned on.
-const APPS_SOON: std::time::Duration = std::time::Duration::from_secs(60);
-/// The next app round after one that had to wait or failed.
-const APPS_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// When to try again after `failures` failed background rounds in a row:
-/// 30 minutes, doubling each time, at most 6 hours.
-fn apps_retry_after(failures: u32) -> std::time::Duration {
-    let doubled = APPS_RETRY.saturating_mul(1 << failures.clamp(1, 5).saturating_sub(1));
-    doubled.min(std::time::Duration::from_secs(6 * 3600))
-}
+const RC_RESTART: &str = rc::RESTART;
+const RC_CHECKED: &str = rc::CHECKED;
+const RC_APPS: &str = rc::APPS;
 
 #[derive(Default)]
 pub struct BackendRust {
@@ -346,12 +305,10 @@ pub struct BackendRust {
     sent_json: QString,
     os_logo: QString,
     fixtures_active: bool,
-    fixture_notified: String,
 
     // Not exposed to QML.
     config: Config,
     fixtures: Option<PathBuf>,
-    schedule: Schedule,
     started: bool,
     /// Bumped whenever the pending list changes by another route, so a
     /// slower `load_reports` result is not shown over it.
@@ -369,19 +326,15 @@ pub struct BackendRust {
     changelog_dirty: bool,
     /// When fetching the release list last failed.
     changelog_failed: Option<std::time::Instant>,
-    /// `apps_auto` for worker threads, which read it just before installing.
-    apps_auto_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// "Update Apps" arrived while another app operation ran: run it after.
     apps_update_requested: bool,
-    /// The scheduled app round came while another app operation ran.
-    apps_round_pending: bool,
     /// "Check for updates" was pressed during another app operation.
     apps_check_requested: bool,
-    /// Background rounds that failed in a row, for the back-off.
-    apps_failures: u32,
-    /// The error shown came from a background round: the next round that
-    /// works takes it away.
+    /// The error shown came from a background round (the tray's worker):
+    /// it goes when the user acts, or a later round works.
     apps_round_error: bool,
+    /// When a background round last changed the apps (`RoundAt`).
+    apps_round_at: Option<String>,
     /// Apps a background round held back (`apps::row_key`) → what they ask
     /// for, shown on their rows until they are updated.
     apps_held: std::collections::HashMap<String, apps::HeldApp>,
@@ -490,28 +443,51 @@ fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
-const INTERNAL: &str = "Atlas Updater hit an internal error. Please try again.";
-
-fn q(s: &str) -> QString {
-    QString::from(s)
-}
-
-/// Stores (or clears) the scheduled restart time. Fixture mode never touches
-/// the user's real settings file.
-fn save_schedule(fixtures: bool, at: Option<i64>) {
-    if !fixtures {
-        rc::set(
-            RC_RESTART,
-            "ScheduledAt",
-            at.map(|t| t.to_string()).as_deref(),
-        );
+/// Holds the app operation lock (atlas_updater_base::lock) for the length
+/// of a window's own check or update, waiting for a background round to end.
+fn take_apps_lock(fixtures: bool) -> Option<lock::Held> {
+    if fixtures {
+        return None;
+    }
+    match lock::take(lock::APPS, true) {
+        Ok(h) => h,
+        Err(e) => {
+            // Not worth refusing the user's request over.
+            eprintln!("atlas-updater: cannot take the app update lock: {e}");
+            None
+        }
     }
 }
 
-fn timer_failed(mut obj: Pin<&mut qobject::Backend>) {
-    obj.as_mut().set_error("timer", q(
-        "Atlas Updater could not start its background timer. Update checks and scheduled restarts will not run until it is reopened.",
-    ));
+const INTERNAL: &str = "Atlas Updater hit an internal error. Please try again.";
+
+/// Reload calls to the tray still on their way, and whether one failed: the
+/// window may quit right after a change (see `atlas_tray_flush`).
+static TRAY_CALLS: AtomicUsize = AtomicUsize::new(0);
+static TRAY_MISSED: AtomicBool = AtomicBool::new(false);
+/// Notifications still being sent.
+static NOTIFY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Called from `main.cpp` as the process ends: lets notifications being sent
+/// finish, and if the tray may not have heard about a change yet, tells it
+/// now (blocking, bounded by the calls' own timeouts).
+#[unsafe(no_mangle)]
+pub extern "C" fn atlas_tray_flush() {
+    // send_blocking gives up after 10 s.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    while NOTIFY_CALLS.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if TRAY_CALLS.load(Ordering::SeqCst) == 0 && !TRAY_MISSED.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(e) = guarded(tray::reload).unwrap_or_else(|| Err(INTERNAL.into())) {
+        eprintln!("atlas-updater: the tray did not hear about the last change: {e}");
+    }
+}
+
+fn q(s: &str) -> QString {
+    QString::from(s)
 }
 
 impl qobject::Backend {
@@ -546,7 +522,6 @@ impl qobject::Backend {
         }
         let cfg = Config::load();
         let fixtures = config::fixtures_dir();
-        let schedule = self.rust().schedule.clone();
         if let Some(logo) = atlas_framework_core::osrelease::logo_icon() {
             self.as_mut().set_os_logo(QString::from(logo.as_str()));
         }
@@ -556,12 +531,6 @@ impl qobject::Backend {
             r.config = cfg;
             r.fixtures = fixtures;
         }
-        // Fixture mode takes the schedule from `schedule.json` and leaves the
-        // user's own settings file alone.
-        let saved = match &self.rust().fixtures {
-            Some(d) => config::fixture_schedule(d),
-            None => rc::get(RC_RESTART, "ScheduledAt").and_then(|v| v.parse::<i64>().ok()),
-        };
         // Fixture mode: `last-checked` (Unix seconds), else never.
         let checked = match &self.rust().fixtures {
             Some(d) => config::read_fixture(d, "last-checked"),
@@ -570,45 +539,30 @@ impl qobject::Backend {
         if let Some(t) = checked.and_then(|v| v.trim().parse::<i64>().ok()) {
             self.as_mut().set_last_checked(t);
         }
-        // Background app updates are off unless the user turned them on.
-        let auto = match &self.rust().fixtures {
-            Some(d) => config::read_fixture(d, "apps-auto").is_some(),
-            None => rc::get(RC_APPS, "Automatic").as_deref() == Some("true"),
-        };
-        self.as_mut().set_apps_auto(auto);
-        self.rust()
-            .apps_auto_flag
-            .store(auto, std::sync::atomic::Ordering::Relaxed);
-        if let Some(at) = saved {
-            // A time that passed while we were not running is dropped: never
-            // restart the machine unexpectedly at login.
-            if at > schedule::unix_now() {
-                self.as_mut().set_scheduled_at(at);
-                schedule.restore_restart(at);
-            } else {
-                save_schedule(self.rust().fixtures.is_some(), None);
+        // Fixture mode takes the schedule and the switch from its files and
+        // leaves the user's own settings alone.
+        match self.rust().fixtures.clone() {
+            Some(d) => {
+                let at = config::fixture_schedule(&d).filter(|t| *t > schedule::unix_now());
+                self.as_mut().set_scheduled_at(at.unwrap_or(0));
+                let auto = config::read_fixture(&d, "apps-auto").is_some();
+                self.as_mut().set_apps_auto(auto);
+            }
+            None => {
+                self.as_mut().rust_mut().apps_round_at = rc::get(RC_APPS, ROUND_AT);
+                self.as_mut().reload_settings();
+                // The tray keeps the schedule and the notifications: make sure
+                // it runs (D-Bus starts it if the user quit it).
+                if !spawn_named("atlas-tray", || {
+                    if let Err(e) = tray::reload() {
+                        eprintln!("atlas-updater: {e}");
+                    }
+                }) {
+                    eprintln!("atlas-updater: could not start a thread to wake the tray");
+                }
             }
         }
-        let qt = self.qt_thread();
-        let sched = schedule.clone();
-        let qt_run = qt.clone();
-        let started = std::thread::Builder::new()
-            .name("atlas-schedule".into())
-            .stack_size(256 * 1024)
-            .spawn(move || {
-                let ended = guarded(|| {
-                    sched.run(move |ev| {
-                        let _ = qt_run.queue(move |obj| obj.on_event(ev));
-                    })
-                });
-                if ended.is_none() {
-                    let _ = qt.queue(timer_failed);
-                }
-            });
-        if started.is_err() {
-            let _ = self.qt_thread().queue(timer_failed);
-        }
-        // Crash reports are opt-in: read the setting, and only when on look for new ones.
+        // Crash reports are opt-in; the tray collects them, the window lists them.
         let on = match &self.rust().fixtures {
             Some(d) => config::read_fixture(d, "crash-enabled").is_some(),
             None => atlas_framework_system::crash::Settings::load().enabled,
@@ -616,62 +570,84 @@ impl qobject::Backend {
         self.as_mut().set_crash_enabled(on);
         let fix = self.rust().fixtures.is_some();
         self.as_mut().set_fixtures_active(fix);
-        if on {
-            self.as_mut().collect_reports();
-        }
         self.refresh_status();
     }
 
-    pub fn shutdown(self: Pin<&mut Self>) {
-        self.rust().schedule.stop();
-    }
-
-    fn on_event(self: Pin<&mut Self>, ev: Event) {
-        // An event can sit in the queue while the user cancels or picks
-        // another time: act only if it is still the scheduled one.
-        let current = |this: &Self, t: i64| *this.scheduled_at() == t;
-        match ev {
-            Event::Poll => self.refresh_status(),
-            Event::Apps => self.apps_round(),
-            Event::RestartWarning(t) => {
-                if current(&self, t) {
-                    self.restart_soon();
-                }
+    /// What the settings file says now about the scheduled restart, the
+    /// background app switch and the last background round.
+    pub fn reload_settings(mut self: Pin<&mut Self>) {
+        if self.rust().fixtures.is_some() {
+            return;
+        }
+        // A time that passed is not shown: the tray drops it (or is
+        // restarting the computer right now).
+        let at = rc::scheduled_at()
+            .filter(|t| *t > schedule::unix_now())
+            .unwrap_or(0);
+        if *self.scheduled_at() != at {
+            self.as_mut().set_scheduled_at(at);
+        }
+        let auto = rc::apps_automatic();
+        if *self.apps_auto() != auto {
+            self.as_mut().set_apps_auto(auto);
+        }
+        let round_error = rc::get(RC_APPS, ROUND_ERROR).unwrap_or_default();
+        if round_error.is_empty() {
+            if self.rust().apps_round_error {
+                self.as_mut().rust_mut().apps_round_error = false;
+                self.as_mut().set_apps_error(QString::default());
             }
-            Event::RestartDue(t) => {
-                let mut this = self;
-                if !current(&this, t) {
-                    return;
-                }
-                save_schedule(this.rust().fixtures.is_some(), None);
-                if *this.restarting() {
-                    // a restart is already in flight: just drop the plan
-                    this.as_mut().clear_schedule_state();
-                } else if *this.restart_needed() && this.rust().fixtures.is_none() {
-                    // scheduledAt stays set while the restart is in flight: the
-                    // shell must not quit a window-less instance before the
-                    // logout call finishes (start_restart clears it after).
-                    this.start_restart(Some(t));
+        } else if !*self.apps_busy()
+            && (self.rust().apps_round_error || self.apps_error().is_empty())
+            && self.apps_error().to_string() != round_error
+        {
+            // An error from something the user did stays until they act.
+            self.as_mut().set_apps_error(q(&round_error));
+            self.as_mut().rust_mut().apps_round_error = true;
+        }
+        let round_at = rc::get(RC_APPS, ROUND_AT);
+        if round_at != self.rust().apps_round_at {
+            self.as_mut().rust_mut().apps_round_at = round_at;
+            // A background round changed the apps: list them again quietly.
+            if self.rust().window_open {
+                self.as_mut().load_history();
+                if *self.apps_busy() {
+                    self.as_mut().rust_mut().apps_check_requested = true;
                 } else {
-                    this.as_mut().clear_schedule_state();
+                    self.as_mut().start_check(false);
                 }
-            }
-            Event::RestartMissed(t) => {
-                let mut this = self;
-                if !current(&this, t) {
-                    return;
-                }
-                this.as_mut().clear_schedule_state();
-                let text = "The scheduled restart did not happen because the computer was asleep at that time. The update is still waiting. Restart when you are ready.";
-                this.as_mut().set_info_text(q(text));
-                this.restart_problem(q(text));
             }
         }
     }
 
-    fn clear_schedule_state(mut self: Pin<&mut Self>) {
-        save_schedule(self.rust().fixtures.is_some(), None);
-        self.as_mut().set_scheduled_at(0);
+    /// Tells the tray about a setting the window changed. `what` names it
+    /// in the error, should the tray not answer.
+    fn tell_tray(self: Pin<&mut Self>, what: &'static str) {
+        if self.rust().fixtures.is_some() {
+            return;
+        }
+        let qt = self.qt_thread();
+        TRAY_CALLS.fetch_add(1, Ordering::SeqCst);
+        let started = spawn_named("atlas-tray", move || {
+            let res = guarded(tray::reload).unwrap_or_else(|| Err(INTERNAL.into()));
+            // The tray reads the whole file: a call that worked covers
+            // any earlier one that did not.
+            TRAY_MISSED.store(res.is_err(), Ordering::SeqCst);
+            TRAY_CALLS.fetch_sub(1, Ordering::SeqCst);
+            if let Err(e) = res {
+                eprintln!("atlas-updater: {e}");
+                let _ = qt.queue(move |mut obj| {
+                    obj.as_mut().set_info_text(q(&format!(
+                        "The {what} is saved, but Atlas Updater's background service did not answer ({e}). It takes effect when the service starts again, at the latest after you log in."
+                    )));
+                });
+            }
+        });
+        if !started {
+            eprintln!("atlas-updater: could not start a thread to tell the tray");
+            TRAY_CALLS.fetch_sub(1, Ordering::SeqCst);
+            TRAY_MISSED.store(true, Ordering::SeqCst);
+        }
     }
 
     // ---- status and helper operations ----
@@ -854,33 +830,9 @@ impl qobject::Backend {
             .set_available_is_rollback(v.available_is_rollback);
         self.as_mut().set_available_is_bad(v.available_is_bad);
         self.as_mut().set_rollback_is_bad(v.rollback_is_bad);
-        let staged = v.staged.clone();
-        // Tell the user once per staged image, even across restarts of the tray.
-        // (fixture mode keeps this in memory and never touches real settings)
-        let fix = self.rust().fixtures.is_some();
-        let seen = if fix {
-            Some(self.rust().fixture_notified.clone())
-        } else {
-            rc::get(RC_NOTIFIED, "StagedDigest")
-        };
-        if staged.present
-            && !staged.digest.is_empty()
-            && seen.as_deref() != Some(staged.digest.as_str())
-        {
-            if fix {
-                self.as_mut().rust_mut().fixture_notified = staged.digest.clone();
-            } else {
-                rc::set(RC_NOTIFIED, "StagedDigest", Some(&staged.digest));
-            }
-            self.as_mut().update_staged(q(&staged.version));
-        }
         // Notes follow the version, but only while a window is open.
         if self.rust().window_open {
             self.as_mut().load_notes();
-        }
-        if !staged.present && !*self.restart_needed() && *self.scheduled_at() != 0 {
-            // The staged update is gone (rebooted or cleaned): the plan is moot.
-            self.as_mut().cancel_restart();
         }
     }
 
@@ -1127,6 +1079,8 @@ impl qobject::Backend {
                 config::hold_forever();
             }
             let res = guarded(|| {
+                // One app operation at a time, the tray's rounds included.
+                let _held = take_apps_lock(fixtures.is_some());
                 let rows = apps::list(true, false, fixtures.as_deref())?;
                 // What the waiting updates ask for, shown before the user
                 // presses "Update Apps".
@@ -1174,8 +1128,6 @@ impl qobject::Backend {
             self.start_update(true);
         } else if std::mem::take(&mut self.as_mut().rust_mut().apps_check_requested) {
             self.start_check(false);
-        } else if std::mem::take(&mut self.as_mut().rust_mut().apps_round_pending) {
-            self.apps_round();
         }
     }
 
@@ -1209,7 +1161,7 @@ impl qobject::Backend {
             Ok(mut rows) => {
                 // Nothing waits: the next set, even the same apps again, is news.
                 if rows.is_empty() && self.rust().fixtures.is_none() {
-                    rc::set(RC_APPS, "Notified", None);
+                    rc::set(RC_APPS, atlas_updater_base::worker::APPS_NOTIFIED, None);
                 }
                 // Held apps keep their note until they are updated.
                 let keys: std::collections::HashSet<String> =
@@ -1241,15 +1193,6 @@ impl qobject::Backend {
         self.start_update(false);
     }
 
-    pub fn update_apps_checked(mut self: Pin<&mut Self>) {
-        if *self.apps_busy() {
-            // The notification's button during a background round, say.
-            self.as_mut().rust_mut().apps_update_requested = true;
-            return;
-        }
-        self.start_update(true);
-    }
-
     /// `hold`: leave out what asks for new permissions, and say so.
     fn start_update(mut self: Pin<&mut Self>, hold: bool) {
         self.as_mut().set_apps_busy(true);
@@ -1267,6 +1210,7 @@ impl qobject::Backend {
                 config::hold_forever();
             }
             let res = guarded(|| {
+                let _held = take_apps_lock(fixtures.is_some());
                 // The page's notes may be hours old: look again, and install
                 // nothing if something now asks for more than it showed.
                 let unseen = if hold || fixtures.is_some() {
@@ -1327,21 +1271,24 @@ impl qobject::Backend {
     }
 
     fn clear_apps_error(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().apps_round_error = false;
+        self.as_mut().forget_round_error();
         self.as_mut().set_apps_error(QString::default());
     }
 
     /// An error from something the user did: it stays until they act again.
     fn user_error(mut self: Pin<&mut Self>, text: QString) {
-        self.as_mut().rust_mut().apps_round_error = false;
+        self.as_mut().forget_round_error();
         self.as_mut().set_apps_error(text);
     }
 
-    /// An error from a background round, which nobody is waiting on.
-    fn round_error(mut self: Pin<&mut Self>, text: String) {
-        eprintln!("atlas-updater: {text}");
-        self.as_mut().set_apps_error(q(&text));
-        self.as_mut().rust_mut().apps_round_error = true;
+    /// A background round's error was replaced or dismissed: the settings
+    /// file stops offering it to the next window.
+    fn forget_round_error(mut self: Pin<&mut Self>) {
+        if std::mem::take(&mut self.as_mut().rust_mut().apps_round_error)
+            && self.rust().fixtures.is_none()
+        {
+            rc::set(RC_APPS, ROUND_ERROR, None);
+        }
     }
 
     fn apps_idle(mut self: Pin<&mut Self>) {
@@ -1360,180 +1307,55 @@ impl qobject::Backend {
                     .user_error(q(&format!("Could not save the setting: {e}")));
                 return;
             }
-            if on {
-                // Don't make the user wait up to 6 hours to see it work.
-                self.rust().schedule.apps_in(APPS_SOON);
-            }
         }
-        self.rust()
-            .apps_auto_flag
-            .store(on, std::sync::atomic::Ordering::Relaxed);
         self.as_mut().set_apps_auto(on);
-    }
-
-    /// The scheduled app round: look for app updates, and install them if
-    /// the user turned that on. Whatever is left waiting for the user is
-    /// announced once per set.
-    fn apps_round(mut self: Pin<&mut Self>) {
-        // Fixture mode never acts on its own.
-        if self.rust().fixtures.is_some() {
-            return;
-        }
-        if *self.apps_busy() {
-            // Run when the user's own operation ends.
-            self.as_mut().rust_mut().apps_round_pending = true;
-            return;
-        }
-        let auto = *self.apps_auto();
-        let flag = self.rust().apps_auto_flag.clone();
-        self.as_mut().set_apps_busy(true);
-        self.as_mut().set_apps_op(q("autoApps"));
-        // An error already shown stays until something replaces it.
-        self.as_mut().set_apps_status(q(if auto {
-            "Updating apps in the background…"
-        } else {
-            "Looking for app updates…"
-        }));
-        let qt = self.qt_thread();
-        let qt_fail = qt.clone();
-        if !spawn_named("atlas-apps-auto", move || {
-            let res = guarded(|| {
-                let round =
-                    apps::background(|| flag.load(std::sync::atomic::Ordering::Relaxed), None);
-                if let Ok(r) = &round {
-                    if let Err(e) = apphistory::record(&r.done.updated, None) {
-                        eprintln!("atlas-updater: could not save the app update history: {e}");
-                    }
-                    if let Some(why) = r.waited {
-                        eprintln!("atlas-updater: app updates wait: {why}");
-                    }
-                    if let Some(e) = &r.done.error {
-                        eprintln!("atlas-updater: background app update failed: {e}");
-                    }
-                    if let Some(e) = &r.unchecked {
-                        eprintln!("atlas-updater: could not check what app updates ask for: {e}");
-                    }
-                }
-                round
-            })
-            .unwrap_or_else(|| Err(INTERNAL.to_string()));
-            let _ = qt.queue(move |obj| obj.apps_round_done(res));
-        }) {
-            let _ = qt_fail.queue(|mut obj| {
-                obj.as_mut().apps_idle();
-                obj.as_mut().round_error(
-                    "Could not check app updates: could not start a worker thread".into(),
-                );
-                obj.as_mut().apps_failed();
-                obj.after_apps();
-            });
-        }
-    }
-
-    fn apps_round_done(mut self: Pin<&mut Self>, res: Result<apps::Round, String>) {
-        self.as_mut().apps_round_finish(res);
-        self.after_apps();
-    }
-
-    /// A background round failed: try again later, later each time.
-    fn apps_failed(mut self: Pin<&mut Self>) {
-        let mut this = self.as_mut().rust_mut();
-        this.apps_failures = this.apps_failures.saturating_add(1);
-        this.schedule.apps_in(apps_retry_after(this.apps_failures));
-    }
-
-    fn apps_round_finish(mut self: Pin<&mut Self>, res: Result<apps::Round, String>) {
-        let round = match res {
-            Ok(r) => r,
-            Err(e) => {
-                self.as_mut().apps_idle();
-                self.as_mut()
-                    .round_error(format!("Could not check app updates: {e}"));
-                self.as_mut().apps_failed();
-                return;
-            }
-        };
-        let failed = round.done.error.is_some();
-        if failed {
-            self.as_mut().apps_failed();
-        } else {
-            self.as_mut().rust_mut().apps_failures = 0;
-            if round.waited.is_some() {
-                self.rust().schedule.apps_in(APPS_RETRY);
-            }
-        }
-        if !round.done.updated.is_empty() {
-            self.as_mut().load_history();
-        }
-        if round.ran {
-            // This run checked every update: its held set is the whole one.
-            self.as_mut().rust_mut().apps_held.clear();
-        }
-        self.as_mut().apps_noted(&round.done.held_back);
-        let Some(rows) = round.rows else {
-            // Not listed: a metered or offline connection. Nothing to say.
-            self.as_mut().apps_idle();
-            return;
-        };
-        self.as_mut().apps_listed(Ok(rows.clone()));
-        if let Some(e) = &round.done.error {
-            // Logged by the worker already.
-            self.as_mut()
-                .set_apps_error(q(&format!("Could not update apps in the background: {e}")));
-            self.as_mut().rust_mut().apps_round_error = true;
-        } else if let Some(e) = &round.unchecked {
-            self.as_mut().set_apps_error(q(&format!(
-                "Could not check which app updates ask for new permissions: {e}"
-            )));
-            self.as_mut().rust_mut().apps_round_error = true;
-        } else if self.rust().apps_round_error {
-            // This round worked: an earlier round's error is out of date.
-            self.as_mut().clear_apps_error();
-        }
-        // A low-battery wait is quiet: it tries again later.
-        if rows.is_empty() || round.waited.is_some() {
-            return;
-        }
-        // Each notice once: the same apps, held or failed the same way, are
-        // not news.
-        let key = apps::notice_key(
-            &rows,
-            &round.done.held_back,
-            failed || round.unchecked.is_some(),
-        );
-        if rc::get(RC_APPS, "Notified").as_deref() == Some(key.as_str()) {
-            return;
-        }
-        rc::set(RC_APPS, "Notified", Some(&key));
-        let text = apps::ready_text(&rows, &round.done.held_back, failed, round.auto);
-        // Nothing asking for new permissions, or not knowing, installs from
-        // a notification: the user sees it on the Updates page first.
-        let can_update = round.done.held_back.is_empty() && round.unchecked.is_none();
-        self.app_updates_ready(q(&text), can_update);
+        // The tray runs the rounds: the first one a minute after "on".
+        self.tell_tray("app update setting");
     }
 
     /// An update the user started from a notice left apps out: say which,
     /// and don't say it again for the same set.
     fn held_notice(self: Pin<&mut Self>, rows: &[apps::Row], held: &[apps::HeldApp], failed: bool) {
-        if self.rust().fixtures.is_none() {
-            let key = apps::notice_key(rows, held, failed);
-            rc::set(RC_APPS, "Notified", Some(&key));
+        if self.rust().fixtures.is_some() {
+            return;
         }
-        // Not "on its own": the user started it.
-        let text = apps::ready_text(rows, held, failed, false);
-        self.app_updates_ready(q(&text), false);
+        let key = apps::notice_key(rows, held, failed);
+        // Not "on its own": the user started it. The rows show it too, so
+        // the notification has no buttons.
+        let n = notify::Note {
+            event: "appUpdatesReady",
+            title: "App updates ready".into(),
+            text: notify::escape(&apps::ready_text(rows, held, failed, false)),
+            icon: notify::APP_ICON,
+            actions: Vec::new(),
+            urgency: None,
+            persistent: false,
+        };
+        // Counted: the window may quit right after (see atlas_tray_flush).
+        NOTIFY_CALLS.fetch_add(1, Ordering::SeqCst);
+        let started = spawn_named("atlas-notify", move || {
+            // guarded: the count must come down even if the send panics.
+            match guarded(|| notify::send_blocking(&n)).unwrap_or_else(|| Err(INTERNAL.into())) {
+                // Told: not again for the same set.
+                Ok(()) => rc::set(
+                    RC_APPS,
+                    atlas_updater_base::worker::APPS_NOTIFIED,
+                    Some(&key),
+                ),
+                Err(e) => eprintln!("atlas-updater: cannot show a notification: {e}"),
+            }
+            NOTIFY_CALLS.fetch_sub(1, Ordering::SeqCst);
+        });
+        if !started {
+            eprintln!("atlas-updater: could not start a thread to show a notification");
+            NOTIFY_CALLS.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     // ---- restart ----
 
-    pub fn restart_now(self: Pin<&mut Self>) {
-        self.start_restart(None);
-    }
-
-    /// `scheduled` is the time of the scheduled restart that fired, if this is
-    /// one: only that restart's end (a failure, or a logout that did not
-    /// happen) clears the schedule; a manual restart leaves it alone.
-    fn start_restart(mut self: Pin<&mut Self>, scheduled: Option<i64>) {
+    /// "Restart Now" in the window. (A scheduled restart is the tray's.)
+    pub fn restart_now(mut self: Pin<&mut Self>) {
         if *self.restarting() {
             return;
         }
@@ -1552,18 +1374,9 @@ impl qobject::Backend {
         let qt = self.qt_thread();
         let qt_fail = qt.clone();
         let qt_ok = qt.clone();
-        let clear = move |mut obj: Pin<&mut qobject::Backend>| {
-            obj.as_mut().set_restarting(false);
-            if let Some(t) = scheduled
-                && *obj.scheduled_at() == t
-            {
-                obj.as_mut().clear_schedule_state();
-            }
-        };
+        let clear = |mut obj: Pin<&mut qobject::Backend>| obj.as_mut().set_restarting(false);
         let fail = move |mut obj: Pin<&mut qobject::Backend>, e: String| {
-            // The Updates page shows the error; restartProblem also lets the
-            // shell notify when the window is not active (a scheduled
-            // restart in the tray, for example).
+            // The Updates page shows the error.
             if e == restart::CANCELED {
                 obj.as_mut().set_info_text(q(&e));
                 clear(obj);
@@ -1611,14 +1424,37 @@ impl qobject::Backend {
                 .set_info_text(q("That time has already passed. Pick a later time."));
             return;
         }
-        save_schedule(self.rust().fixtures.is_some(), Some(at));
-        self.as_mut().set_scheduled_at(at);
-        self.rust().schedule.set_restart(Some(at));
+        if self.as_mut().save_schedule(Some(at)) {
+            self.as_mut().set_scheduled_at(at);
+            self.tell_tray("restart time");
+        }
     }
 
     pub fn cancel_restart(mut self: Pin<&mut Self>) {
-        self.rust().schedule.set_restart(None);
-        self.as_mut().clear_schedule_state();
+        if self.as_mut().save_schedule(None) {
+            self.as_mut().set_scheduled_at(0);
+            self.tell_tray("canceled restart");
+        }
+    }
+
+    /// Saves (or clears) the scheduled restart for the tray, which keeps
+    /// it. Fixture mode never touches the user's real settings file.
+    fn save_schedule(mut self: Pin<&mut Self>, at: Option<i64>) -> bool {
+        if self.rust().fixtures.is_some() {
+            return true;
+        }
+        let value = at.map(|t| t.to_string());
+        match rc::try_set(RC_RESTART, "ScheduledAt", value.as_deref()) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("atlas-updater: could not save the restart time: {e}");
+                self.as_mut().set_error(
+                    "restart",
+                    q(&format!("Could not save the restart time: {e}")),
+                );
+                false
+            }
+        }
     }
 
     // ---- crash reports (opt-in; see crash.rs) ----
@@ -1635,9 +1471,10 @@ impl qobject::Backend {
             return;
         }
         self.as_mut().set_crash_enabled(on);
+        // The tray watches for crashes only while this is on.
+        self.as_mut().tell_tray("crash report setting");
         if on {
             self.as_mut().collect_reports();
-            self.load_reports();
         } else {
             // Off means off: nothing stays queued on screen.
             let has_server = *self.crash_has_server();
@@ -1706,38 +1543,29 @@ impl qobject::Backend {
         });
     }
 
-    pub fn collect_reports(self: Pin<&mut Self>) {
+    /// Reports that came in while crash reports were off are looked for
+    /// when they are turned on, then listed. The tray collects the rest.
+    fn collect_reports(self: Pin<&mut Self>) {
         if !*self.crash_enabled() {
             return;
         }
-        let fixtures = self.rust().fixtures.clone();
+        if self.rust().fixtures.is_some() {
+            self.load_reports();
+            return;
+        }
         let qt = self.qt_thread();
-        spawn_named("atlas-collect", move || {
-            if fixtures.is_some() {
-                return;
-            }
-            let first = guarded(|| {
-                let mut new = atlas_framework_system::crash::collect_coredumps(None);
-                new.extend(atlas_framework_system::crash::collect_events(None));
-                new.first().map(|r| {
-                    (
-                        crate::crash::display_name(&r.app_name).to_string(),
-                        r.report_type.clone(),
-                    )
-                })
-            })
-            .flatten();
+        let started = spawn_named("atlas-collect", move || {
+            let _ = guarded(atlas_updater_base::crash::collect);
             let _ = qt.queue(move |mut obj| {
-                // Switched off while collecting: no list, no notification.
-                if !*obj.crash_enabled() {
-                    return;
-                }
-                obj.as_mut().load_reports();
-                if let Some((app, kind)) = first {
-                    obj.as_mut().report_found(q(&app), q(&kind));
+                // Switched off while collecting: no list.
+                if *obj.crash_enabled() {
+                    obj.as_mut().load_reports();
                 }
             });
         });
+        if !started {
+            eprintln!("atlas-updater: could not start a thread to collect crash reports");
+        }
     }
 
     pub fn send_report(mut self: Pin<&mut Self>, event_id: &QString) {
@@ -1858,14 +1686,5 @@ mod tests {
     fn a_panicking_worker_is_reported_not_lost() {
         assert_eq!(guarded(|| 7), Some(7));
         assert_eq!(guarded(|| -> i32 { panic!("boom") }), None);
-    }
-
-    #[test]
-    fn failed_rounds_back_off() {
-        let m = |n| apps_retry_after(n).as_secs() / 60;
-        assert_eq!(
-            [m(0), m(1), m(2), m(3), m(4), m(5), m(99)],
-            [30, 30, 60, 120, 240, 360, 360]
-        );
     }
 }

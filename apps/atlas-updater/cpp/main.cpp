@@ -1,5 +1,6 @@
-// Starts Qt, makes the app single-instance, and either opens the window or
-// (--tray) only sets up the tray icon. QML is loaded only when a window opens.
+// Starts Qt, makes the app single-instance and opens the window. The panel
+// icon is atlas-updater-tray (--tray hands over to it, for old autostart
+// entries); --worker runs an app job for the tray without Qt.
 #include "shell.h"
 
 #include <KDBusService>
@@ -9,13 +10,20 @@
 #include <QQmlEngine>
 #include <QQuickStyle>
 
+#include <cerrno>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <libgen.h>
+#include <unistd.h>
 
 // Rust, see src/lib.rs and src/crash.rs.
 extern "C" void *atlas_backend_new();
 extern "C" void atlas_crash_install();
 extern "C" void atlas_crash_fatal(const char *msg);
+extern "C" int atlas_worker(const char *job);
+extern "C" void atlas_tray_flush();
 
 static QtMessageHandler s_previousHandler = nullptr;
 
@@ -35,14 +43,69 @@ static void messageHandler(QtMsgType type, const QMessageLogContext &context, co
     }
 }
 
+// The tray program next to this one (/usr/bin/atlas-updater-tray).
+static int execTray()
+{
+    char self[PATH_MAX];
+    const ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (n <= 0) {
+        fprintf(stderr, "atlas-updater: cannot find the tray program: %s\n", std::strerror(errno));
+        return 1;
+    }
+    self[n] = '\0';
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/atlas-updater-tray", dirname(self)) >= int(sizeof path)) {
+        return 1;
+    }
+    char *const args[] = {path, nullptr};
+    execv(path, args);
+    fprintf(stderr, "atlas-updater: cannot start %s: %s\n", path, std::strerror(errno));
+    return 1;
+}
+
+// `--page <name>` and `--check`, from the command line or a second launch.
+struct Request {
+    QString page;
+    bool check = false;
+};
+
+static Request parseRequest(const QStringList &args)
+{
+    Request r;
+    for (int i = 1; i < args.size(); ++i) {
+        if (args[i] == QLatin1String("--check")) {
+            r.check = true;
+        } else if (args[i] == QLatin1String("--page") && i + 1 < args.size()) {
+            const QString page = args[++i];
+            static const QStringList pages = {QStringLiteral("updates"), QStringLiteral("settings"), QStringLiteral("reports"), QStringLiteral("sent")};
+            if (pages.contains(page)) {
+                r.page = page;
+            }
+        }
+    }
+    return r;
+}
+
+static void handle(Shell &shell, const Request &r)
+{
+    if (r.check) {
+        shell.checkForUpdate();
+    } else {
+        shell.openWindow(r.page);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     atlas_crash_install(); // Rust panic hook, first thing.
 
-    bool trayMode = false;
     for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--worker") == 0) {
+            // An app job for the tray: no Qt at all.
+            return atlas_worker(i + 1 < argc ? argv[i + 1] : "");
+        }
         if (std::strcmp(argv[i], "--tray") == 0) {
-            trayMode = true;
+            return execTray();
         }
     }
 
@@ -70,24 +133,32 @@ int main(int argc, char *argv[])
     QQmlEngine::setObjectOwnership(backend, QQmlEngine::CppOwnership);
     int rc = 0;
     {
-        Shell shell(backend, trayMode);
+        Shell shell(backend);
 
         QObject::connect(&service, &KDBusService::activateRequested, &shell, [&shell](const QStringList &arguments, const QString &) {
-            // The autostart entry (--tray) must not pop a window up, but it
-            // does mean this instance is the session's tray: stay alive.
-            if (arguments.contains(QStringLiteral("--tray"))) {
-                shell.enableTrayMode();
-            } else {
-                shell.openWindow();
-            }
+            handle(shell, parseRequest(arguments));
         });
 
-        if (!trayMode) {
-            // Developer option, only with ATLAS_UPDATER_FIXTURES: open on a given page.
-            shell.openWindow(qEnvironmentVariableIsSet("ATLAS_UPDATER_FIXTURES") ? qEnvironmentVariable("ATLAS_UPDATER_PAGE") : QString());
+        Request first = parseRequest(QCoreApplication::arguments());
+        // Developer option, only with ATLAS_UPDATER_FIXTURES: open on a given page.
+        if (first.page.isEmpty() && qEnvironmentVariableIsSet("ATLAS_UPDATER_FIXTURES")) {
+            first.page = qEnvironmentVariable("ATLAS_UPDATER_PAGE");
         }
-        rc = app.exec();
+        handle(shell, first);
+        // Idle: give up the name first, so a launch from now on starts a new
+        // instance instead of asking this one, which is about to go.
+        QObject::connect(&shell, &Shell::idle, &app, [&service] {
+            service.unregister();
+            QCoreApplication::quit();
+        });
+        do {
+            rc = app.exec();
+            // A launch that reached us just before the name went opened a
+            // window: keep it.
+        } while (rc == 0 && shell.hasWindow());
     }
+    // A setting change the tray has not heard about yet.
+    atlas_tray_flush();
     delete backend;
     return rc;
 }

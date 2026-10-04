@@ -1,0 +1,5 @@
+# Lets the Atlas Updater window start the tray when it isn't running (after
+# the user quit it), so a restart it schedules still happens.
+[D-BUS Service]
+Name=net.eterneon.atlas.updater.Tray
+Exec=/usr/bin/atlas-updater-tray

@@ -101,6 +101,7 @@ dependencies = [
  "atlas-framework-flatpak",
  "atlas-framework-system",
  "atlas-update-engine",
+ "atlas-updater-base",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",
@@ -113,6 +114,37 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "ureq",
+ "zbus",
+]
+
+[[package]]
+name = "atlas-updater-base"
+version = "0.1.0"
+dependencies = [
+ "atlas-framework-core",
+ "atlas-framework-system",
+ "atlas-update-engine",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "zbus",
+]
+
+[[package]]
+name = "atlas-updater-tray"
+version = "0.1.0"
+dependencies = [
+ "atlas-framework-core",
+ "atlas-framework-system",
+ "atlas-updater-base",
+ "libc",
+ "rustix",
+ "serde",
+ "tempfile",
+ "tokio",
  "zbus",
 ]
 

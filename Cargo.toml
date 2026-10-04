@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/atlas-update-engine", "apps/atlas-updater"]
+members = ["crates/atlas-update-engine", "crates/atlas-updater-base", "apps/atlas-updater", "apps/atlas-updater-tray"]
 
 [workspace.package]
 version = "0.1.0"

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{apphistory, config, power};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub name: String,
     pub id: String,
@@ -305,9 +305,6 @@ pub struct Round {
     pub done: Done,
     /// Why nothing was installed although background updates are on.
     pub waited: Option<&'static str>,
-    /// An update or a check ran to the end (so `done.held_back` is the
-    /// whole held set).
-    pub ran: bool,
     /// Background updates are off and the check of what the waiting
     /// updates ask for failed: the notice offers no "Update Apps".
     pub unchecked: Option<String>,
@@ -362,7 +359,6 @@ pub fn background(auto: impl Fn() -> bool, fixtures: Option<&Path>) -> Result<Ro
         rows: Some(rows),
         done,
         waited: None,
-        ran: true,
         unchecked: None,
         auto: true,
     })
@@ -397,7 +393,6 @@ fn only_check(rows: Vec<Row>, fixtures: Option<&Path>) -> Round {
     let unchecked = checked.error.take();
     Round {
         rows: Some(rows),
-        ran: unchecked.is_none(),
         done: checked,
         waited: None,
         unchecked,
@@ -680,9 +675,9 @@ mod tests {
         // Off: listed and checked, nothing installed by itself.
         let off = background(|| false, Some(&dir)).unwrap();
         assert!(off.rows.is_some_and(|r| !r.is_empty()));
-        assert!(off.ran && !off.auto && off.unchecked.is_none());
+        assert!(!off.auto && off.unchecked.is_none());
         let on = background(|| true, Some(&dir)).unwrap();
-        assert!(on.ran && on.auto);
+        assert!(on.auto);
     }
 
     #[test]
