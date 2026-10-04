@@ -52,16 +52,47 @@ dependencies = [
 name = "atlas-core"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.4",
+ "atlas-framework-core",
+ "atlas-framework-flatpak",
+ "atlas-framework-system",
  "libc",
- "libflatpak",
  "rustix",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "unicode-normalization",
  "zbus",
+]
+
+[[package]]
+name = "atlas-framework-core"
+version = "1.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?rev=3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb#3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb"
+dependencies = [
+ "libc",
+ "log",
+ "serde",
+]
+
+[[package]]
+name = "atlas-framework-flatpak"
+version = "1.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?rev=3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb#3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb"
+dependencies = [
+ "libflatpak",
+]
+
+[[package]]
+name = "atlas-framework-system"
+version = "1.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?rev=3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb#3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb"
+dependencies = [
+ "atlas-framework-core",
+ "getrandom 0.3.4",
+ "libc",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -69,6 +100,7 @@ name = "atlas-updater"
 version = "0.1.0"
 dependencies = [
  "atlas-core",
+ "atlas-framework-core",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",
