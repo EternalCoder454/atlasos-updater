@@ -458,10 +458,16 @@ pub fn ready_text(rows: &[Row], held_back: &[HeldApp], failed: bool, auto: bool)
             ),
         };
     }
-    let also = if failed {
-        " Other apps couldn't update either."
-    } else {
-        ""
+    // The rows are what is still waiting after the round: those not held
+    // are the ones that failed (others may have updated).
+    let failed_rows = rows
+        .iter()
+        .filter(|r| !held_back.iter().any(|h| h.key == row_key(r)))
+        .count();
+    let also = match (failed, failed_rows) {
+        (false, _) | (true, 0) => String::new(),
+        (true, 1) => " 1 other app couldn't update either.".to_string(),
+        (true, n) => format!(" {n} other apps couldn't update either."),
     };
     if let [one] = held_back {
         return format!(
@@ -580,7 +586,22 @@ mod tests {
                 true,
                 true
             ),
-            "2 apps ask for new permissions, so they weren't updated on their own. Open Atlas Updater to review them. Other apps couldn't update either."
+            "2 apps ask for new permissions, so they weren't updated on their own. Open Atlas Updater to review them. 2 other apps couldn't update either."
+        );
+        // One held, one failed (others updated and are no longer listed).
+        assert_eq!(
+            ready_text(
+                &rows[..2],
+                &[held("Kate", &["your home folder"])],
+                true,
+                true
+            ),
+            "Kate asks for new permissions (your home folder), so it wasn't updated on its own. Open Atlas Updater to review it. 1 other app couldn't update either."
+        );
+        // Failed, but all that is left is held: nothing more to say.
+        assert_eq!(
+            ready_text(&rows[..1], &[held("Kate", &["x"])], true, true),
+            "Kate asks for new permissions (x), so it wasn't updated on its own. Open Atlas Updater to review it."
         );
         assert_eq!(
             ready_text(&rows, &[held("Kate", &["a", "b", "c", "d"])], false, true),
