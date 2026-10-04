@@ -81,6 +81,12 @@ pub trait BootcRunner: Send + Sync + 'static {
         self.skopeo(args)
     }
 
+    /// The registry login file bootc uses, for skopeo to log in the same way;
+    /// none for a runner without one.
+    fn registry_auth(&self) -> Option<String> {
+        None
+    }
+
     /// [`run`](Self::run) for `upgrade` and `switch`, reporting progress to
     /// `sink` while it runs. A runner that has none just runs.
     fn run_progress(&self, args: &[&str], _sink: &ProgressSink) -> Result<String, String> {
@@ -137,6 +143,13 @@ impl BootcRunner for SystemBootc {
 
     fn skopeo_quick(&self, args: &[&str]) -> Result<String, String> {
         run_limited(Path::new(SKOPEO), args, QUICK_TIMEOUT, OUTPUT_CAP)
+    }
+
+    fn registry_auth(&self) -> Option<String> {
+        AUTH_FILES
+            .iter()
+            .find(|p| Path::new(p).is_file())
+            .map(|p| (*p).to_string())
     }
 }
 
@@ -1014,11 +1027,12 @@ impl Core {
             return Ok(());
         };
         let image = layered::skopeo_ref(target);
+        let auth = self.runner.registry_auth();
         let mut args = vec!["inspect"];
-        if let Some(auth) = AUTH_FILES.iter().find(|p| Path::new(p).is_file()) {
-            args.extend(["--authfile", auth]);
+        if let Some(auth) = &auth {
+            args.extend(["--authfile", auth.as_str()]);
         }
-        args.extend(["--", &image]);
+        args.extend(["--", image.as_str()]);
         let found = match self.runner.skopeo_quick(&args) {
             Ok(out) => layered::image_from_skopeo(&out, target),
             Err(e) => Err(e),
@@ -1291,9 +1305,12 @@ impl Core {
                 let _ = std::fs::remove_file(&tmp);
             }
             done?;
-            // make the rename itself durable
-            if let Some(dir) = path.parent() {
-                std::fs::File::open(dir)?.sync_all()?;
+            // make the rename itself durable; the file is in place either
+            // way, so a failure here only loses the rename at a power cut
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+                    eprintln!("atlas-system-helper: cannot sync {}: {e}", dir.display());
+                }
             }
             Ok(())
         };
@@ -3069,6 +3086,52 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
                 .iter()
                 .any(|c| c[0] == "upgrade" || c[0] == "rpm-ostree")
         );
+    }
+
+    /// [`Registry`] on a machine with a registry login file.
+    struct LoggedIn(Registry);
+
+    impl BootcRunner for LoggedIn {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.0.run(args)
+        }
+        fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+            self.0.rpm_ostree(args)
+        }
+        fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+            self.0.skopeo(args)
+        }
+        fn registry_auth(&self) -> Option<String> {
+            Some("/etc/ostree/auth.json".into())
+        }
+    }
+
+    #[test]
+    fn the_check_before_a_pull_logs_in_as_bootc_does() {
+        let stager = Stager::new(PLAIN.into(), false);
+        let f = Arc::new(LoggedIn(Registry {
+            stager: stager.clone(),
+            out: Ok(skopeo_json(
+                "44.20260920",
+                "2026-09-20T04:00:00Z",
+                "sha256:old",
+            )),
+        }));
+        match Core::new(f).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(ran(
+            &stager.calls(),
+            &[
+                "skopeo",
+                "inspect",
+                "--authfile",
+                "/etc/ostree/auth.json",
+                "--",
+                "docker://ghcr.io/eternalcoder454/atlasos:testing"
+            ]
+        ));
     }
 
     #[test]
