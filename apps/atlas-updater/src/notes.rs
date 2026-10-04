@@ -167,9 +167,12 @@ fn text_host(text: &str) -> Option<String> {
     (shaped && (claims_site || !FILE_TAILS.contains(last))).then(|| host.to_string())
 }
 
+/// `s` as HTML text. Invisible and bidi characters are dropped, as in
+/// [`render_plain`] (they would let a note reorder or hide what is shown).
 fn escape(s: &str, out: &mut String) {
     for c in s.chars() {
         match c {
+            c if is_hidden(c) && !c.is_whitespace() => {}
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -470,6 +473,16 @@ fn get(url: &str) -> Result<Option<String>, FetchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_drops_bidi_and_zero_width_characters() {
+        let html = render("fix\u{202e}gnp.exe \u{200b}safe\u{2066}\u{feff}\u{e0041} text\n\nnext");
+        for c in ['\u{202e}', '\u{200b}', '\u{2066}', '\u{feff}', '\u{e0041}'] {
+            assert!(!html.contains(c), "{c:?} in {html:?}");
+        }
+        assert!(html.contains("fixgnp.exe safe text"), "{html}");
+        assert!(html.contains("<p>next</p>"), "{html}");
+    }
 
     #[test]
     fn release_list_url() {

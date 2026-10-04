@@ -477,6 +477,18 @@ fn supervise(
     }
 }
 
+/// The refusal text for `found`, an image older than what `before` has.
+fn downgrade_message(before: &Status, found: &crate::bootc::ImageStatus) -> String {
+    let installed = before
+        .status
+        .booted
+        .as_ref()
+        .and_then(|b| b.version())
+        .unwrap_or("unknown");
+    let found = found.version.as_deref().unwrap_or(&found.image_digest);
+    format!("{DOWNGRADE_REFUSED} (found {found}, installed {installed})")
+}
+
 /// The last `max` bytes of `s`, cut on a char boundary.
 fn tail(s: &str, max: usize) -> String {
     let s = s.trim_end();
@@ -824,6 +836,19 @@ impl Core {
                 // rpm-ostree at once, without bootc's refusal first.
                 let mut layered =
                     before.is_some_and(|b| matches!(self.origin_of(&b.read), Ok(Some(_))));
+                // An older image is refused before anything is downloaded
+                // when the registry can be asked; `refuse_downgrade` below
+                // stays as the backstop.
+                let followed = if layered {
+                    before
+                        .and_then(|b| self.origin_of(&b.read).ok().flatten())
+                        .and_then(|o| layered::parse_origin(&o))
+                } else {
+                    before_status.and_then(|s| s.spec.image.clone().or(s.booted_ref().cloned()))
+                };
+                if let Some(target) = &followed {
+                    self.refuse_older_before_pull(before_status, target)?;
+                }
                 if !layered && let Err(e) = self.bootc_progress(&["upgrade"], sink) {
                     // asked again: the system may have been changed since
                     if !matches!(self.layered_origin(), Ok(Some(_))) {
@@ -858,6 +883,9 @@ impl Core {
                         && self.policy_requires_signature(image)
                     {
                         target = format!("ostree-image-signed:docker://{image}");
+                    }
+                    if let Some(r) = layered::parse_origin(&target) {
+                        self.refuse_older_before_pull(before_status, &r)?;
                     }
                     self.rpm_ostree_progress(&["rebase", &target], sink)?;
                     self.forget_update();
@@ -899,6 +927,7 @@ impl Core {
                     }
                 }
                 args.push(&new.image);
+                self.refuse_older_before_pull(before_status, &new)?;
                 self.bootc_progress(&args, sink)?;
                 // the channel's tag, even the one followed now, may have gone back
                 return self.refuse_downgrade(before_status, self.status_json()?);
@@ -931,33 +960,61 @@ impl Core {
         else {
             return Ok(json);
         };
-        let installed = before
-            .status
-            .booted
-            .as_ref()
-            .and_then(|b| b.version())
-            .unwrap_or("unknown");
-        let found = staged.version.as_deref().unwrap_or(&staged.image_digest);
-        let mut msg = format!("{DOWNGRADE_REFUSED} (found {found}, installed {installed})");
+        let mut msg = downgrade_message(before, staged);
         // `cleanup -p` takes out what was staged before too (an update or a
         // switch to the other channel): it was replaced by the old image.
-        if before
+        let replaced = before
             .status
             .staged
             .as_ref()
             .and_then(|e| e.digest())
-            .is_some_and(|d| d != staged.image_digest)
-        {
+            .is_some_and(|d| d != staged.image_digest);
+        if replaced {
             msg.push_str(" What was set to install at the next restart before was removed too; check for updates again.");
         }
         // (recorded as failed by `execute`, with this message)
-        match self.rpm_ostree(&["cleanup", "-p"]) {
-            Ok(_) => Err(HelperError::Failed(msg)),
-            Err(e) => Err(HelperError::Failed(format!(
-                "{msg} Removing it failed, so it is still set to install at the next restart: {}",
-                tail(&e.to_string(), 300)
-            ))),
+        let mut last = String::new();
+        for attempt in 0..retry::ATTEMPTS {
+            if attempt > 0 && !(self.retry_wait)(retry::DELAYS[attempt - 1]) {
+                break; // the helper is closing
+            }
+            match self.rpm_ostree(&["cleanup", "-p"]) {
+                Ok(_) => return Err(HelperError::Failed(msg)),
+                Err(e) => last = tail(&e.to_string(), 300),
+            }
         }
+        Err(HelperError::Failed(format!(
+            "{msg} Removing it failed, so the older update is STILL STAGED and will install at the next restart. Remove it with `sudo rpm-ostree cleanup -p` before restarting: {last}"
+        )))
+    }
+
+    /// Before an upgrade or switch pulls `target`: ask the registry (skopeo
+    /// inspect, manifest and config only) and refuse an image older than the
+    /// booted or staged one without downloading it. If the registry can't be
+    /// asked, or `before` is unknown, nothing is refused here: the pull goes
+    /// on and [`Core::refuse_downgrade`] checks what it staged.
+    fn refuse_older_before_pull(
+        &self,
+        before: Option<&Status>,
+        target: &crate::bootc::ImageReference,
+    ) -> Result<(), HelperError> {
+        let Some(before) = before else {
+            return Ok(());
+        };
+        let image = layered::skopeo_ref(target);
+        let Ok(out) = self.fetching(|| self.runner.skopeo(&["inspect", "--", &image])) else {
+            return Ok(());
+        };
+        let Ok(found) = layered::image_from_skopeo(&out, target) else {
+            return Ok(());
+        };
+        if before.is_downgrade(&found) {
+            let msg = downgrade_message(before, &found);
+            return Err(HelperError::Failed(format!(
+                "{msg} Nothing was downloaded."
+            )));
+        }
+        Ok(())
     }
 
     /// `bootc rollback` toggles: with one queued, a second call cancels it. So
@@ -1190,13 +1247,28 @@ impl Core {
         let text = serde_json::to_string(&found).map_err(|e| HelperError::Failed(e.to_string()))?;
         let tmp = path.with_extension("tmp");
         let write = || -> std::io::Result<()> {
+            use std::os::unix::fs::OpenOptionsExt;
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let mut f = std::fs::File::create(&tmp)?;
-            std::io::Write::write_all(&mut f, text.as_bytes())?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, path)
+            // a stale or planted temp file is replaced, never followed
+            match std::fs::remove_file(&tmp) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&tmp)?;
+            let done = std::io::Write::write_all(&mut f, text.as_bytes())
+                .and_then(|()| f.sync_all())
+                .and_then(|()| std::fs::rename(&tmp, path));
+            if done.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            done
         };
         write().map_err(|e| HelperError::Failed(format!("cannot save the update check: {e}")))
     }
@@ -2908,15 +2980,127 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         assert!(!c.is_busy());
     }
 
+    /// `Stager` plus a registry that answers `skopeo inspect` with `out`.
+    struct Registry {
+        stager: Arc<Stager>,
+        out: Result<String, String>,
+    }
+
+    impl BootcRunner for Registry {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.stager.run(args)
+        }
+        fn rpm_ostree(&self, args: &[&str]) -> Result<String, String> {
+            self.stager.rpm_ostree(args)
+        }
+        fn skopeo(&self, args: &[&str]) -> Result<String, String> {
+            let mut call = vec!["skopeo".to_string()];
+            call.extend(args.iter().map(|s| s.to_string()));
+            self.stager.calls.lock().unwrap().push(call);
+            self.out.clone()
+        }
+    }
+
+    fn skopeo_json(version: &str, created: &str, digest: &str) -> String {
+        format!(
+            r#"{{"Digest":"{digest}","Created":"{created}","Architecture":"amd64",
+                "Labels":{{"org.opencontainers.image.version":"{version}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn an_older_image_is_refused_before_it_is_downloaded() {
+        let stager = Stager::new(PLAIN.into(), false);
+        let f = Arc::new(Registry {
+            stager: stager.clone(),
+            out: Ok(skopeo_json(
+                "44.20260920",
+                "2026-09-20T04:00:00Z",
+                "sha256:old",
+            )),
+        });
+        match Core::new(f).execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("44.20260920") && m.contains("Nothing was downloaded"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let calls = stager.calls();
+        assert!(ran(
+            &calls,
+            &[
+                "skopeo",
+                "inspect",
+                "--",
+                "docker://ghcr.io/eternalcoder454/atlasos:testing"
+            ]
+        ));
+        // nothing pulled, nothing to clean up
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c[0] == "upgrade" || c[0] == "rpm-ostree")
+        );
+    }
+
+    #[test]
+    fn a_newer_image_or_an_unreadable_registry_goes_on_to_the_pull() {
+        for out in [
+            Ok(skopeo_json(
+                "44.20261008",
+                "2026-10-08T04:00:00Z",
+                "sha256:new",
+            )),
+            Err("connection refused".to_string()),
+            Ok("not json".to_string()),
+        ] {
+            let stager = Stager::new(
+                plain_with_staged("44.20261008", "2026-10-08T04:00:00Z", "sha256:new"),
+                false,
+            );
+            let f = Arc::new(Registry {
+                stager: stager.clone(),
+                out,
+            });
+            let c = Core::new(f).with_retry_wait(|_| true);
+            assert!(c.execute(&Op::Upgrade).is_ok());
+            assert!(stager.calls().iter().any(|c| c[0] == "upgrade"));
+        }
+    }
+
+    #[test]
+    fn a_failed_removal_is_tried_three_times_then_says_it_is_still_staged() {
+        let f = Stager::new(
+            plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
+            true,
+        );
+        let c = Core::new(f.clone()).with_retry_wait(|_| true);
+        match c.execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("STILL STAGED") && m.contains("sudo rpm-ostree cleanup -p"));
+                assert!(!m.contains("Nothing was downloaded"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let tries = f.calls().iter().filter(|c| c[0] == "rpm-ostree").count();
+        assert_eq!(tries, 3);
+    }
+
     #[test]
     fn a_failed_removal_says_the_old_image_is_still_staged() {
         let f = Stager::new(
             plain_with_staged("44.20260920", "2026-09-20T04:00:00Z", "sha256:old"),
             true,
         );
-        match Core::new(f).execute(&Op::Upgrade) {
+        match Core::new(f).with_retry_wait(|_| true).execute(&Op::Upgrade) {
             Err(HelperError::Failed(m)) => {
-                assert!(m.starts_with(DOWNGRADE_REFUSED) && m.contains("still set to install"))
+                assert!(
+                    m.starts_with(DOWNGRADE_REFUSED)
+                        && m.contains("STILL STAGED")
+                        && m.contains("rpm-ostree cleanup -p")
+                )
             }
             other => panic!("{other:?}"),
         }
@@ -2949,9 +3133,9 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             before_fails: false,
             flaky: 0,
         });
-        match Core::new(f).execute(&Op::Upgrade) {
+        match Core::new(f).with_retry_wait(|_| true).execute(&Op::Upgrade) {
             Err(HelperError::Failed(m)) => {
-                assert!(m.contains("was removed too") && m.contains("still set to install"));
+                assert!(m.contains("was removed too") && m.contains("STILL STAGED"));
                 // (the fake's cleanup error is short; `tail` keeps it whole)
                 assert!(m.ends_with("rpm-ostreed is not running"), "{m}");
             }

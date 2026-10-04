@@ -49,11 +49,19 @@ impl Config {
 /// Hidden developer option: `ATLAS_UPDATER_FIXTURES=<dir>` makes the app read
 /// `status.json`, `history.jsonl`, `notes.json`, `flatpak.json` and
 /// `crash-pending.json`, `crash-sent.json` from that directory instead of D-Bus, the history file and the
-/// network. Nothing else looks at it.
+/// network. Nothing else looks at it. Only debug builds and builds with the
+/// `fixtures` cargo feature honour it: a stray variable must not make the
+/// shipped app show fake data.
+#[cfg(any(debug_assertions, test, feature = "fixtures"))]
 pub fn fixtures_dir() -> Option<PathBuf> {
     std::env::var_os("ATLAS_UPDATER_FIXTURES")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(not(any(debug_assertions, test, feature = "fixtures")))]
+pub fn fixtures_dir() -> Option<PathBuf> {
+    None
 }
 
 pub fn read_fixture(dir: &Path, name: &str) -> Option<String> {
@@ -63,13 +71,27 @@ pub fn read_fixture(dir: &Path, name: &str) -> Option<String> {
 /// Fixture-mode hook: `ATLAS_UPDATER_FIXTURE_HOLD=<op>` makes the next run of
 /// that operation (names as in `busyOp`) stay busy until the app quits, so the
 /// busy state can be photographed. Only fixture code paths ask.
+#[cfg_attr(
+    not(any(debug_assertions, test, feature = "fixtures")),
+    allow(dead_code)
+)]
 static HOLD_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg_attr(
+    not(any(debug_assertions, test, feature = "fixtures")),
+    allow(dead_code)
+)]
 fn hold_matches(var: Option<&str>, name: &str, taken: &std::sync::atomic::AtomicBool) -> bool {
     var == Some(name) && !taken.swap(true, std::sync::atomic::Ordering::AcqRel)
 }
 
 /// `true` once, for the first run of the operation named in the variable.
+#[cfg(not(any(debug_assertions, test, feature = "fixtures")))]
+pub fn fixture_hold(_name: &str) -> bool {
+    false
+}
+
+#[cfg(any(debug_assertions, test, feature = "fixtures"))]
 pub fn fixture_hold(name: &str) -> bool {
     hold_matches(
         std::env::var("ATLAS_UPDATER_FIXTURE_HOLD").ok().as_deref(),

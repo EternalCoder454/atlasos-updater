@@ -14,6 +14,10 @@ build = "build.rs"
 name = "atlas_updater"
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# Honour ATLAS_UPDATER_FIXTURES in a release build (screenshots, UI tests).
+fixtures = []
+
 [dependencies]
 atlas-core = { path = "../../crates/atlas-core", features = ["flatpak"] }
 atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", rev = "3311a9e5d3a69071e79d03be2b88fa34a6f7e5fb" }
