@@ -39,4 +39,4 @@ together with the code that implements the change.
 | Format | `cargo fmt --all --check` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Tests | `cargo test --workspace` |
-| RPMs | `packaging/build-rpm.sh /src/out` (host: `podman run --rm -v "$PWD":/src:Z ... fedora:44 /src/packaging/build-rpm.sh /src/out`) |
+| RPMs | `packaging/build-rpm.sh /src/out` (host: `podman run --rm --security-opt label=disable -v "$PWD":/src ... fedora:44 /src/packaging/build-rpm.sh /src/out`) |
