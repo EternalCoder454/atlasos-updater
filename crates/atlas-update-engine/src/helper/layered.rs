@@ -77,10 +77,21 @@ pub fn parse_origin(origin: &str) -> Option<ImageReference> {
 /// `origin` with only its tag replaced by `channel`: what `rpm-ostree
 /// rebase` switches to. The checks are [`ImageReference::with_channel`]'s.
 pub fn origin_with_channel(origin: &str, channel: &str) -> Result<String, String> {
+    origin_retargeted(origin, |r| {
+        r.with_channel(channel).map_err(|e| e.to_string())
+    })
+}
+
+/// `origin` with its image replaced by what `retarget` makes of the image it
+/// names; the part before the image (the kind and transport) stays.
+pub fn origin_retargeted(
+    origin: &str,
+    retarget: impl FnOnce(&ImageReference) -> Result<ImageReference, String>,
+) -> Result<String, String> {
     let unusable = || format!("unusable rpm-ostree origin {origin:?}");
     let r = parse_origin(origin).ok_or_else(unusable)?;
     let prefix = origin.strip_suffix(r.image.as_str()).ok_or_else(unusable)?;
-    let new = r.with_channel(channel).map_err(|e| e.to_string())?;
+    let new = retarget(&r)?;
     Ok(format!("{prefix}{}", new.image))
 }
 

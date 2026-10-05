@@ -1,6 +1,7 @@
 //! inotify on the few paths the tray reacts to: `/run/ostree` (an update
 //! was staged or went away) and, only while crash reports are on, the crash
-//! sources (systemd-coredump's directory and the helper's event log). A
+//! sources (systemd-coredump's directory and the helper's event log, which is
+//! also watched for driver notices, crash reports or not). A
 //! source that does not exist yet is waited for on its nearest parent.
 
 use std::collections::HashMap;
@@ -28,6 +29,8 @@ pub enum Hit {
     Ostree,
     /// A crash source changed: collect reports.
     Crash,
+    /// The helper's event log changed (always watched): look for driver events.
+    Events,
 }
 
 fn dir_mask() -> WatchFlags {
@@ -102,8 +105,8 @@ impl Watcher {
     }
 
     /// Watches what should be watched now. Returns (`/run/ostree` newly
-    /// watched, a crash source newly watched).
-    fn sync(&mut self) -> (bool, bool) {
+    /// watched, a crash source newly watched, the event log newly watched).
+    fn sync(&mut self) -> (bool, bool, bool) {
         let ostree = if Path::new(OSTREE).is_dir() {
             let added = self.add(OSTREE, dir_mask());
             self.remove(RUN);
@@ -114,18 +117,26 @@ impl Watcher {
             false
         };
         let mut crash_added = false;
+        let mut events_added = false;
         let mut needed: Vec<&str> = Vec::new();
         let sources: [(&str, &[&str], WatchFlags); 2] = [
             (COREDUMP, &COREDUMP_PARENTS, dir_mask()),
             (EVENTS, &EVENTS_PARENTS, file_mask()),
         ];
         for (source, parents, mask) in sources {
-            if !self.crash {
+            // the event log is watched for driver notices as well
+            if !self.crash && source != EVENTS {
                 self.remove(source);
                 continue;
             }
             if Path::new(source).exists() {
-                crash_added |= self.add(source, mask);
+                let added = self.add(source, mask);
+                if source == EVENTS {
+                    events_added |= added;
+                    crash_added |= added && self.crash;
+                } else {
+                    crash_added |= added;
+                }
                 continue;
             }
             self.remove(source);
@@ -140,7 +151,7 @@ impl Watcher {
                 self.remove(p);
             }
         }
-        (ostree, crash_added)
+        (ostree, crash_added, events_added)
     }
 
     /// Crash reports switched on or off: watch the crash sources, or stop.
@@ -175,6 +186,7 @@ impl Watcher {
                 if flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                     // Events were lost: assume everything changed.
                     hits.push(Hit::Ostree);
+                    hits.push(Hit::Events);
                     if self.crash {
                         hits.push(Hit::Crash);
                     }
@@ -192,7 +204,12 @@ impl Watcher {
                 match path.as_str() {
                     OSTREE => hits.push(Hit::Ostree),
                     COREDUMP | EVENTS => {
-                        hits.push(Hit::Crash);
+                        if path == EVENTS {
+                            hits.push(Hit::Events);
+                        }
+                        if path == COREDUMP || self.crash {
+                            hits.push(Hit::Crash);
+                        }
                         if flags.intersects(ReadFlags::DELETE_SELF | ReadFlags::MOVE_SELF) {
                             resync = true;
                         }
@@ -202,9 +219,12 @@ impl Watcher {
                 }
             }
             if resync {
-                let (ostree, crash) = self.sync();
+                let (ostree, crash, events) = self.sync();
                 if ostree {
                     hits.push(Hit::Ostree);
+                }
+                if events {
+                    hits.push(Hit::Events);
                 }
                 if crash {
                     hits.push(Hit::Crash);

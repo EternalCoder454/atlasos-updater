@@ -222,6 +222,70 @@ purpose. `/var` is shared by every deployment, so after a rollback the previous
 image's helper reads and writes the same files; a new path would split the
 history and events between images. Don't rename it.
 
+## Drivers
+
+The system moves itself to the image its hardware needs, with no opt-in, and
+back to the base image when the hardware is gone. This adds **no D-Bus
+method**: the helper keeps exactly its six. Nothing takes an image from a
+caller; the target is built from the table below plus the booted ref's
+registry, transport, tag and signature setting.
+
+| Driver id | Image (under `ghcr.io/eternalcoder454/`) | Needs |
+|---|---|---|
+| (none) | `atlasos` | no driver hardware |
+| `nvidia` | `atlasos-nvidia` | an NVIDIA GPU of Turing or newer |
+
+Both images carry the same tags (`stable`, `testing`) and the same cosign
+signature; the containers policy covers both. The code is
+`helper/drivers.rs` (`Driver { id, image, matches }`, `DRIVERS`,
+`target_image(booted_repo, devices) -> Decision`); a driver is a table entry.
+
+- **Detection.** `/sys/bus/pci/devices/*/{class,vendor,device}`. NVIDIA
+  matches vendor `0x10de`, class `0x0300xx` or `0x0302xx` (display
+  controllers; the audio function is ignored) and device ID `>= 0x1e00`
+  (TU1xx and newer, what the open kernel modules support; Pascal and Volta
+  are below). `hardware_key` is the sorted, de-duplicated `vendor:device` of
+  every matched device, or `none`.
+- **Acts only** on a booted registry image whose repo is exactly
+  `ghcr.io/eternalcoder454/atlasos` or `.../atlasos-nvidia` with the tag
+  `stable` or `testing` (no digest). Anything else (other refs, local
+  builds, other transports, no container image) does nothing and logs one
+  line. If the staged deployment already is the target it does nothing.
+- **When.** `atlas-drivers.timer` (OnBootSec=2min, OnUnitActiveSec=6h,
+  Persistent, RandomizedDelaySec=5min; enabled by the preset) starts
+  `atlas-drivers.service` (oneshot, after `network-online.target`, hardened
+  like the helper), which runs `atlas-system-helper drivers`. The same step
+  also runs at the start of the helper's `CheckForUpdate`, before the check;
+  its outcome never fails the check.
+- **Switching** is the channel switch's code (`Op::SwitchDriver`, internal,
+  not reachable over D-Bus): same `--enforce-container-sigpolicy` / signed
+  origin rules, the pre-pull downgrade check, staged for the next boot, never
+  applied. A new operation lock file, `/run/atlas-system-helper.lock`
+  (root's, 0600, `O_NOFOLLOW`, `flock`), is shared by every helper process
+  and taken by every changing operation (upgrade, switch, rollback, driver
+  switch), so a driver switch never overlaps another operation; if it is
+  held, the driver step skips this round.
+- **No loops, offline-safe.** `/var/lib/atlas-core/drivers.json` (0644,
+  written atomically: temp file, fsync, rename):
+  `{hardware_key, target, outcome: "staged"|"failed", attempts, next_try,
+  decided_at}`. At most one switch per (hardware_key, target): once staged,
+  the pair is never switched again, even if the booted image is not the
+  target (the user used Go Back). A failure records `failed` and waits
+  15 minutes, 1 hour, 6 hours, then 24 hours; a retry is never in the same
+  run (the `drivers` run does not retry transient errors either). Offline is
+  a failed try.
+- **Events.** A switch that staged appends `driver-install` or
+  `driver-remove` to `events.jsonl`, the driver id in `version` (the crash
+  reports skip it). The tray watches the file (always, not only with crash
+  reports on), announces the newest unseen one once (`DriverEventTime` in
+  the `Notified` group; the first run marks the time and announces nothing
+  old) with the notifyrc event `driverStaged`: "NVIDIA graphics driver
+  installed — restart to finish" or "... removed ...". With Secure Boot on (last
+  byte of the `SecureBoot-8be4df61-...` EFI variable is 1) an install adds
+  "After the restart, follow the prompt to confirm the driver's key."; the
+  image's `nvidia-key-setup` does the key enrollment. The staged deployment
+  also puts the tray in its usual restart state.
+
 ## Flatpak wrapper (atlas-framework-flatpak)
 
 This uses libflatpak through the `libflatpak` crate (gtk-rs style). System

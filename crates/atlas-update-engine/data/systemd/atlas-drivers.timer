@@ -1,0 +1,11 @@
+[Unit]
+Description=Check whether this machine's hardware needs a driver image
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

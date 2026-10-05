@@ -1,6 +1,8 @@
 //! `atlas-system-helper`: D-Bus activated root helper that runs bootc for Atlas
 //! apps. With the argument `record-boot` it instead appends the booted image
 //! to the boot history and exits (run at boot by `atlas-record-boot.service`).
+//! With `drivers` it switches to the image the hardware needs, if it isn't
+//! on it (run by `atlas-drivers.timer`).
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -8,7 +10,9 @@ use std::sync::Arc;
 
 use atlas_framework_system::{bootc, history};
 use atlas_update_engine::helper::service::{IDLE_TIMEOUT, Service, serve};
-use atlas_update_engine::helper::{Core, SystemBootc, events, layered};
+use atlas_update_engine::helper::{
+    Core, DriverRun, DriversCfg, OP_LOCK_FILE, SystemBootc, events, layered,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -27,6 +31,30 @@ async fn main() -> ExitCode {
                 Err(e) => {
                     eprintln!("atlas-system-helper: record-boot failed: {e}");
                     return ExitCode::FAILURE;
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        ["drivers"] => {
+            // One try, never a retry in the same run: the timer comes back.
+            let core = Core::new(Arc::new(SystemBootc))
+                .with_events(events::DEFAULT_PATH.into())
+                .with_update_file(layered::UPDATE_FILE.into())
+                .with_policy(bootc::CONTAINERS_POLICY.into())
+                .with_lock_file(OP_LOCK_FILE.into())
+                .with_drivers(DriversCfg::default())
+                .with_retry_wait(|_| false);
+            match core.auto_drivers() {
+                DriverRun::Skipped(why) => eprintln!("atlas-system-helper: drivers: {why}"),
+                DriverRun::Busy => {
+                    eprintln!("atlas-system-helper: drivers: busy, next round");
+                }
+                DriverRun::Staged { driver, action } => {
+                    eprintln!("atlas-system-helper: drivers: {driver} {action} staged");
+                }
+                DriverRun::Failed(e) => {
+                    // exit 0: the state file holds the backoff; a failed unit would nag
+                    eprintln!("atlas-system-helper: drivers: failed, will retry later: {e}");
                 }
             }
             ExitCode::SUCCESS
@@ -52,7 +80,9 @@ async fn main() -> ExitCode {
             let core = Core::new(Arc::new(SystemBootc))
                 .with_events(events::DEFAULT_PATH.into())
                 .with_update_file(layered::UPDATE_FILE.into())
-                .with_policy(bootc::CONTAINERS_POLICY.into());
+                .with_policy(bootc::CONTAINERS_POLICY.into())
+                .with_lock_file(OP_LOCK_FILE.into())
+                .with_drivers(DriversCfg::default());
             let service = Service::from_core(core);
             match serve(builder, service, IDLE_TIMEOUT).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -64,7 +94,7 @@ async fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: atlas-system-helper [record-boot | record-event health-check-failed|health-check-passed]"
+                "usage: atlas-system-helper [record-boot | drivers | record-event health-check-failed|health-check-passed]"
             );
             ExitCode::from(2)
         }

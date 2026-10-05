@@ -52,6 +52,66 @@ const CRASH_SETTLE: Duration = Duration::from_millis(3000);
 const WATCH_RETRY: Duration = Duration::from_secs(60);
 const WORKER_OUTPUT_LIMIT: u64 = 64 * 1024;
 
+/// notifyrc key: the time of the last driver event announced.
+const DRIVER_SEEN: &str = "DriverEventTime";
+const SECURE_BOOT_VAR: &str =
+    "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+
+/// The newest driver event (`driver-install` or `driver-remove`, written by
+/// the helper) that is later than `seen`. Times are RFC 3339 UTC, so text
+/// order is time order.
+fn newest_driver_event<'a>(
+    events: &'a [atlas_framework_system::events::Event],
+    seen: &str,
+) -> Option<&'a atlas_framework_system::events::Event> {
+    events
+        .iter()
+        .filter(|e| matches!(e.event.as_str(), "driver-install" | "driver-remove"))
+        .filter(|e| e.time.as_str() > seen)
+        .max_by(|a, b| a.time.cmp(&b.time))
+}
+
+/// The notification for a driver event: title and text. Only drivers known
+/// here get one. The text is only for an install with Secure Boot on: the
+/// image's key setup asks for the driver's key once at the next start.
+fn driver_text(
+    e: &atlas_framework_system::events::Event,
+    secure_boot: bool,
+) -> Option<(String, String)> {
+    let name = match e.version.as_deref()? {
+        "nvidia" => "NVIDIA graphics driver",
+        _ => return None,
+    };
+    match e.event.as_str() {
+        "driver-install" => Some((
+            format!("{name} installed \u{2014} restart to finish"),
+            if secure_boot {
+                "After the restart, follow the prompt to confirm the driver's key.".into()
+            } else {
+                String::new()
+            },
+        )),
+        "driver-remove" => Some((
+            format!("{name} removed \u{2014} restart to finish"),
+            String::new(),
+        )),
+        _ => None,
+    }
+}
+
+/// `value` of the `SecureBoot` EFI variable: four attribute bytes, then 1
+/// when Secure Boot is on.
+fn secure_boot_on(var: &[u8]) -> bool {
+    var.len() == 5 && var[4] == 1
+}
+
+fn secure_boot() -> bool {
+    let mut buf = Vec::new();
+    std::fs::File::open(SECURE_BOOT_VAR)
+        .and_then(|f| f.take(16).read_to_end(&mut buf))
+        .is_ok_and(|_| secure_boot_on(&buf))
+}
+
 /// When to try again after `failures` failed background rounds in a row:
 /// 30 minutes, doubling each time, at most 6 hours.
 fn apps_retry_after(failures: u32) -> Duration {
@@ -91,6 +151,7 @@ enum Kind {
     RestartSoon,
     RestartFailed,
     Crash,
+    Driver,
 }
 
 struct Tray {
@@ -790,6 +851,42 @@ impl Tray {
         }
     }
 
+    // ---- hardware drivers ----
+
+    /// Tell the user about a driver the helper switched to or away from since
+    /// the last notice (the newest event only). The first run only marks the
+    /// time: nothing from before the tray ever ran is announced.
+    async fn driver_notice(&mut self) {
+        let events = atlas_framework_system::events::read(std::path::Path::new(
+            atlas_framework_system::events::DEFAULT_PATH,
+        ));
+        let Some(seen) = rc::get(rc::NOTIFIED, DRIVER_SEEN) else {
+            rc::set(
+                rc::NOTIFIED,
+                DRIVER_SEEN,
+                Some(&atlas_framework_system::history::now_rfc3339()),
+            );
+            return;
+        };
+        let Some(e) = newest_driver_event(&events, &seen) else {
+            return;
+        };
+        rc::set(rc::NOTIFIED, DRIVER_SEEN, Some(&e.time));
+        let Some((title, text)) = driver_text(e, secure_boot()) else {
+            return;
+        };
+        let n = Note {
+            event: "driverStaged",
+            title,
+            text,
+            icon: String::new(),
+            actions: vec![(notify::DEFAULT_ACTION, "Open Atlas Updater".into())],
+            urgency: None,
+            persistent: false,
+        };
+        self.notify(Kind::Driver, n).await;
+    }
+
     // ---- app updates (in workers) ----
 
     fn apps_round(&mut self) {
@@ -1404,6 +1501,9 @@ async fn run() -> Result<(), String> {
 
     let mut ostree_at: Option<Instant> = None;
     let mut crash_at: Option<Instant> = None;
+    let mut events_at: Option<Instant> = None;
+    // (a driver switch staged before this session began)
+    t.driver_notice().await;
     loop {
         tokio::select! {
             m = rx.recv() => {
@@ -1430,6 +1530,9 @@ async fn run() -> Result<(), String> {
                         watch::Hit::Crash => {
                             crash_at.get_or_insert(Instant::now() + CRASH_SETTLE);
                         }
+                        watch::Hit::Events => {
+                            events_at.get_or_insert(Instant::now() + CRASH_SETTLE);
+                        }
                     }
                 }
             }
@@ -1449,6 +1552,10 @@ async fn run() -> Result<(), String> {
             _ = sleep_until(ostree_at) => {
                 ostree_at = None;
                 t.refresh_status();
+            }
+            _ = sleep_until(events_at) => {
+                events_at = None;
+                t.driver_notice().await;
             }
             _ = sleep_until(crash_at) => {
                 crash_at = None;
@@ -1589,5 +1696,61 @@ mod tests {
             [m(0), m(1), m(2), m(3), m(4), m(5), m(99)],
             [30, 30, 60, 120, 240, 360, 360]
         );
+    }
+
+    fn ev(event: &str, driver: Option<&str>, time: &str) -> atlas_framework_system::events::Event {
+        atlas_framework_system::events::Event {
+            event: event.into(),
+            version: driver.map(Into::into),
+            error: None,
+            time: time.into(),
+        }
+    }
+
+    #[test]
+    fn the_newest_unseen_driver_event_is_announced() {
+        let all = [
+            ev("update-staged", None, "2026-10-05T10:00:00Z"),
+            ev("driver-install", Some("nvidia"), "2026-10-05T11:00:00Z"),
+            ev("driver-remove", Some("nvidia"), "2026-10-05T12:00:00Z"),
+        ];
+        let e = newest_driver_event(&all, "2026-10-05T10:30:00Z").unwrap();
+        assert_eq!(e.event, "driver-remove");
+        assert!(newest_driver_event(&all, "2026-10-05T12:00:00Z").is_none());
+        assert!(newest_driver_event(&[], "").is_none());
+    }
+
+    #[test]
+    fn the_driver_notice_texts() {
+        let i = ev("driver-install", Some("nvidia"), "t");
+        assert_eq!(
+            driver_text(&i, false),
+            Some((
+                "NVIDIA graphics driver installed \u{2014} restart to finish".into(),
+                String::new()
+            ))
+        );
+        assert_eq!(
+            driver_text(&i, true).unwrap().1,
+            "After the restart, follow the prompt to confirm the driver's key."
+        );
+        let r = ev("driver-remove", Some("nvidia"), "t");
+        assert_eq!(
+            driver_text(&r, true).unwrap(),
+            (
+                "NVIDIA graphics driver removed \u{2014} restart to finish".into(),
+                String::new()
+            )
+        );
+        assert!(driver_text(&ev("driver-install", Some("other"), "t"), false).is_none());
+        assert!(driver_text(&ev("driver-install", None, "t"), false).is_none());
+    }
+
+    #[test]
+    fn secure_boot_variable() {
+        assert!(secure_boot_on(&[7, 0, 0, 0, 1]));
+        assert!(!secure_boot_on(&[7, 0, 0, 0, 0]));
+        assert!(!secure_boot_on(&[1]));
+        assert!(!secure_boot_on(&[]));
     }
 }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use zbus::message::Header;
 use zbus::zvariant::Value;
 
-use super::{BootcRunner, Core, HelperError, Op, lock};
+use super::{BootcRunner, Core, DriverRun, HelperError, Op, lock};
 use crate::helper_client::{BUS_NAME, OBJECT_PATH};
 
 /// Exit after this long with no calls.
@@ -144,6 +144,17 @@ impl Service {
         let core = self.core.clone();
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
+            // Hardware drivers first; whatever happens there never fails the
+            // check (and a busy or failed step is tried again by the timer).
+            if op == Op::CheckForUpdate {
+                match core.auto_drivers() {
+                    DriverRun::Staged { driver, action } => {
+                        eprintln!("atlas-system-helper: driver {driver}: {action} staged");
+                    }
+                    DriverRun::Failed(e) => eprintln!("atlas-system-helper: drivers: {e}"),
+                    DriverRun::Skipped(_) | DriverRun::Busy => {}
+                }
+            }
             core.execute(&op)
         })
         .await

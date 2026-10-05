@@ -33,3 +33,8 @@ Action=Popup
 Name=Restart Did Not Happen
 Comment=A scheduled restart could not be done or was missed
 Action=Popup
+
+[Event/driverStaged]
+Name=Hardware Driver Changed
+Comment=A graphics driver was installed or removed and needs a restart to finish
+Action=Popup

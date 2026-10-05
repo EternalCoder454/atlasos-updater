@@ -5,6 +5,7 @@
 //! with a fake [`BootcRunner`].
 
 pub use atlas_framework_system::events;
+pub mod drivers;
 pub mod layered;
 pub mod live;
 pub mod retry;
@@ -26,7 +27,7 @@ use crate::helper_client::{
     STATE_UNREAD_CANCEL,
 };
 use crate::progress::{BootcParser, RpmOstreeParser};
-use atlas_framework_system::bootc::{Channel, Status, version_cmp};
+use atlas_framework_system::bootc::{Channel, ImageReference, Status, version_cmp};
 use atlas_framework_system::history;
 use live::{ProgressCell, ProgressSink};
 
@@ -549,6 +550,10 @@ pub enum Op {
     /// Undo a queued rollback (runs `bootc rollback` again).
     CancelRollback,
     SwitchChannel(String),
+    /// Switch to the image `repo` (an AtlasOS image from [`drivers`]) with the
+    /// booted image's tag. Only [`Core::auto_drivers`] makes it; no D-Bus
+    /// method does.
+    SwitchDriver(String),
 }
 
 impl Op {
@@ -559,7 +564,9 @@ impl Op {
             Op::CheckForUpdate => "net.eterneon.atlas.system.check",
             Op::Upgrade => "net.eterneon.atlas.system.upgrade",
             Op::Rollback | Op::CancelRollback => "net.eterneon.atlas.system.rollback",
-            Op::SwitchChannel(_) => "net.eterneon.atlas.system.switch-channel",
+            Op::SwitchChannel(_) | Op::SwitchDriver(_) => {
+                "net.eterneon.atlas.system.switch-channel"
+            }
         }
     }
 
@@ -568,6 +575,13 @@ impl Op {
         if let Op::SwitchChannel(c) = self {
             c.parse::<Channel>()
                 .map_err(|e| HelperError::InvalidArgument(e.to_string()))?;
+        }
+        if let Op::SwitchDriver(repo) = self
+            && !drivers::is_known_repo(repo)
+        {
+            return Err(HelperError::InvalidArgument(format!(
+                "{repo:?} is not an AtlasOS image"
+            )));
         }
         Ok(())
     }
@@ -593,7 +607,71 @@ pub struct Core {
     /// Waits between tries of a step that fetched from the registry (see
     /// [`retry`]); false stops the retrying.
     retry_wait: fn(Duration) -> bool,
+    /// A lock file shared by every helper process (D-Bus and the drivers
+    /// timer), held while an operation that changes the system runs.
+    lock_file: Option<PathBuf>,
+    /// Where drivers are decided (see [`Core::auto_drivers`]); none: never.
+    drivers: Option<DriversCfg>,
 }
+
+/// What [`Core::auto_drivers`] reads and writes.
+#[derive(Debug, Clone)]
+pub struct DriversCfg {
+    /// the root of the sysfs tree (`/`)
+    pub root: PathBuf,
+    pub state: PathBuf,
+}
+
+impl Default for DriversCfg {
+    fn default() -> Self {
+        DriversCfg {
+            root: "/".into(),
+            state: drivers::STATE_PATH.into(),
+        }
+    }
+}
+
+/// How a driver step ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DriverRun {
+    /// nothing to do (the reason is for the log)
+    Skipped(String),
+    /// another operation runs: next round
+    Busy,
+    /// `action` ("install" or "remove") of `driver` is staged for the next boot
+    Staged {
+        driver: &'static str,
+        action: &'static str,
+    },
+    Failed(String),
+}
+
+/// Held while an operation that changes the system runs; released on drop.
+struct OpLock(#[allow(dead_code)] std::fs::File);
+
+/// Take the machine-wide operation lock at `path` without waiting. The file
+/// is root's (0600), opened without following symlinks.
+fn op_lock(path: &Path) -> Result<Option<OpLock>, HelperError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| HelperError::Failed(format!("cannot open {}: {e}", path.display())))?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(OpLock(f))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(HelperError::Failed(format!(
+            "cannot lock {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// The lock every helper process takes (`/run` is root's).
+pub const OP_LOCK_FILE: &str = "/run/atlas-system-helper.lock";
 
 /// Sleep `d`, unless the helper is shutting down: then stop at once (false).
 fn wait_unless_closing(d: Duration) -> bool {
@@ -679,7 +757,22 @@ impl Core {
             status_cache: StatusCache::default(),
             progress: ProgressCell::new(),
             retry_wait: wait_unless_closing,
+            lock_file: None,
+            drivers: None,
         }
+    }
+
+    /// Serialize changing operations with other helper processes through the
+    /// lock file `path` ([`OP_LOCK_FILE`]).
+    pub fn with_lock_file(mut self, path: PathBuf) -> Self {
+        self.lock_file = Some(path);
+        self
+    }
+
+    /// Let [`Core::auto_drivers`] act.
+    pub fn with_drivers(mut self, cfg: DriversCfg) -> Self {
+        self.drivers = Some(cfg);
+        self
     }
 
     /// Wait between retries with `wait` (tests: without sleeping).
@@ -799,11 +892,18 @@ impl Core {
             return Err(HelperError::Busy("another operation is running".into()));
         }
         let _guard = BusyGuard(&self.busy);
+        let _lock = match &self.lock_file {
+            Some(p) => match op_lock(p)? {
+                Some(l) => Some(l),
+                None => return Err(HelperError::Busy("another operation is running".into())),
+            },
+            None => None,
+        };
         self.invalidate_status();
         // What an upgrade or switch starts from: the staged digest for the
         // event, and the booted and staged images it must not go back behind.
         // The operation reuses this read instead of reading again.
-        let before = matches!(op, Op::Upgrade | Op::SwitchChannel(_))
+        let before = matches!(op, Op::Upgrade | Op::SwitchChannel(_) | Op::SwitchDriver(_))
             // a direct read: the shared one may refuse under a status flood
             .then(|| self.read_state().ok())
             .flatten()
@@ -830,7 +930,7 @@ impl Core {
         // progress is reported for the two operations that download
         let progress = match op {
             Op::Upgrade => Some(self.progress.begin("upgrade")),
-            Op::SwitchChannel(_) => Some(self.progress.begin("switch")),
+            Op::SwitchChannel(_) | Op::SwitchDriver(_) => Some(self.progress.begin("switch")),
             _ => None,
         };
         let sink = progress.as_ref().map(|(s, _)| s.clone());
@@ -892,76 +992,170 @@ impl Core {
             }
             Op::Rollback | Op::CancelRollback => return self.toggle_rollback(op),
             Op::SwitchChannel(channel) => {
-                let fresh;
-                let read = match before {
-                    Some(b) => &b.read,
-                    None => {
-                        fresh = self.read_state()?;
-                        &fresh
-                    }
-                };
-                // rebase keeps the local changes, which bootc can't switch
-                if let Some(origin) = self.origin_of(read)? {
-                    let mut target = layered::origin_with_channel(&origin, channel)
-                        .map_err(HelperError::InvalidArgument)?;
-                    // never record a weaker check than the policy makes
-                    if let Some(image) = target
-                        .strip_prefix("ostree-unverified-registry:")
-                        .or_else(|| target.strip_prefix("ostree-unverified-image:docker://"))
-                        && self.policy_requires_signature(image)
-                    {
-                        target = format!("ostree-image-signed:docker://{image}");
-                    }
-                    if let Some(r) = layered::parse_origin(&target) {
-                        self.refuse_older_before_pull(before_status, &r)?;
-                    }
-                    self.rpm_ostree_progress(&["rebase", &target], sink)?;
-                    self.forget_update();
-                    return self.refuse_downgrade(before_status, self.status_json()?);
-                }
-                let current = Status::from_json(&read.bootc)
-                    .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
-                let booted = current.booted_ref().ok_or_else(|| {
-                    HelperError::Failed("bootc reports no booted image reference".into())
-                })?;
-                let new = booted
-                    .with_channel(channel)
-                    .map_err(|e| HelperError::InvalidArgument(e.to_string()))?;
-                let mut args = vec!["switch", "--transport", new.transport_or_default()];
-                // An unverified origin is upgraded to a checked one where the
-                // policy demands a signature anyway (as the stager does), so
-                // the switch never records a weaker check than the pulls get.
-                let unverified = match new.signature.as_ref() {
-                    None => true,
-                    Some(serde_json::Value::String(s)) => s == "insecure",
-                    Some(_) => false,
-                };
-                match new.signature.as_ref() {
-                    _ if unverified
-                        && new.transport_or_default() == "registry"
-                        && self.policy_requires_signature(&new.image) =>
-                    {
-                        args.push("--enforce-container-sigpolicy");
-                    }
-                    None => {}
-                    Some(serde_json::Value::String(s)) if s == "insecure" => {}
-                    Some(serde_json::Value::String(s)) if s == "containerPolicy" => {
-                        args.push("--enforce-container-sigpolicy");
-                    }
-                    Some(_) => {
-                        return Err(HelperError::Failed(
-                            "the booted image uses a signature setting this helper cannot carry over; use bootc switch by hand".into(),
-                        ));
-                    }
-                }
-                args.push(&new.image);
-                self.refuse_older_before_pull(before_status, &new)?;
-                self.bootc_progress(&args, sink)?;
-                // the channel's tag, even the one followed now, may have gone back
-                return self.refuse_downgrade(before_status, self.status_json()?);
+                return self.switch(
+                    &|r| r.with_channel(channel).map_err(|e| e.to_string()),
+                    sink,
+                    before,
+                );
+            }
+            Op::SwitchDriver(repo) => {
+                return self.switch(&|r| drivers::retarget(r, repo), sink, before);
             }
         }
         self.status_json()
+    }
+
+    /// Switch to the image the machine's hardware needs, if it is not on it:
+    /// see docs/DESIGN.md ("Drivers"). Never fails the caller: the result says
+    /// what happened. Takes the same locks as any switch, so it never overlaps
+    /// an update, switch or rollback (then: [`DriverRun::Busy`]).
+    pub fn auto_drivers(&self) -> DriverRun {
+        let Some(cfg) = &self.drivers else {
+            return DriverRun::Skipped("drivers are not enabled".into());
+        };
+        let status = match self.status_json().map(|j| Status::from_json(&j)) {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return DriverRun::Skipped(format!("cannot parse the status: {e}")),
+            Err(e) => return DriverRun::Skipped(format!("cannot read the status: {e}")),
+        };
+        let Some((booted_repo, _)) = status.booted_ref().and_then(drivers::booted_repo) else {
+            return DriverRun::Skipped("not an AtlasOS registry image on stable or testing".into());
+        };
+        let drivers::Decision::Target { repo, driver, key } =
+            drivers::target_image(booted_repo, &drivers::scan_pci(&cfg.root))
+        else {
+            return DriverRun::Skipped("not an AtlasOS image".into());
+        };
+        if repo == booted_repo {
+            return DriverRun::Skipped(format!("the booted image is already {repo}"));
+        }
+        let staged_repo = status
+            .status
+            .staged
+            .as_ref()
+            .and_then(|s| s.image.as_ref())
+            .and_then(|i| drivers::booted_repo(&i.image))
+            .map(|(r, _)| r);
+        if staged_repo == Some(repo.as_str()) {
+            return DriverRun::Skipped(format!("{repo} is already staged"));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let prev = drivers::read_state(&cfg.state);
+        if let drivers::Plan::Wait(why) = drivers::plan(prev.as_ref(), &key, &repo, now) {
+            return DriverRun::Skipped(why.into());
+        }
+        // (the driver that goes, for the notice: the booted image's)
+        let (id, action) = match driver {
+            Some(d) => (d.id, "install"),
+            None => (
+                drivers::driver_of(booted_repo).map_or("unknown", |d| d.id),
+                "remove",
+            ),
+        };
+        let result = self.execute(&Op::SwitchDriver(repo.clone()));
+        let ok = match &result {
+            Ok(_) => true,
+            Err(HelperError::Busy(_)) => return DriverRun::Busy,
+            // a stopped bootc is not a failed try
+            Err(HelperError::ShuttingDown(_)) => return DriverRun::Busy,
+            Err(HelperError::Failed(m)) if m == INTERRUPTED => return DriverRun::Busy,
+            Err(_) => false,
+        };
+        if let Err(e) = drivers::write_state(
+            &cfg.state,
+            &drivers::after(prev.as_ref(), &key, &repo, ok, now),
+        ) {
+            eprintln!(
+                "atlas-system-helper: cannot write {}: {e}",
+                cfg.state.display()
+            );
+        }
+        match result {
+            Ok(_) => {
+                self.event(&format!("driver-{action}"), Some(id.to_string()), None);
+                DriverRun::Staged { driver: id, action }
+            }
+            Err(e) => DriverRun::Failed(e.to_string()),
+        }
+    }
+
+    /// `bootc switch` (or `rpm-ostree rebase` with local changes) to the image
+    /// `retarget` makes of the booted one, staged for the next boot, with the
+    /// signature check of the booted image (or the policy's).
+    fn switch(
+        &self,
+        retarget: &dyn Fn(&ImageReference) -> Result<ImageReference, String>,
+        sink: Option<&ProgressSink>,
+        before: Option<&Before>,
+    ) -> Result<String, HelperError> {
+        let before_status = before.and_then(|b| b.status.as_ref());
+        let fresh;
+        let read = match before {
+            Some(b) => &b.read,
+            None => {
+                fresh = self.read_state()?;
+                &fresh
+            }
+        };
+        // rebase keeps the local changes, which bootc can't switch
+        if let Some(origin) = self.origin_of(read)? {
+            let mut target = layered::origin_retargeted(&origin, retarget)
+                .map_err(HelperError::InvalidArgument)?;
+            // never record a weaker check than the policy makes
+            if let Some(image) = target
+                .strip_prefix("ostree-unverified-registry:")
+                .or_else(|| target.strip_prefix("ostree-unverified-image:docker://"))
+                && self.policy_requires_signature(image)
+            {
+                target = format!("ostree-image-signed:docker://{image}");
+            }
+            if let Some(r) = layered::parse_origin(&target) {
+                self.refuse_older_before_pull(before_status, &r)?;
+            }
+            self.rpm_ostree_progress(&["rebase", &target], sink)?;
+            self.forget_update();
+            return self.refuse_downgrade(before_status, self.status_json()?);
+        }
+        let current = Status::from_json(&read.bootc)
+            .map_err(|e| HelperError::Failed(format!("cannot parse bootc status: {e}")))?;
+        let booted = current
+            .booted_ref()
+            .ok_or_else(|| HelperError::Failed("bootc reports no booted image reference".into()))?;
+        let new = retarget(booted).map_err(HelperError::InvalidArgument)?;
+        let mut args = vec!["switch", "--transport", new.transport_or_default()];
+        // An unverified origin is upgraded to a checked one where the
+        // policy demands a signature anyway (as the stager does), so
+        // the switch never records a weaker check than the pulls get.
+        let unverified = match new.signature.as_ref() {
+            None => true,
+            Some(serde_json::Value::String(s)) => s == "insecure",
+            Some(_) => false,
+        };
+        match new.signature.as_ref() {
+            _ if unverified
+                && new.transport_or_default() == "registry"
+                && self.policy_requires_signature(&new.image) =>
+            {
+                args.push("--enforce-container-sigpolicy");
+            }
+            None => {}
+            Some(serde_json::Value::String(s)) if s == "insecure" => {}
+            Some(serde_json::Value::String(s)) if s == "containerPolicy" => {
+                args.push("--enforce-container-sigpolicy");
+            }
+            Some(_) => {
+                return Err(HelperError::Failed(
+                        "the booted image uses a signature setting this helper cannot carry over; use bootc switch by hand".into(),
+                    ));
+            }
+        }
+        args.push(&new.image);
+        self.refuse_older_before_pull(before_status, &new)?;
+        self.bootc_progress(&args, sink)?;
+        // the channel's tag, even the one followed now, may have gone back
+        self.refuse_downgrade(before_status, self.status_json()?)
     }
 
     /// After an upgrade or switch: if what is staged now is older than the
@@ -3476,5 +3670,179 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
                 "ostree-image-signed:docker://ghcr.io/eternalcoder454/atlasos:testing"
             ]
         ));
+    }
+
+    // ---- automatic drivers ----
+
+    fn pci_root(device: &str, vendor: &str) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("sys/bus/pci/devices/0000:01:00.0");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("class"), "0x030000\n").unwrap();
+        std::fs::write(p.join("vendor"), format!("{vendor}\n")).unwrap();
+        std::fs::write(p.join("device"), format!("{device}\n")).unwrap();
+        d
+    }
+
+    fn drv_core(f: &Arc<Fake>, root: &tempfile::TempDir, work: &tempfile::TempDir) -> Core {
+        Core::new(f.clone())
+            .with_retry_wait(|_| false)
+            .with_events(work.path().join("events.jsonl"))
+            .with_lock_file(work.path().join("op.lock"))
+            .with_drivers(DriversCfg {
+                root: root.path().into(),
+                state: work.path().join("drivers.json"),
+            })
+    }
+
+    fn driver_events(work: &tempfile::TempDir) -> Vec<(String, Option<String>)> {
+        events::read(&work.path().join("events.jsonl"))
+            .into_iter()
+            .map(|e| (e.event, e.version))
+            .collect()
+    }
+
+    const NV_REPO: &str = "ghcr.io/eternalcoder454/atlasos-nvidia";
+
+    #[test]
+    fn nvidia_hardware_switches_once_and_a_go_back_is_respected() {
+        let f = Fake::new(PLAIN); // booted atlasos:testing
+        let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
+        let c = drv_core(&f, &root, &work);
+        assert_eq!(
+            c.auto_drivers(),
+            DriverRun::Staged {
+                driver: "nvidia",
+                action: "install"
+            }
+        );
+        assert_eq!(
+            switch_call(&f.calls()),
+            [
+                "switch",
+                "--transport",
+                "registry",
+                &format!("{NV_REPO}:testing")
+            ]
+        );
+        assert_eq!(
+            driver_events(&work),
+            [("driver-install".to_string(), Some("nvidia".to_string()))]
+        );
+        let st = drivers::read_state(&work.path().join("drivers.json")).unwrap();
+        assert_eq!(
+            (st.hardware_key.as_str(), st.target.as_str(), st.outcome),
+            ("10de:2504", NV_REPO, drivers::Outcome::Staged)
+        );
+        // still booted on the base image (rolled back): no second switch
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        assert_eq!(f.calls().iter().filter(|c| c[0] == "switch").count(), 1);
+    }
+
+    #[test]
+    fn machines_without_the_hardware_or_on_other_images_are_left_alone() {
+        let work = tempfile::tempdir().unwrap();
+        // AMD on the base image
+        let f = Fake::new(PLAIN);
+        let root = pci_root("0x744c", "0x1002");
+        let c = drv_core(&f, &root, &work);
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        // NVIDIA, but a tag that is not a channel
+        let f = Fake::new(&PLAIN.replace("atlasos:testing", "atlasos:latest"));
+        let root = pci_root("0x2504", "0x10de");
+        let c = drv_core(&f, &root, &work);
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        // NVIDIA, but another image
+        let f =
+            Fake::new(&PLAIN.replace("eternalcoder454/atlasos:testing", "someone/atlasos:testing"));
+        let root = pci_root("0x2504", "0x10de");
+        let c = drv_core(&f, &root, &work);
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        // already on the driver image
+        let f = Fake::new(&PLAIN.replace("atlasos:testing", "atlasos-nvidia:testing"));
+        let root = pci_root("0x2504", "0x10de");
+        let c = drv_core(&f, &root, &work);
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        assert!(f.calls().iter().all(|c| c[0] == "status"));
+        assert!(!work.path().join("drivers.json").exists());
+        assert!(driver_events(&work).is_empty());
+    }
+
+    #[test]
+    fn gone_hardware_goes_back_to_the_base_image() {
+        let f = Fake::new(&PLAIN.replace("atlasos:testing", "atlasos-nvidia:testing"));
+        let (root, work) = (pci_root("0x744c", "0x1002"), tempfile::tempdir().unwrap());
+        assert_eq!(
+            drv_core(&f, &root, &work).auto_drivers(),
+            DriverRun::Staged {
+                driver: "nvidia",
+                action: "remove"
+            }
+        );
+        assert_eq!(
+            switch_call(&f.calls()).last().unwrap(),
+            "ghcr.io/eternalcoder454/atlasos:testing"
+        );
+        assert_eq!(
+            driver_events(&work),
+            [("driver-remove".to_string(), Some("nvidia".to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_failed_switch_waits_for_its_backoff() {
+        let f = Arc::new(Fake {
+            calls: Mutex::default(),
+            status: PLAIN.into(),
+            fail_on: Some("switch"),
+            after_upgrade: None,
+        });
+        let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
+        let c = drv_core(&f, &root, &work);
+        assert!(matches!(c.auto_drivers(), DriverRun::Failed(_)));
+        let st = drivers::read_state(&work.path().join("drivers.json")).unwrap();
+        assert_eq!((st.outcome, st.attempts), (drivers::Outcome::Failed, 1));
+        assert!(st.next_try > st.decided_at);
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        assert_eq!(f.calls().iter().filter(|c| c[0] == "switch").count(), 1);
+        assert!(driver_events(&work).is_empty());
+    }
+
+    #[test]
+    fn a_driver_switch_never_overlaps_another_operation() {
+        let f = Fake::new(PLAIN);
+        let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
+        let c = drv_core(&f, &root, &work);
+        // another process holds the lock
+        let other = op_lock(&work.path().join("op.lock")).unwrap().unwrap();
+        assert!(matches!(
+            c.execute(&Op::Rollback),
+            Err(HelperError::Busy(_))
+        ));
+        assert_eq!(c.auto_drivers(), DriverRun::Busy);
+        assert!(f.calls().iter().all(|c| c[0] == "status"));
+        assert!(!work.path().join("drivers.json").exists());
+        drop(other);
+        assert!(matches!(c.auto_drivers(), DriverRun::Staged { .. }));
+        // and an in-process operation blocks it the same way
+        assert!(!c.is_busy());
+    }
+
+    #[test]
+    fn the_driver_op_takes_only_known_images() {
+        let f = Fake::new(PLAIN);
+        let c = core(&f);
+        for bad in [
+            "",
+            "ghcr.io/evil/atlasos",
+            "--help",
+            "ghcr.io/eternalcoder454/atlasos:stable",
+        ] {
+            assert!(matches!(
+                c.execute(&Op::SwitchDriver(bad.into())),
+                Err(HelperError::InvalidArgument(_))
+            ));
+        }
+        assert!(f.calls().is_empty());
     }
 }
