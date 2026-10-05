@@ -631,6 +631,20 @@ impl Default for DriversCfg {
     }
 }
 
+enum DriverPlan {
+    Skip(String),
+    Switch(Box<DriverSwitch>),
+}
+
+struct DriverSwitch {
+    repo: String,
+    key: String,
+    id: &'static str,
+    action: &'static str,
+    now: u64,
+    prev: Option<drivers::State>,
+}
+
 /// How a driver step ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DriverRun {
@@ -649,9 +663,11 @@ pub enum DriverRun {
 /// Held while an operation that changes the system runs; released on drop.
 struct OpLock(#[allow(dead_code)] std::fs::File);
 
-/// Take the machine-wide operation lock at `path` without waiting. The file
-/// is root's (0600), opened without following symlinks.
-fn op_lock(path: &Path) -> Result<Option<OpLock>, HelperError> {
+/// Take the machine-wide operation lock at `path` without waiting, and write
+/// into it who holds it (`holder`). The file is root's (0600), opened without
+/// following symlinks. `Err(holder)` when it is held (`""` if unknown).
+fn op_lock(path: &Path, holder: &str) -> Result<Result<OpLock, String>, HelperError> {
+    use std::io::{Read, Write};
     use std::os::unix::fs::OpenOptionsExt;
     let f = std::fs::OpenOptions::new()
         .create(true)
@@ -661,14 +677,38 @@ fn op_lock(path: &Path) -> Result<Option<OpLock>, HelperError> {
         .open(path)
         .map_err(|e| HelperError::Failed(format!("cannot open {}: {e}", path.display())))?;
     match f.try_lock() {
-        Ok(()) => Ok(Some(OpLock(f))),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Ok(()) => {
+            let mut f = f;
+            // (best effort: the holder's name only improves a message)
+            let _ = f.set_len(0).and_then(|_| f.write_all(holder.as_bytes()));
+            Ok(Ok(OpLock(f)))
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut s = String::new();
+            let _ = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .and_then(|f| f.take(32).read_to_string(&mut s));
+            Ok(Err(s))
+        }
         Err(std::fs::TryLockError::Error(e)) => Err(HelperError::Failed(format!(
             "cannot lock {}: {e}",
             path.display()
         ))),
     }
 }
+
+/// What the holder named in the lock file makes of "busy".
+fn busy_message(holder: &str) -> String {
+    if holder == DRIVER_HOLDER {
+        "A graphics driver is being installed. Try again in a few minutes.".into()
+    } else {
+        "another operation is running".into()
+    }
+}
+
+const DRIVER_HOLDER: &str = "driver";
 
 /// The lock every helper process takes (`/run` is root's).
 pub const OP_LOCK_FILE: &str = "/run/atlas-system-helper.lock";
@@ -892,10 +932,15 @@ impl Core {
             return Err(HelperError::Busy("another operation is running".into()));
         }
         let _guard = BusyGuard(&self.busy);
+        let holder = if matches!(op, Op::SwitchDriver(_)) {
+            DRIVER_HOLDER
+        } else {
+            "other"
+        };
         let _lock = match &self.lock_file {
-            Some(p) => match op_lock(p)? {
-                Some(l) => Some(l),
-                None => return Err(HelperError::Busy("another operation is running".into())),
+            Some(p) => match op_lock(p, holder)? {
+                Ok(l) => Some(l),
+                Err(who) => return Err(HelperError::Busy(busy_message(&who))),
             },
             None => None,
         };
@@ -1005,29 +1050,31 @@ impl Core {
         self.status_json()
     }
 
-    /// Switch to the image the machine's hardware needs, if it is not on it:
-    /// see docs/DESIGN.md ("Drivers"). Never fails the caller: the result says
-    /// what happened. Takes the same locks as any switch, so it never overlaps
-    /// an update, switch or rollback (then: [`DriverRun::Busy`]).
-    pub fn auto_drivers(&self) -> DriverRun {
+    /// What the driver step would do now, without doing it (reads sysfs, the
+    /// status and the state file; no pull).
+    fn plan_drivers(&self) -> DriverPlan {
+        let skip = |s: String| DriverPlan::Skip(s);
         let Some(cfg) = &self.drivers else {
-            return DriverRun::Skipped("drivers are not enabled".into());
+            return skip("drivers are not enabled".into());
         };
         let status = match self.status_json().map(|j| Status::from_json(&j)) {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => return DriverRun::Skipped(format!("cannot parse the status: {e}")),
-            Err(e) => return DriverRun::Skipped(format!("cannot read the status: {e}")),
+            Ok(Err(e)) => return skip(format!("cannot parse the status: {e}")),
+            Err(e) => return skip(format!("cannot read the status: {e}")),
         };
-        let Some((booted_repo, _)) = status.booted_ref().and_then(drivers::booted_repo) else {
-            return DriverRun::Skipped("not an AtlasOS registry image on stable or testing".into());
+        let Some(booted) = status.booted_ref() else {
+            return skip("not an AtlasOS registry image on stable or testing".into());
+        };
+        let Some((booted_repo, tag)) = drivers::booted_repo(booted) else {
+            return skip("not an AtlasOS registry image on stable or testing".into());
         };
         let drivers::Decision::Target { repo, driver, key } =
             drivers::target_image(booted_repo, &drivers::scan_pci(&cfg.root))
         else {
-            return DriverRun::Skipped("not an AtlasOS image".into());
+            return skip("not an AtlasOS image".into());
         };
         if repo == booted_repo {
-            return DriverRun::Skipped(format!("the booted image is already {repo}"));
+            return skip(format!("the booted image is already {repo}"));
         }
         let staged_repo = status
             .status
@@ -1037,14 +1084,27 @@ impl Core {
             .and_then(|i| drivers::booted_repo(&i.image))
             .map(|(r, _)| r);
         if staged_repo == Some(repo.as_str()) {
-            return DriverRun::Skipped(format!("{repo} is already staged"));
+            return skip(format!("{repo} is already staged"));
+        }
+        // Only a pull that is checked: the booted origin is signed, or the
+        // policy demands a signature for the target. An unreadable policy
+        // is no policy.
+        let policy_ok = self
+            .policy
+            .as_ref()
+            .is_none_or(|p| std::fs::read(p).is_ok());
+        let signed = matches!(&booted.signature, Some(serde_json::Value::String(s)) if s == "containerPolicy");
+        if !policy_ok || !(signed || self.policy_requires_signature(&format!("{repo}:{tag}"))) {
+            return skip(format!(
+                "the pull of {repo} would not be signature-checked; nothing is switched"
+            ));
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let prev = drivers::read_state(&cfg.state);
         if let drivers::Plan::Wait(why) = drivers::plan(prev.as_ref(), &key, &repo, now) {
-            return DriverRun::Skipped(why.into());
+            return skip(why.into());
         }
         // (the driver that goes, for the notice: the booted image's)
         let (id, action) = match driver {
@@ -1054,19 +1114,56 @@ impl Core {
                 "remove",
             ),
         };
-        let result = self.execute(&Op::SwitchDriver(repo.clone()));
+        DriverPlan::Switch(Box::new(DriverSwitch {
+            repo,
+            key,
+            id,
+            action,
+            now,
+            prev,
+        }))
+    }
+
+    /// Whether the driver step has a switch to make (the update check asks
+    /// systemd to run it then; nothing is pulled here).
+    pub fn drivers_wanted(&self) -> bool {
+        matches!(self.plan_drivers(), DriverPlan::Switch(_))
+    }
+
+    /// Switch to the image the machine's hardware needs, if it is not on it:
+    /// see docs/DESIGN.md ("Drivers"). Never fails the caller: the result says
+    /// what happened. Takes the same locks as any switch, so it never overlaps
+    /// an update, switch or rollback (then: [`DriverRun::Busy`]).
+    pub fn auto_drivers(&self) -> DriverRun {
+        let sw = match self.plan_drivers() {
+            DriverPlan::Skip(why) => return DriverRun::Skipped(why),
+            DriverPlan::Switch(sw) => sw,
+        };
+        let Some(cfg) = &self.drivers else {
+            return DriverRun::Skipped("drivers are not enabled".into());
+        };
+        // Written before the pull: a crash in the middle counts as a failed
+        // try. Without it written, nothing is switched.
+        let attempting = drivers::begin(sw.prev.as_ref(), &sw.key, &sw.repo, sw.now);
+        if let Err(e) = drivers::write_state(&cfg.state, &attempting) {
+            return DriverRun::Skipped(format!("cannot write {}: {e}", cfg.state.display()));
+        }
+        let result = self.execute(&Op::SwitchDriver(sw.repo.clone()));
         let ok = match &result {
             Ok(_) => true,
-            Err(HelperError::Busy(_)) => return DriverRun::Busy,
-            // a stopped bootc is not a failed try
-            Err(HelperError::ShuttingDown(_)) => return DriverRun::Busy,
-            Err(HelperError::Failed(m)) if m == INTERRUPTED => return DriverRun::Busy,
+            // not a try: put the old state back
+            Err(HelperError::Busy(_) | HelperError::ShuttingDown(_)) => {
+                self.restore_driver_state(cfg, sw.prev.as_ref());
+                return DriverRun::Busy;
+            }
+            Err(HelperError::Failed(m)) if m == INTERRUPTED => {
+                self.restore_driver_state(cfg, sw.prev.as_ref());
+                return DriverRun::Busy;
+            }
             Err(_) => false,
         };
-        if let Err(e) = drivers::write_state(
-            &cfg.state,
-            &drivers::after(prev.as_ref(), &key, &repo, ok, now),
-        ) {
+        if let Err(e) = drivers::write_state(&cfg.state, &drivers::finish(&attempting, ok, sw.now))
+        {
             eprintln!(
                 "atlas-system-helper: cannot write {}: {e}",
                 cfg.state.display()
@@ -1074,10 +1171,31 @@ impl Core {
         }
         match result {
             Ok(_) => {
-                self.event(&format!("driver-{action}"), Some(id.to_string()), None);
-                DriverRun::Staged { driver: id, action }
+                self.event(
+                    &format!("driver-{}", sw.action),
+                    Some(sw.id.to_string()),
+                    None,
+                );
+                DriverRun::Staged {
+                    driver: sw.id,
+                    action: sw.action,
+                }
             }
             Err(e) => DriverRun::Failed(e.to_string()),
+        }
+    }
+
+    /// Put the state from before an "attempting" write back (or remove it).
+    fn restore_driver_state(&self, cfg: &DriversCfg, prev: Option<&drivers::State>) {
+        let res = match prev {
+            Some(p) => drivers::write_state(&cfg.state, p),
+            None => std::fs::remove_file(&cfg.state),
+        };
+        if let Err(e) = res {
+            eprintln!(
+                "atlas-system-helper: cannot restore {}: {e}",
+                cfg.state.display()
+            );
         }
     }
 
@@ -3684,11 +3802,32 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         d
     }
 
+    /// A containers policy that demands (or not) a signature for AtlasOS.
+    fn policy_file(work: &tempfile::TempDir, signed: bool) -> PathBuf {
+        let p = work
+            .path()
+            .join(if signed { "policy.json" } else { "open.json" });
+        let t = if signed {
+            "sigstoreSigned"
+        } else {
+            "insecureAcceptAnything"
+        };
+        std::fs::write(
+            &p,
+            format!(
+                r#"{{"default":[{{"type":"reject"}}],"transports":{{"docker":{{"ghcr.io/eternalcoder454":[{{"type":"{t}","keyPath":"/k"}}]}}}}}}"#
+            ),
+        )
+        .unwrap();
+        p
+    }
+
     fn drv_core(f: &Arc<Fake>, root: &tempfile::TempDir, work: &tempfile::TempDir) -> Core {
         Core::new(f.clone())
             .with_retry_wait(|_| false)
             .with_events(work.path().join("events.jsonl"))
             .with_lock_file(work.path().join("op.lock"))
+            .with_policy(policy_file(work, true))
             .with_drivers(DriversCfg {
                 root: root.path().into(),
                 state: work.path().join("drivers.json"),
@@ -3722,6 +3861,7 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
                 "switch",
                 "--transport",
                 "registry",
+                "--enforce-container-sigpolicy",
                 &format!("{NV_REPO}:testing")
             ]
         );
@@ -3814,11 +3954,14 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
         let c = drv_core(&f, &root, &work);
         // another process holds the lock
-        let other = op_lock(&work.path().join("op.lock")).unwrap().unwrap();
-        assert!(matches!(
-            c.execute(&Op::Rollback),
-            Err(HelperError::Busy(_))
-        ));
+        let other = op_lock(&work.path().join("op.lock"), "driver")
+            .unwrap()
+            .ok()
+            .unwrap();
+        match c.execute(&Op::Rollback) {
+            Err(HelperError::Busy(m)) => assert!(m.contains("graphics driver"), "{m}"),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(c.auto_drivers(), DriverRun::Busy);
         assert!(f.calls().iter().all(|c| c[0] == "status"));
         assert!(!work.path().join("drivers.json").exists());
@@ -3844,5 +3987,53 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
             ));
         }
         assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn nothing_is_switched_unless_the_pull_is_signature_checked() {
+        let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
+        // unsigned origin, policy that accepts anything: skipped
+        let f = Fake::new(PLAIN);
+        let c = drv_core(&f, &root, &work).with_policy(policy_file(&work, false));
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        assert!(!c.drivers_wanted());
+        // unreadable policy: skipped, even with a signed origin
+        let f = Fake::new(&signed("\"containerPolicy\""));
+        let c = drv_core(&f, &root, &work).with_policy(work.path().join("missing.json"));
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        // a signed origin switches, with the signature enforced
+        let f = Fake::new(&signed("\"containerPolicy\""));
+        let c = drv_core(&f, &root, &work).with_policy(policy_file(&work, false));
+        assert!(c.drivers_wanted());
+        assert!(matches!(c.auto_drivers(), DriverRun::Staged { .. }));
+        assert!(switch_call(&f.calls()).contains(&"--enforce-container-sigpolicy".to_string()));
+        // an unsigned origin where the policy demands one: switches, enforced
+        let work2 = tempfile::tempdir().unwrap();
+        let f = Fake::new(PLAIN);
+        let c = drv_core(&f, &root, &work2);
+        assert!(matches!(c.auto_drivers(), DriverRun::Staged { .. }));
+        assert!(switch_call(&f.calls()).contains(&"--enforce-container-sigpolicy".to_string()));
+    }
+
+    #[test]
+    fn the_attempt_is_written_before_the_switch_and_a_busy_one_is_taken_back() {
+        let (root, work) = (pci_root("0x2504", "0x10de"), tempfile::tempdir().unwrap());
+        // the state cannot be written: nothing is switched
+        let f = Fake::new(PLAIN);
+        let c = drv_core(&f, &root, &work).with_drivers(DriversCfg {
+            root: root.path().into(),
+            state: work.path().join("policy.json/drivers.json"), // under a file
+        });
+        assert!(matches!(c.auto_drivers(), DriverRun::Skipped(_)));
+        assert!(f.calls().iter().all(|c| c[0] == "status"));
+        // busy: no trace in the state file
+        let c = drv_core(&f, &root, &work);
+        let other = op_lock(&work.path().join("op.lock"), "other")
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(c.auto_drivers(), DriverRun::Busy);
+        assert!(!work.path().join("drivers.json").exists());
+        drop(other);
     }
 }

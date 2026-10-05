@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use zbus::message::Header;
 use zbus::zvariant::Value;
 
-use super::{BootcRunner, Core, DriverRun, HelperError, Op, lock};
+use super::{BootcRunner, Core, HelperError, Op, lock};
 use crate::helper_client::{BUS_NAME, OBJECT_PATH};
 
 /// Exit after this long with no calls.
@@ -33,6 +33,21 @@ trait Authority {
         cancellation_id: &str,
     ) -> zbus::Result<(bool, bool, HashMap<String, String>)>;
 }
+
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_service = "org.freedesktop.systemd1",
+    default_path = "/org/freedesktop/systemd1",
+    gen_blocking = false
+)]
+trait Systemd {
+    fn start_unit(&self, name: &str, mode: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+}
+
+/// The only unit the helper ever asks systemd to start.
+const DRIVERS_UNIT: &str = "atlas-drivers.service";
+/// systemd answers a start request at once (it does not wait for the job).
+const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct State {
@@ -144,21 +159,34 @@ impl Service {
         let core = self.core.clone();
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            // Hardware drivers first; whatever happens there never fails the
-            // check (and a busy or failed step is tried again by the timer).
-            if op == Op::CheckForUpdate {
-                match core.auto_drivers() {
-                    DriverRun::Staged { driver, action } => {
-                        eprintln!("atlas-system-helper: driver {driver}: {action} staged");
-                    }
-                    DriverRun::Failed(e) => eprintln!("atlas-system-helper: drivers: {e}"),
-                    DriverRun::Skipped(_) | DriverRun::Busy => {}
-                }
-            }
             core.execute(&op)
         })
         .await
         .map_err(|e| HelperError::Failed(format!("worker failed: {e}")))?
+    }
+
+    /// If the machine needs another image for its hardware, have systemd run
+    /// `atlas-drivers.service` (the pull happens there, not in this call).
+    /// Never fails the caller: a problem is logged.
+    async fn start_drivers(&self, conn: &zbus::Connection) {
+        let core = self.core.clone();
+        let wanted = tokio::task::spawn_blocking(move || core.drivers_wanted())
+            .await
+            .unwrap_or(false);
+        if !wanted {
+            return;
+        }
+        let start = async {
+            SystemdProxy::new(conn)
+                .await?
+                .start_unit(DRIVERS_UNIT, "replace")
+                .await
+        };
+        match tokio::time::timeout(START_TIMEOUT, start).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("atlas-system-helper: cannot start {DRIVERS_UNIT}: {e}"),
+            Err(_) => eprintln!("atlas-system-helper: starting {DRIVERS_UNIT} timed out"),
+        }
     }
 
     /// Run `op` without a polkit check (tests).
@@ -181,6 +209,9 @@ impl Service {
             .ok_or_else(|| HelperError::NotAuthorized("call has no sender".into()))?
             .to_string();
         authorize(conn, &sender, op.action_id()).await?;
+        if op == Op::CheckForUpdate {
+            self.start_drivers(conn).await;
+        }
         self.execute(op, guard).await
     }
 }

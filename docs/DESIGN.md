@@ -254,9 +254,14 @@ signature; the containers policy covers both. The code is
 - **When.** `atlas-drivers.timer` (OnBootSec=2min, OnUnitActiveSec=6h,
   Persistent, RandomizedDelaySec=5min; enabled by the preset) starts
   `atlas-drivers.service` (oneshot, after `network-online.target`, hardened
-  like the helper), which runs `atlas-system-helper drivers`. The same step
-  also runs at the start of the helper's `CheckForUpdate`, before the check;
-  its outcome never fails the check.
+  like the helper), which runs `atlas-system-helper drivers`. At the start of
+  the helper's `CheckForUpdate` the helper only plans (sysfs and the state
+  file) and, if a switch is due, asks systemd (`StartUnit
+  atlas-drivers.service`, mode `replace`, not waited for) to run it: the pull
+  never runs inside the D-Bus call, and a failure never fails the check.
+- **Only a checked pull.** The step skips (logs why) unless the booted origin
+  is signed (`containerPolicy`) or the containers policy demands a signature
+  for the target; an unreadable policy skips.
 - **Switching** is the channel switch's code (`Op::SwitchDriver`, internal,
   not reachable over D-Bus): same `--enforce-container-sigpolicy` / signed
   origin rules, the pre-pull downgrade check, staged for the next boot, never
@@ -264,13 +269,17 @@ signature; the containers policy covers both. The code is
   (root's, 0600, `O_NOFOLLOW`, `flock`), is shared by every helper process
   and taken by every changing operation (upgrade, switch, rollback, driver
   switch), so a driver switch never overlaps another operation; if it is
-  held, the driver step skips this round.
+  held, the driver step skips this round. The holder's name is written into
+  the lock file; a caller refused because a driver switch holds it is told "A
+  graphics driver is being installed. Try again in a few minutes."
 - **No loops, offline-safe.** `/var/lib/atlas-core/drivers.json` (0644,
   written atomically: temp file, fsync, rename):
-  `{hardware_key, target, outcome: "staged"|"failed", attempts, next_try,
+  `{hardware_key, target, outcome: "attempting"|"staged"|"failed", attempts, next_try,
   decided_at}`. At most one switch per (hardware_key, target): once staged,
   the pair is never switched again, even if the booted image is not the
-  target (the user used Go Back). A failure records `failed` and waits
+  target (the user used Go Back). `attempting` (with the backoff already set) is written before the pull and
+  the switch does not start if that write fails, so a run that dies in the
+  middle counts as a failure. A failure records `failed` and waits
   15 minutes, 1 hour, 6 hours, then 24 hours; a retry is never in the same
   run (the `drivers` run does not retry transient errors either). Offline is
   a failed try.
@@ -278,8 +287,8 @@ signature; the containers policy covers both. The code is
   `driver-remove` to `events.jsonl`, the driver id in `version` (the crash
   reports skip it). The tray watches the file (always, not only with crash
   reports on), announces the newest unseen one once (`DriverEventTime` in
-  the `Notified` group; the first run marks the time and announces nothing
-  old) with the notifyrc event `driverStaged`: "NVIDIA graphics driver
+  the `Notified` group; without one, events since this boot began, from
+  `btime` in `/proc/stat`, count) with the notifyrc event `driverStaged`: "NVIDIA graphics driver
   installed — restart to finish" or "... removed ...". With Secure Boot on (last
   byte of the `SecureBoot-8be4df61-...` EFI variable is 1) an install adds
   "After the restart, follow the prompt to confirm the driver's key."; the

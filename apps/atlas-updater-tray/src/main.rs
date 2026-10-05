@@ -57,6 +57,22 @@ const DRIVER_SEEN: &str = "DriverEventTime";
 const SECURE_BOOT_VAR: &str =
     "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
 
+/// The time after which driver events are news: the saved marker, else the
+/// start of this boot (`btime` in `/proc/stat` text `stat`), else `now`.
+fn seen_marker(saved: Option<String>, stat: &str, now: &str) -> String {
+    saved
+        .or_else(|| {
+            let secs: u64 = stat
+                .lines()
+                .find_map(|l| l.strip_prefix("btime "))?
+                .trim()
+                .parse()
+                .ok()?;
+            Some(atlas_framework_system::history::rfc3339_from_unix(secs))
+        })
+        .unwrap_or_else(|| now.to_string())
+}
+
 /// The newest driver event (`driver-install` or `driver-remove`, written by
 /// the helper) that is later than `seen`. Times are RFC 3339 UTC, so text
 /// order is time order.
@@ -860,15 +876,12 @@ impl Tray {
         let events = atlas_framework_system::events::read(std::path::Path::new(
             atlas_framework_system::events::DEFAULT_PATH,
         ));
-        let Some(seen) = rc::get(rc::NOTIFIED, DRIVER_SEEN) else {
-            rc::set(
-                rc::NOTIFIED,
-                DRIVER_SEEN,
-                Some(&atlas_framework_system::history::now_rfc3339()),
-            );
-            return;
-        };
+        // No marker yet: what was staged since this boot began is news.
+        let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+        let now = atlas_framework_system::history::now_rfc3339();
+        let seen = seen_marker(rc::get(rc::NOTIFIED, DRIVER_SEEN), &stat, &now);
         let Some(e) = newest_driver_event(&events, &seen) else {
+            rc::set(rc::NOTIFIED, DRIVER_SEEN, Some(&seen));
             return;
         };
         rc::set(rc::NOTIFIED, DRIVER_SEEN, Some(&e.time));
@@ -1752,5 +1765,24 @@ mod tests {
         assert!(!secure_boot_on(&[7, 0, 0, 0, 0]));
         assert!(!secure_boot_on(&[1]));
         assert!(!secure_boot_on(&[]));
+    }
+
+    #[test]
+    fn without_a_marker_events_since_boot_are_news() {
+        let stat = "cpu 1 2 3\nbtime 1700000000\nprocesses 9\n";
+        let seen = seen_marker(None, stat, "2030-01-01T00:00:00Z");
+        assert_eq!(seen, "2023-11-14T22:13:20Z");
+        let all = [
+            ev("driver-install", Some("nvidia"), "2023-11-14T22:00:00Z"),
+            ev("driver-remove", Some("nvidia"), "2023-11-14T23:00:00Z"),
+        ];
+        assert_eq!(
+            newest_driver_event(&all, &seen).unwrap().event,
+            "driver-remove"
+        );
+        // a saved marker wins; no btime falls back to now
+        assert_eq!(seen_marker(Some("x".into()), stat, "n"), "x");
+        assert_eq!(seen_marker(None, "cpu 1", "n"), "n");
+        assert_eq!(seen_marker(None, "btime junk", "n"), "n");
     }
 }

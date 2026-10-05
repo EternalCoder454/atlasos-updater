@@ -172,8 +172,6 @@ install -Dpm0644 $d/dbus-1/system-services/net.eterneon.atlas.SystemHelper.servi
     %{buildroot}%{_datadir}/dbus-1/system-services/net.eterneon.atlas.SystemHelper.service
 install -Dpm0644 $d/systemd/atlas-system-helper.service %{buildroot}%{_unitdir}/atlas-system-helper.service
 install -Dpm0644 $d/systemd/atlas-record-boot.service %{buildroot}%{_unitdir}/atlas-record-boot.service
-%{_unitdir}/atlas-drivers.service
-%{_unitdir}/atlas-drivers.timer
 install -Dpm0644 $d/systemd/atlas-drivers.service %{buildroot}%{_unitdir}/atlas-drivers.service
 install -Dpm0644 $d/systemd/atlas-drivers.timer %{buildroot}%{_unitdir}/atlas-drivers.timer
 install -Dpm0644 $d/systemd/50-atlas-system-helper.preset %{buildroot}%{_presetdir}/50-atlas-system-helper.preset
@@ -201,10 +199,10 @@ appstream-util validate-relax --nonet \
 %systemd_post atlas-record-boot.service atlas-drivers.timer
 
 %preun -n atlas-system-helper
-%systemd_preun atlas-record-boot.service atlas-drivers.timer
+%systemd_preun atlas-record-boot.service atlas-drivers.service atlas-drivers.timer
 
 %postun -n atlas-system-helper
-%systemd_postun atlas-record-boot.service atlas-drivers.timer
+%systemd_postun atlas-record-boot.service atlas-drivers.service atlas-drivers.timer
 
 # Replacing atlas-core: its %%preun runs after our %%post (it is being erased,
 # not upgraded) and disables atlas-record-boot. Preset it again once it's gone.
@@ -218,6 +216,8 @@ systemctl --no-reload preset atlas-record-boot.service atlas-drivers.timer >/dev
 %{_datadir}/dbus-1/system-services/net.eterneon.atlas.SystemHelper.service
 %{_unitdir}/atlas-system-helper.service
 %{_unitdir}/atlas-record-boot.service
+%{_unitdir}/atlas-drivers.service
+%{_unitdir}/atlas-drivers.timer
 %{_presetdir}/50-atlas-system-helper.preset
 %{_datadir}/polkit-1/actions/net.eterneon.atlas.system.policy
 %{_datadir}/polkit-1/rules.d/50-atlas-system.rules

@@ -180,6 +180,8 @@ pub fn target_image(booted_repo: &str, devices: &[PciDevice]) -> Decision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
+    /// written before the switch; it stays if the run dies in the middle
+    Attempting,
     Staged,
     Failed,
 }
@@ -221,17 +223,21 @@ pub fn plan(state: Option<&State>, key: &str, target: &str, now: u64) -> Plan {
         Some(s) if s.hardware_key == key && s.target == target => match s.outcome {
             Outcome::Staged => Plan::Wait("already switched once for this hardware"),
             // (a clock set back far must not wait for longer than the cap)
-            Outcome::Failed if now < s.next_try && s.next_try - now <= backoff(u32::MAX) => {
+            Outcome::Failed | Outcome::Attempting
+                if now < s.next_try && s.next_try - now <= backoff(u32::MAX) =>
+            {
                 Plan::Wait("an earlier try failed; waiting before the next")
             }
-            Outcome::Failed => Plan::Switch,
+            Outcome::Failed | Outcome::Attempting => Plan::Switch,
         },
         _ => Plan::Switch,
     }
 }
 
-/// The state after a try at `now`.
-pub fn after(prev: Option<&State>, key: &str, target: &str, ok: bool, now: u64) -> State {
+/// The state written before a try at `now`: it counts as a failed try (with
+/// its backoff) until [`finish`] says otherwise, so a run that dies in the
+/// middle is not tried again at once.
+pub fn begin(prev: Option<&State>, key: &str, target: &str, now: u64) -> State {
     let attempts = prev
         .filter(|s| s.hardware_key == key && s.target == target)
         .map_or(0, |s| s.attempts)
@@ -239,10 +245,24 @@ pub fn after(prev: Option<&State>, key: &str, target: &str, ok: bool, now: u64) 
     State {
         hardware_key: key.into(),
         target: target.into(),
-        outcome: if ok { Outcome::Staged } else { Outcome::Failed },
+        outcome: Outcome::Attempting,
         attempts,
-        next_try: if ok { 0 } else { now + backoff(attempts) },
+        next_try: now + backoff(attempts),
         decided_at: now,
+    }
+}
+
+/// The state after the try `attempting` ended, `ok` or not.
+pub fn finish(attempting: &State, ok: bool, now: u64) -> State {
+    State {
+        outcome: if ok { Outcome::Staged } else { Outcome::Failed },
+        next_try: if ok {
+            0
+        } else {
+            now + backoff(attempting.attempts)
+        },
+        decided_at: now,
+        ..attempting.clone()
     }
 }
 
@@ -463,9 +483,13 @@ mod tests {
         assert_eq!(plan(Some(&staged), "k", "t2", 10), Plan::Switch);
     }
 
+    fn failed(prev: Option<&State>, now: u64) -> State {
+        finish(&begin(prev, "k", "t", now), false, now)
+    }
+
     #[test]
     fn a_failure_waits_with_growing_backoff_and_never_retries_at_once() {
-        let s = after(None, "k", "t", false, 1000);
+        let s = failed(None, 1000);
         assert_eq!(
             (s.outcome, s.attempts, s.next_try),
             (Outcome::Failed, 1, 1900)
@@ -473,21 +497,29 @@ mod tests {
         assert!(matches!(plan(Some(&s), "k", "t", 1000), Plan::Wait(_)));
         assert!(matches!(plan(Some(&s), "k", "t", 1899), Plan::Wait(_)));
         assert_eq!(plan(Some(&s), "k", "t", 1900), Plan::Switch);
-        let s2 = after(Some(&s), "k", "t", false, 2000);
+        let s2 = failed(Some(&s), 2000);
         assert_eq!((s2.attempts, s2.next_try), (2, 2000 + 3600));
-        let s3 = after(Some(&s2), "k", "t", false, 0);
+        let s3 = failed(Some(&s2), 0);
         assert_eq!(s3.next_try, 6 * 3600);
-        let s4 = after(Some(&s3), "k", "t", false, 0);
+        let s4 = failed(Some(&s3), 0);
         assert_eq!(s4.next_try, 24 * 3600);
-        assert_eq!(after(Some(&s4), "k", "t", false, 0).next_try, 24 * 3600);
+        assert_eq!(failed(Some(&s4), 0).next_try, 24 * 3600);
         // success after failures
-        let ok = after(Some(&s2), "k", "t", true, 5000);
+        let ok = finish(&begin(Some(&s2), "k", "t", 5000), true, 5000);
         assert_eq!(
             (ok.outcome, ok.attempts, ok.next_try),
             (Outcome::Staged, 3, 0)
         );
         // a new pair starts over
-        assert_eq!(after(Some(&s4), "k2", "t", false, 0).attempts, 1);
+        assert_eq!(begin(Some(&s4), "k2", "t", 0).attempts, 1);
+    }
+
+    #[test]
+    fn a_run_that_died_mid_switch_waits_like_a_failure() {
+        let a = begin(None, "k", "t", 1000);
+        assert_eq!(a.outcome, Outcome::Attempting);
+        assert!(matches!(plan(Some(&a), "k", "t", 1100), Plan::Wait(_)));
+        assert_eq!(plan(Some(&a), "k", "t", 1900), Plan::Switch);
     }
 
     #[test]
