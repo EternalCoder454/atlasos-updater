@@ -62,7 +62,7 @@ BuildRequires:  pkgconfig(gio-2.0)
 # from atlas-framework, which is in no repository: install its RPMs first
 # (build-rpm.sh does, given ATLAS_LOCAL_RPMS).
 BuildRequires:  kf6-kirigami-devel
-BuildRequires:  atlas-ui >= 1.3.0
+BuildRequires:  atlas-ui >= 1.4.0
 %endif
 
 %description
@@ -96,10 +96,10 @@ removal by dnf.
 %package -n atlas-updater
 Summary:        Atlas Updater for AtlasOS
 Requires:       atlas-system-helper = %{version}-%{release}
-# Atlas.Ui, the shared look (atlas-framework). 1.3.0 has the form controls
-# and AtlasSpinner the pages use; 1.1.0 and later ship
+# Atlas.Ui, the shared look (atlas-framework). 1.4.0 has the controls and
+# tokens the pages use; 1.1.0 and later ship
 # /usr/share/atlas/crash-reporting.toml, the crash report server.
-Requires:       atlas-ui >= 1.3.0
+Requires:       atlas-ui >= 1.4.0
 Requires:       kf6-kirigami
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative

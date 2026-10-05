@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
@@ -119,10 +118,7 @@ AtlasPage {
     }
 
     function copyDetails() {
-        copier.text = page.backend.errorText;
-        copier.selectAll();
-        copier.copy();
-        copier.text = "";
+        AtlasClipboard.setText(page.backend.errorText);
         copied.restart();
     }
 
@@ -180,11 +176,6 @@ AtlasPage {
         }
     }
 
-    // Copy Details goes through this: QML has no clipboard of its own.
-    TextEdit {
-        id: copier
-        visible: false
-    }
     Timer {
         id: copied
         interval: 2000
@@ -202,7 +193,7 @@ AtlasPage {
             if (dayBox.currentIndex === 1) {
                 d.setDate(d.getDate() + 1);
             }
-            d.setHours(hourSpin.value, minuteSpin.value, 0, 0);
+            d.setHours(timePicker.hours, timePicker.minutes, 0, 0);
             if (d.getTime() <= Date.now()) {
                 scheduleDialog.problem = qsTr("That time has already passed. Pick a later time.");
                 return;
@@ -214,11 +205,11 @@ AtlasPage {
             scheduleDialog.problem = "";
             var d = new Date(Date.now() + 60 * 60 * 1000);
             dayBox.currentIndex = d.getDate() !== new Date().getDate() ? 1 : 0;
-            hourSpin.value = d.getHours();
-            minuteSpin.value = 0;
+            timePicker.hours = d.getHours();
+            timePicker.minutes = 0;
         }
 
-        QQC2.Label {
+        AtlasLabel {
             Layout.fillWidth: true
             visible: scheduleDialog.problem.length > 0
             text: scheduleDialog.problem
@@ -226,43 +217,19 @@ AtlasPage {
             wrapMode: Text.Wrap
             Accessible.role: Accessible.AlertMessage
         }
-        // ConfirmDialog is at most 25 grid units wide: the Atlas controls'
-        // own widths (12 + 9 + 9) would not fit, so the row shares it out.
         RowLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
             AtlasComboBox {
                 id: dayBox
                 Layout.fillWidth: true
-                Layout.minimumWidth: Kirigami.Units.gridUnit * 6
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
                 onActivated: scheduleDialog.problem = ""
                 model: [qsTr("Today"), qsTr("Tomorrow")]
                 Accessible.name: qsTr("Day")
             }
-            AtlasSpinBox {
-                id: hourSpin
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                from: 0
-                to: 23
-                editable: true
-                onValueChanged: scheduleDialog.problem = ""
-                Accessible.name: qsTr("Hour")
-                textFromValue: v => (v < 10 ? "0" : "") + v
-            }
-            QQC2.Label {
-                text: ":"
-            }
-            AtlasSpinBox {
-                id: minuteSpin
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                from: 0
-                to: 59
-                stepSize: 5
-                editable: true
-                onValueChanged: scheduleDialog.problem = ""
-                Accessible.name: qsTr("Minute")
-                textFromValue: v => (v < 10 ? "0" : "") + v
+            AtlasTimePicker {
+                id: timePicker
+                onEdited: scheduleDialog.problem = ""
             }
         }
     }
@@ -302,12 +269,12 @@ AtlasPage {
                 return Kirigami.Theme.negativeTextColor;
             }
             if (page.restartReady) {
-                return Kirigami.Theme.highlightColor;
+                return AtlasStyle.accent;
             }
             if (page.backend.updateAvailable && page.availableIsBad) {
                 return Kirigami.Theme.neutralTextColor;
             }
-            return page.backend.updateAvailable ? Kirigami.Theme.highlightColor : Kirigami.Theme.positiveTextColor;
+            return page.backend.updateAvailable ? AtlasStyle.accent : Kirigami.Theme.positiveTextColor;
         }
         // Up to date: the OS logo in its own colours with a check badge,
         // not a tinted circle. The logo is `LOGO=` from os-release, then
@@ -422,9 +389,10 @@ AtlasPage {
         SecondaryButton {
             text: qsTr("Restart Tonight")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0 && page.tonight > 0
-            QQC2.ToolTip.visible: hovered
-            QQC2.ToolTip.text: qsTr("Restarts at %1. You get a notification 5 minutes before.").arg(new Date(page.tonight * 1000).toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)))
-            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            AtlasToolTip {
+                text: qsTr("Restarts at %1. You get a notification 5 minutes before.").arg(new Date(page.tonight * 1000).toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)))
+                shown: parent.hovered || parent.visualFocus
+            }
             onClicked: {
                 var at = page.tonightAt(Date.now());
                 page.now = Date.now();
@@ -487,14 +455,13 @@ AtlasPage {
         }
     }
 
-    QQC2.Label {
+    AtlasLabel {
         Layout.fillWidth: true
+        textStyle: AtlasLabel.Caption
         Layout.topMargin: -Kirigami.Units.smallSpacing
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         visible: page.backend.lastChecked > 0 && page.backend.loaded && !page.hasError && !page.checking && !page.downloading && !page.working
         horizontalAlignment: Text.AlignHCenter
-        font: Kirigami.Theme.smallFont
-        opacity: 0.6
         text: qsTr("Last checked: %1").arg(Dates.relative(page.backend.lastChecked, page.now))
         textFormat: Text.PlainText
     }
@@ -591,11 +558,7 @@ AtlasPage {
         SectionRow {
             visible: page.backend.appsBusy
             title: page.backend.appsStatus
-            AtlasSpinner {
-                running: page.backend.appsBusy
-                implicitWidth: Kirigami.Units.iconSizes.smallMedium
-                implicitHeight: implicitWidth
-            }
+            busy: page.backend.appsBusy
         }
         SectionRow {
             visible: page.backend.appsError.length > 0

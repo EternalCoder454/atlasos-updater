@@ -91,6 +91,7 @@ AtlasPage {
         title: qsTr("Could not load the changelog")
         text: page.backend.changelogNote.length > 0 ? page.backend.changelogNote : qsTr("Check your internet connection.")
         actionText: qsTr("Try Again")
+        actionSymbol: Symbols.Refresh
         onTriggered: page.backend.loadChangelog()
     }
 

@@ -81,22 +81,21 @@ AtlasPage {
             Section {
                 title: qsTr("Stack Trace")
                 visible: card.modelData.stacktrace.length > 0
-                Item {
+                AtlasCodeView {
                     Layout.fillWidth: true
-                    implicitHeight: Kirigami.Units.gridUnit * 10
-                    QQC2.ScrollView {
-                        anchors.fill: parent
-                        anchors.margins: Kirigami.Units.smallSpacing
-                        AtlasTextArea {
-                            readOnly: true
-                            text: card.modelData.stacktrace
-                            font: Kirigami.Theme.fixedWidthFont
-                            wrapMode: TextEdit.NoWrap
-                            background: null
-                            padding: Kirigami.Units.smallSpacing
-                            Accessible.name: qsTr("Stack Trace")
-                        }
-                    }
+                    // Text lines up with the rows' text (SectionRow pads 12).
+                    Layout.leftMargin: AtlasStyle.spacingLarge
+                    Layout.rightMargin: AtlasStyle.spacingSmall
+                    Layout.topMargin: AtlasStyle.spacingSmall
+                    Layout.bottomMargin: AtlasStyle.spacingSmall
+                    framed: false
+                    showCopy: true
+                    maximumHeight: Kirigami.Units.gridUnit * 10
+                    // Atlas.Ui 1.4.0 draws the sideways scroll bar of a long
+                    // line over the last line, even scrolled to the end: end
+                    // on an empty line for it to cover (until Atlas.Ui 1.5.0).
+                    text: card.modelData.stacktrace.replace(/\n?$/, "\n")
+                    Accessible.name: qsTr("Stack Trace")
                 }
             }
 
@@ -109,23 +108,20 @@ AtlasPage {
                     expanded: card.showPayload
                     onClicked: card.showPayload = !card.showPayload
                 }
-                Item {
+                AtlasCodeView {
                     visible: card.showPayload
                     Layout.fillWidth: true
-                    implicitHeight: Kirigami.Units.gridUnit * 14
-                    QQC2.ScrollView {
-                        anchors.fill: parent
-                        anchors.margins: Kirigami.Units.smallSpacing
-                        AtlasTextArea {
-                            readOnly: true
-                            text: card.modelData.payload
-                            font: Kirigami.Theme.fixedWidthFont
-                            wrapMode: TextEdit.NoWrap
-                            background: null
-                            padding: Kirigami.Units.smallSpacing
-                            Accessible.name: qsTr("Exact data")
-                        }
-                    }
+                    // Text lines up with the rows' text (SectionRow pads 12).
+                    Layout.leftMargin: AtlasStyle.spacingLarge
+                    Layout.rightMargin: AtlasStyle.spacingSmall
+                    Layout.topMargin: AtlasStyle.spacingSmall
+                    Layout.bottomMargin: AtlasStyle.spacingSmall
+                    framed: false
+                    showCopy: true
+                    maximumHeight: Kirigami.Units.gridUnit * 14
+                    // An empty last line for the scroll bar (see above).
+                    text: card.modelData.payload.replace(/\n?$/, "\n")
+                    Accessible.name: qsTr("Exact data")
                 }
             }
 
@@ -147,6 +143,7 @@ AtlasPage {
                     onClicked: page.backend.sendReport(card.modelData.eventId)
                 }
                 SecondaryButton {
+                    variant: AtlasButton.Destructive
                     text: qsTr("Don't Send")
                     enabled: !page.backend.busy
                     onClicked: page.backend.discardReport(card.modelData.eventId)

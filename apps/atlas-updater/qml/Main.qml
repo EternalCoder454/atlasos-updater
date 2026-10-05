@@ -18,6 +18,9 @@ AtlasWindow {
     height: Kirigami.Units.gridUnit * 38
     minimumWidth: Kirigami.Units.gridUnit * 24
     minimumHeight: Kirigami.Units.gridUnit * 24
+    // Remembers the size and maximised state; the width and height above
+    // are the first-run default.
+    stateKey: "main"
     visible: true
 
     LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
@@ -30,7 +33,8 @@ AtlasWindow {
     // When the app list was last checked, so revisiting Updates does not run a
     // Flatpak check every time.
     property double lastAppsCheck: 0
-    // Icons only when the window is narrow.
+    // Icons only when the window is narrow. Not AtlasWindow.sidebarCollapsed:
+    // that folds at 30 grid units, and this sidebar folds at 38.
     readonly property bool compact: width < Kirigami.Units.gridUnit * 38
 
     readonly property var pages: ({
@@ -77,9 +81,6 @@ AtlasWindow {
         Layout.fillWidth: true
         compact: root.compact
         selected: root.currentPage === page || (root.currentPage === "sent" && page === root.sentFrom)
-        QQC2.ToolTip.visible: compact && hovered
-        QQC2.ToolTip.text: text
-        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         onClicked: {
             // A confirmation belongs to the section it came from.
             if (page !== root.currentPage) {
@@ -97,11 +98,11 @@ AtlasWindow {
             id: sidebar
             Layout.fillHeight: true
             Layout.preferredWidth: root.compact ? Kirigami.Units.gridUnit * 3.6 : Kirigami.Units.gridUnit * 12.5
-            color: root.sidebarColor(Qt.tint(Kirigami.Theme.backgroundColor, Qt.alpha(Kirigami.Theme.highlightColor, 0.07)))
+            color: root.sidebarColor(AtlasStyle.base)
 
             Behavior on Layout.preferredWidth {
                 NumberAnimation {
-                    duration: Kirigami.Units.shortDuration
+                    duration: AtlasStyle.duration
                     easing.type: Easing.OutCubic
                 }
             }
@@ -110,15 +111,15 @@ AtlasWindow {
                 anchors.right: parent.right
                 height: parent.height
                 width: 1
-                color: Qt.alpha(Kirigami.Theme.textColor, 0.12)
+                color: AtlasStyle.separator
             }
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: Kirigami.Units.largeSpacing
-                anchors.rightMargin: Kirigami.Units.largeSpacing + 1
-                anchors.topMargin: Kirigami.Units.gridUnit
-                spacing: 2
+                anchors.margins: AtlasStyle.spacingLarge
+                anchors.rightMargin: AtlasStyle.spacingLarge + 1
+                anchors.topMargin: AtlasStyle.spacingXLarge
+                spacing: AtlasStyle.spacingXSmall
 
                 NavItem {
                     page: "updates"
@@ -180,14 +181,14 @@ AtlasWindow {
                         property: "opacity"
                         from: 0
                         to: 1
-                        duration: Kirigami.Units.longDuration
+                        duration: AtlasStyle.durationLong
                         easing.type: Easing.OutCubic
                     }
                     NumberAnimation {
                         property: "y"
                         from: Kirigami.Units.gridUnit
                         to: 0
-                        duration: Kirigami.Units.longDuration
+                        duration: AtlasStyle.durationLong
                         easing.type: Easing.OutCubic
                     }
                 }
@@ -197,10 +198,22 @@ AtlasWindow {
                     property: "opacity"
                     from: 1
                     to: 0
-                    duration: Kirigami.Units.shortDuration
+                    duration: AtlasStyle.durationShort
                 }
             }
         }
+    }
+
+    // "The system is doing something for you now": an OS update downloading,
+    // staging or installing, or an app update running. Not checks, not idle,
+    // not errors (busy is off then). Last, so it draws over the content; it
+    // takes no input. Reduced motion is handled inside the control.
+    AtlasEdgeGlow {
+        anchors.fill: parent
+        // Only while the system is being changed: an update, a channel
+        // switch or a rollback being staged, or apps being updated. Not for
+        // checks or status reads (ops.rs names the operations).
+        active: (root.backend.busy && ["download", "switch", "rollback"].indexOf(root.backend.busyOp) >= 0) || (root.backend.appsBusy && root.backend.appsOp === "updateApps")
     }
 
     Component {

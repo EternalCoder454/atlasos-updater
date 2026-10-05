@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
@@ -85,7 +84,7 @@ AtlasPage {
         Layout.topMargin: Kirigami.Units.gridUnit
         visible: page.backend.hasRollback && !page.queued && page.backend.restarting !== true
         iconName: page.rollbackIsBad ? "dialog-warning" : "edit-undo"
-        tint: page.rollbackIsBad ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.highlightColor
+        tint: page.rollbackIsBad ? Kirigami.Theme.neutralTextColor : AtlasStyle.accent
         headline: page.rollbackIsBad ? qsTr("The previous version didn't start properly") : qsTr("Something not working after an update?")
         subtitle: page.rollbackIsBad ? qsTr("Version %1 failed its startup checks on this computer and was undone, so going back to it will probably fail again.").arg(page.backend.rollbackVersion) : qsTr("You can go back to the version you used before. Nothing is deleted: you can update again later.")
 
@@ -97,6 +96,7 @@ AtlasPage {
         }
         // Not the obvious next step: the confirmation says why.
         SecondaryButton {
+            variant: AtlasButton.Destructive
             text: qsTr("Go Back Anyway")
             visible: page.rollbackIsBad
             enabled: !page.backend.busy && !page.backend.restarting

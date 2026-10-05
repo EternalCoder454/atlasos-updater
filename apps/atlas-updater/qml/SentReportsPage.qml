@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
@@ -26,16 +25,14 @@ AtlasPage {
         showReject: false
         width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 0, Kirigami.Units.gridUnit * 36)
 
-        QQC2.ScrollView {
+        AtlasCodeView {
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(Kirigami.Units.gridUnit * 18, payloadDialog.parent ? payloadDialog.parent.height * 0.5 : 100)
-            AtlasTextArea {
-                readOnly: true
-                text: payloadDialog.payload
-                font: Kirigami.Theme.fixedWidthFont
-                wrapMode: TextEdit.NoWrap
-                Accessible.name: qsTr("Sent data")
-            }
+            // An empty last line for the sideways scroll bar to cover
+            // (see ReportsPage.qml).
+            text: payloadDialog.payload.replace(/\n?$/, "\n")
+            showCopy: true
+            maximumHeight: Math.min(Kirigami.Units.gridUnit * 18, payloadDialog.parent ? payloadDialog.parent.height * 0.5 : 100)
+            Accessible.name: qsTr("Sent data")
         }
     }
 

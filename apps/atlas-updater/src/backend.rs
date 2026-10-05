@@ -679,9 +679,15 @@ impl qobject::Backend {
 
     /// Clears the error (and `errorOp`) and the info message. It leaves
     /// `busyOp` and `appsOp` alone: they belong to operations still running.
+    /// Before anything was loaded, the status is read again: with the failed
+    /// first read's error gone and nothing running, the Updates page would
+    /// say "Reading the system state" forever. A failure shows it again.
     pub fn dismiss_messages(mut self: Pin<&mut Self>) {
         self.as_mut().set_error("", QString::default());
         self.as_mut().set_info_text(QString::default());
+        if !*self.loaded() {
+            self.refresh_status();
+        }
     }
 
     /// Clears only the info message: a one-off confirmation ("Crash report

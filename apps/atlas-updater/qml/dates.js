@@ -1,4 +1,5 @@
 .pragma library
+.import Atlas.Ui 1.0 as Ui
 
 // "2026-10-02T04:00:00Z" -> "2 October 2026" in the user's locale.
 function longDate(iso) {
@@ -9,7 +10,7 @@ function longDate(iso) {
     if (isNaN(d.getTime())) {
         return iso;
     }
-    return d.toLocaleDateString(Qt.locale(), Qt.locale().dateFormat(0)) // 0 = Locale.LongFormat;
+    return Ui.AtlasFormat.date(d, "long");
 }
 
 // Unix seconds -> "Thursday, 1 January 2099 at 03:00", in the user's locale.
@@ -31,7 +32,7 @@ function shortDate(iso) {
     if (isNaN(d.getTime())) {
         return iso;
     }
-    return d.toLocaleDateString(Qt.locale(), Qt.locale().dateFormat(1)) // 1 = Locale.ShortFormat;
+    return Ui.AtlasFormat.date(d, "short");
 }
 
 // Unix seconds -> "Today at 9:41", "Yesterday at 18:02" or the full date,

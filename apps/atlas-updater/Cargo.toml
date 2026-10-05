@@ -26,9 +26,9 @@ atlas-updater-base = { path = "../../crates/atlas-updater-base" }
 # What Atlas apps share. Pinned to a release tag (Cargo.lock holds its commit:
 # build with --locked); move it forward on purpose, together
 # with crates/atlas-update-engine's.
-atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
-atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
-atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.3.0" }
+atlas-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.4.0" }
+atlas-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.4.0" }
+atlas-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v1.4.0" }
 cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = "0.10"

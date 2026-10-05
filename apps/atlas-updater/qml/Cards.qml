@@ -1,7 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as QQC2
-import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
 // Messages every page shows at the top: errors in plain language, results.
@@ -14,7 +12,7 @@ ColumnLayout {
     // The progress line (pages without their own busy display).
     property bool showBusy: showError
 
-    spacing: Kirigami.Units.smallSpacing
+    spacing: AtlasStyle.spacingSmall
     visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showBusy)
 
     InfoBanner {
@@ -28,7 +26,10 @@ ColumnLayout {
         Layout.fillWidth: true
         type: "error"
         text: root.showError ? root.backend.errorText : ""
-        closable: true
+        // A failed first status read stays until a retry or a later read
+        // clears it: closed, nothing would be loaded and nothing running,
+        // and the Updates page would say "Reading the system state" forever.
+        closable: !(root.backend.errorOp === "status" && !root.backend.loaded)
         onClosed: root.backend.dismissMessages()
         // Closing breaks a plain binding; this one re-applies on the next message.
         Binding {
@@ -53,15 +54,14 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         visible: root.backend.busy && root.showBusy
-        spacing: Kirigami.Units.largeSpacing
+        spacing: AtlasStyle.spacingLarge
         AtlasSpinner {
             running: root.backend.busy
         }
-        QQC2.Label {
+        AtlasLabel {
             Layout.fillWidth: true
             text: root.backend.busyText
             wrapMode: Text.Wrap
-            textFormat: Text.PlainText
         }
     }
 }
