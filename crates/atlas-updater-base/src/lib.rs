@@ -6,6 +6,7 @@
 pub mod config;
 pub mod crash;
 pub mod errors;
+pub mod fwupd;
 pub mod lock;
 pub mod ops;
 pub mod rc;

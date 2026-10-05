@@ -31,8 +31,9 @@ crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-help
   src/bin/atlas-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
 crates/atlas-updater-base/    what the window and the tray share: settings (rc), ops,
-                              schedule, view, restart, locks, worker result, and the
-                              notifier (atlas_framework_system::notify, feature `notify`)
+                              schedule, view, restart, locks, worker result, the fwupd
+                              client, and the notifier (atlas_framework_system::notify,
+                              feature `notify`)
 apps/atlas-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
                               app jobs it runs for the tray (`--worker`, no Qt)
 apps/atlas-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
@@ -287,6 +288,113 @@ what was held back.
 `list_updates` reads cached metadata unless asked to refresh: it takes
 `refresh: bool`, which updates appstream and summary first.
 
+## Firmware (fwupd)
+
+Firmware updates come from fwupd (2.1.8 on Fedora 44), over its system bus
+API `org.freedesktop.fwupd` at `/` (interface `org.freedesktop.fwupd`). fwupd
+asks polkit itself, so our helper is not involved, and it is D-Bus activated.
+Firmware never installs by itself: only the user's press of "Install" in
+the window installs it.
+
+`crates/atlas-updater-base/src/fwupd.rs` (zbus only, used by the tray and
+the window):
+
+```rust
+pub struct FirmwareUpdate { pub device_id: String, pub device: String /* Name */,
+    pub vendor: String, pub current: String, pub version: String,
+    pub summary: String, pub description: String /* plain text */,
+    pub urgency: Urgency, pub size: u64, pub checksums: Vec<String>,
+    pub locations: Vec<String>, pub remote_id: String, pub trusted: bool,
+    pub needs_reboot: bool, pub needs_shutdown: bool, pub internal: bool }
+pub struct Pending { pub device_id: String, pub device: String, pub version: String,
+                     pub state: PendingState /* Reboot | Failed(String) */ }
+pub struct Listing { pub updates: Vec<FirmwareUpdate>, pub pending: Vec<Pending>,
+                     pub metadata_age: Option<Duration> /* newest enabled download remote */ }
+pub async fn available(conn: &zbus::Connection) -> Result<bool>;  // fwupd activatable or running
+pub async fn list(conn: &zbus::Connection) -> Result<Listing>;
+pub async fn install(conn, device_id, fd: OwnedFd, progress: impl FnMut(Progress)) -> Result<Done>;
+pub fn notice_key(updates: &[FirmwareUpdate]) -> String;  // hash of (device_id, version) pairs
+```
+
+- `list` calls `GetDevices`, then `GetUpgrades(DeviceId)` for each device
+  with the `updatable` flag (bit 1) and without `updatable-hidden` or
+  `locked`; `org.freedesktop.fwupd.NothingToDo` and `NotSupported` mean no
+  update. Only the first (newest) release counts, and only one whose
+  `TrustFlags`/`Flags` say `is-upgrade` (bit 2) and not `blocked-version`
+  or `blocked-approval`. Devices with `UpdateState` pending or
+  needs-reboot are listed as `Pending::Reboot`; failed with their
+  `UpdateError`.
+- Device flags read: `internal` (bit 0), `updatable` (1), `locked` (4),
+  `needs-reboot` (8), `needs-shutdown` (17), `usable-during-update` (29),
+  `updatable-hidden` (37). Release `Checksum` is a comma-separated list
+  (SHA-1 and SHA-256 hex), `Locations` a list of URLs, possibly relative
+  to the remote (`./name.cab`), `Description` AppStream markup (`<p>`,
+  `<ul>`/`<ol>`/`<li>`, `<em>`, `<code>`), turned into plain text (paragraphs,
+  "• " items) and never shown as rich text. Text from fwupd (names,
+  versions, summaries, descriptions, errors) is cleaned as Flatpak remote
+  text is (`clean`/`clean_to`; descriptions up to 2,000 characters).
+- `metadata_age`: from `GetRemotes`, the newest `ModificationTime` among
+  enabled download remotes (`Type` 1); `None` when none was ever fetched.
+  The metadata is refreshed by `fwupd-refresh.timer` (the AtlasOS image
+  enables it); the app adds no poller of its own.
+- `install` first calls `SetFeatureFlags` with `detach-action`,
+  `update-action`, `requests`, `requests-non-generic` and
+  `allow-authentication` (bits 1, 2, 4, 9, 8) on the same connection, so
+  fwupd can ask polkit with a prompt and send `DeviceRequest`s, then
+  `Install(device_id, fd, {})` with no options (no reinstall, no older
+  version, no branch switch) and no method timeout (an install can take
+  minutes). While it runs it follows the daemon's `Status` and
+  `Percentage` properties and `DeviceRequest` signals (`Message` in words,
+  or the request `Id` such as `org.freedesktop.fwupd.request.remove-replug`
+  said plainly). Errors in plain words: `AuthFailed`/`PermissionDenied` →
+  cancelled (as polkit refusals are elsewhere), `BatteryLevelTooLow`,
+  `NeedsUserAction`, `NothingToDo`, `NotSupported`, `AlreadyPending`,
+  anything else as fwupd's message.
+
+The window (`apps/atlas-updater/src/firmware.rs`) downloads the file before
+`install`. The row carries the release's `trusted` flag and the checksum it
+picked; `installFirmware(deviceId, version, checksum)` reads the release
+again by `GetUpgrades` and refuses ("This update changed since it was
+shown. Check again.") unless the version and the picked checksum are the
+ones shown. A release that fwupd does not mark trusted (neither
+`trusted-payload` nor `trusted-metadata` in `TrustFlags`, bits 0 and 1;
+fwupd checks the payload again itself when it installs) is never
+downloaded or installed ("This update is not signed by a trusted source,
+so Atlas Updater won't install it."); the row says "Not signed by a trusted
+source" and has no Install button. The first location that is an
+absolute `https://` URL, or a relative one joined to the remote's
+`FirmwareBaseUri` (which must be `https://`), is fetched with ureq (rustls,
+15 s connect, 10 minutes in all, redirects only to `https://`) into an
+in-memory `memfd`, never a file on disk, at most 256 MiB (the release's
+`Size` is not the size of the cabinet, so it is not used as a cap). The
+`memfd` is sealed (no write, grow or shrink, which also stops writes
+through descriptors opened before) right after the download, and only
+then is its SHA-256 checked, reading from the sealed file, so the bytes
+checked are the bytes fwupd gets (SHA-1 is used only when no SHA-256 is
+given, and only for a trusted release; with neither, nothing installs).
+This check guards the transfer and pins the release to the one the user
+saw; it is not an independent trust anchor, because the checksum comes
+from fwupd. What authenticates the firmware is fwupd checking the cabinet
+against its signed metadata. Download errors are logged by kind only (a
+redirect URL can carry a token). Remote hosts that are `localhost` or an
+IP address (loopback, private, link-local, unspecified, shared or unique-local) are refused. Debug
+builds with `ATLAS_UPDATER_FIRMWARE_FILES` set to a folder (the test rig,
+`tools/fwupd-rig.sh`, whose local remote has no `FirmwareBaseUri`) read a
+relative location from that folder instead, by file name only (no `/` or
+`..`, symlinks refused). One firmware operation runs
+at a time (`$XDG_RUNTIME_DIR/atlas-updater-firmware.lock`); fwupd also runs
+one at a time.
+
+Nothing restarts or quits while a firmware install runs: the window's
+"Restart" buttons are off and `restartNow` refuses, the window stays until
+the install ends after it is closed, and the tray postpones a scheduled
+restart (looking again each minute, saying so in its tooltip) and refuses
+"Restart Now" while the firmware lock is held. The wait for fwupd's
+`Install` reply ends after at most one hour with "result unknown, check the
+device's firmware version"; a reply already queued when fwupd leaves the
+bus still counts. The "Restart to finish installing firmware" row follows
+fwupd's listing (a device pending a reboot), not only this session's install.
+
 ## Atlas Updater app
 
 - Binary and package: `atlas-updater`. App ID: `net.eterneon.atlas.updater`.
@@ -301,6 +409,21 @@ what was held back.
   passing on `--page <updates|settings|reports|sent>` and `--check`.
   `atlas-updater --tray`, from older autostart entries, hands over to
   `atlas-updater-tray`.
+- Update glow ("the system is being changed": an update, switch or rollback
+  being staged, apps being updated, or a firmware install running; not checks): `ScreenGlow.qml` draws
+  it around the edges of every screen, not inside the window. Four
+  transparent, input-transparent strips per screen (3 grid units deep, accent
+  colour fading inward), made while the glow is on and destroyed when it ends
+  (none exist otherwise), and rebuilt when screens come or go. On Wayland
+  they are layer-shell overlays (`org.kde.layershell`, scope
+  `atlas-updater-glow`, no keyboard, exclusion zone -1); on X11 they are
+  frameless always-on-top tool windows. Without the layer-shell module, or
+  on another platform, the glow falls back to `AtlasEdgeGlow` inside the
+  window. It pulses slowly (2.4 s) at 30 frames per second from a timer; it
+  is static under reduced motion and with software rendering (llvmpipe or
+  softpipe, found by `Shell::watchRenderer`; Atlas.Ui 1.5.0 will have this
+  and `AtlasScreenGlow`). Closing the window while it is on keeps the
+  window's QML (hidden) alive until the operation ends, so the glow stays.
 - The tray owns the session bus name `net.eterneon.atlas.updater.Tray`
   (one tray per session; a second one exits) with one method, `Reload()`
   at `/net/eterneon/atlas/updater/Tray`: read `atlas-updaterrc` and the
@@ -417,6 +540,28 @@ Screens:
     published since), or the check fails, nothing installs and the rows
     get the new notes for the user to press again. It asks for a password
     as usual.
+  - **Firmware**, below the apps, only when fwupd is there: one row per
+    device with an update (device name, "1.2.2 → 1.2.4", the vendor, the
+    summary, and "Important" for urgency high or critical), with the
+    release notes behind "Details" and an "Install" button per row. Pending
+    installs say "Restart to finish installing" (or "Shut down to finish")
+    and failed ones say what fwupd said. With nothing to install: "Firmware
+    is up to date". With metadata older than 30 days, or never fetched, a
+    note says when the firmware list was last updated. "Install" asks
+    first ("Keep the computer plugged in, and don't unplug <device> or turn
+    the computer off until it finishes"; plus "It finishes when you
+    restart" for needs-reboot, "…shut down" for needs-shutdown), then shows
+    fwupd's progress and its requests ("Unplug the device and plug it back
+    in") in the page; the screen-edge glow is on meanwhile. After a needs-reboot
+    install it offers "Restart to Update" (the same restart as for the
+    system). "Check for Updates" lists the firmware again too (fwupd's
+    local state; no download). The tray lists firmware with each app round
+    (10 minutes after start, then every 6 hours; it needs no network: the
+    metadata is fwupd's) and sends `firmwareReady` ("Firmware updates are
+    available for <devices>", action "Open Atlas Updater" to the Updates
+    page) once per set: `[Firmware] Notified` in `atlas-updaterrc` holds
+    `notice_key`, cleared when nothing waits. No notice while the window
+    is open.
   - "Restart to Update", and "Restart Later…" (pick a time today or
     tomorrow; the tray restarts then, with a notification 5 minutes
     before, and never without it: a warning that could not be shown, or
@@ -459,6 +604,9 @@ Screens:
   `atlas-updater --tray` works too),
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.
+- Ships fwupd with `fwupd-refresh.timer` enabled (Fedora's desktop
+  editions leave it off for GNOME Software and Discover), and without
+  Discover's fwupd backend, so firmware has one updater.
 
 ## System app
 

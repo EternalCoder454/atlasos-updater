@@ -46,6 +46,7 @@ qt_add_qml_module(atlas-updater-app
         qml/Main.qml qml/Cards.qml qml/UpdatesPage.qml qml/RollbackPage.qml
         qml/ChannelPage.qml qml/HistoryPage.qml qml/ChangelogPage.qml qml/SettingsPage.qml
         qml/ReportsPage.qml qml/SentReportsPage.qml qml/AboutPage.qml
+        qml/ScreenGlow.qml qml/GlowStrip.qml qml/GlowStripLayer.qml
         qml/dates.js
     RESOURCES
         qml/icons/update-arrow.svg

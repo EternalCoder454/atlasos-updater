@@ -8,6 +8,7 @@ mod apps;
 mod backend;
 mod changelog;
 mod crash;
+mod firmware;
 mod notes;
 mod power;
 mod worker;

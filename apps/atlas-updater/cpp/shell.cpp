@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QStandardPaths>
@@ -49,6 +51,7 @@ Shell::Shell(QObject *backend, QObject *parent)
     connect(m_backend, SIGNAL(busyChanged()), this, SLOT(quitWhenIdle()));
     connect(m_backend, SIGNAL(appsBusyChanged()), this, SLOT(quitWhenIdle()));
     connect(m_backend, SIGNAL(restartingChanged()), this, SLOT(quitWhenIdle()));
+    connect(m_backend, SIGNAL(firmwareBusyChanged()), this, SLOT(quitWhenIdle()));
 
     QMetaObject::invokeMethod(m_backend, "start");
 }
@@ -121,15 +124,45 @@ void Shell::openWindow(const QString &page)
         m_closing = true;
         QTimer::singleShot(0, this, &Shell::destroyEngine);
     });
+    // The screen-edge glow outlives the window: when it is closed in the
+    // middle of an operation, destroyEngine() waits for the glow to end.
+    connect(m_window, SIGNAL(glowOutlivesWindowChanged()), this, SLOT(destroyEngine()), Qt::QueuedConnection);
+    watchRenderer(m_window);
     QMetaObject::invokeMethod(m_backend, "windowOpened");
     QMetaObject::invokeMethod(m_backend, "refreshStatus");
     QMetaObject::invokeMethod(m_backend, "loadReports");
+}
+
+// Tells the window (its `softwareGl` property) when its OpenGL renderer is a
+// software one, so that the screen-edge glow stays still. Read once, when the
+// scene graph starts, on the render thread (where the GL context is current).
+// Goes when Atlas.Ui 1.5.0 (AtlasStyle.softwareRendering) is the minimum.
+void Shell::watchRenderer(QQuickWindow *window)
+{
+    connect(
+        window, &QQuickWindow::sceneGraphInitialized, window,
+        [window] {
+            const QOpenGLContext *ctx = QOpenGLContext::currentContext();
+            if (!ctx) {
+                return; // not OpenGL (software scene graph, Vulkan...)
+            }
+            const char *name = reinterpret_cast<const char *>(ctx->functions()->glGetString(GL_RENDERER));
+            const QByteArray renderer = name ? QByteArray(name).toLower() : QByteArray();
+            if (renderer.contains("llvmpipe") || renderer.contains("softpipe") || renderer.contains("swrast") || renderer.contains("software rasterizer")) {
+                QMetaObject::invokeMethod(window, [window] { window->setProperty("softwareGl", true); }, Qt::QueuedConnection);
+            }
+        },
+        Qt::DirectConnection);
 }
 
 void Shell::destroyEngine()
 {
     // A second launch may have reopened the window since the close.
     if (!m_engine || !m_closing) {
+        return;
+    }
+    // The glow is still on the screens' edges: stay (hidden) until it ends.
+    if (m_window && m_window->property("glowOutlivesWindow").toBool()) {
         return;
     }
     m_closing = false;
@@ -143,13 +176,14 @@ void Shell::destroyEngine()
 }
 
 // The window is closed: quit, but not in the middle of an operation (a
-// download, an app update or a restart request finishes first).
+// download, an app update or a restart request or a firmware update finishes first).
 void Shell::quitWhenIdle()
 {
     if (m_engine) {
         return;
     }
-    const bool running = m_backend->property("busy").toBool() || m_backend->property("appsBusy").toBool() || m_backend->property("restarting").toBool();
+    const bool running = m_backend->property("busy").toBool() || m_backend->property("appsBusy").toBool() || m_backend->property("restarting").toBool()
+        || m_backend->property("firmwareBusy").toBool();
     if (!running) {
         Q_EMIT idle();
     }

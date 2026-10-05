@@ -63,6 +63,8 @@ BuildRequires:  pkgconfig(gio-2.0)
 # (build-rpm.sh does, given ATLAS_LOCAL_RPMS).
 BuildRequires:  kf6-kirigami-devel
 BuildRequires:  atlas-ui >= 1.4.0
+# org.kde.layershell, for the screen-edge glow (ScreenGlow.qml)
+BuildRequires:  layer-shell-qt
 %endif
 
 %description
@@ -101,6 +103,8 @@ Requires:       atlas-system-helper = %{version}-%{release}
 # /usr/share/atlas/crash-reporting.toml, the crash report server.
 Requires:       atlas-ui >= 1.4.0
 Requires:       kf6-kirigami
+# The update glow runs around the screens' edges as layer-shell overlays.
+Requires:       layer-shell-qt
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative
 

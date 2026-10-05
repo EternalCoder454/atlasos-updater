@@ -111,6 +111,7 @@ dependencies = [
  "cxx-qt-lib",
  "libc",
  "pulldown-cmark",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

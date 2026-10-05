@@ -68,6 +68,25 @@ pub mod qobject {
         /// "Download app updates in the background": off by default, saved
         /// per user.
         #[qproperty(bool, apps_auto, cxx_name = "appsAuto")]
+        /// fwupd is on this system: the Firmware section shows (no section
+        /// and no error when it is not).
+        #[qproperty(bool, firmware_available, cxx_name = "firmwareAvailable")]
+        /// The listing as JSON: `{updates, pending, note}` (firmware::View).
+        #[qproperty(QString, firmware_json, cxx_name = "firmwareJson")]
+        #[qproperty(bool, firmware_busy, cxx_name = "firmwareBusy")]
+        /// "checkFirmware" or "installFirmware" while `firmwareBusy`, else "".
+        #[qproperty(QString, firmware_op, cxx_name = "firmwareOp")]
+        /// The device being installed (its id in `firmwareJson`), else "".
+        #[qproperty(QString, firmware_device, cxx_name = "firmwareDevice")]
+        /// fwupd's status word, "Writing", "Verifying"...
+        #[qproperty(QString, firmware_status, cxx_name = "firmwareStatus")]
+        /// 0 to 100, or -1 when fwupd gave none.
+        #[qproperty(i32, firmware_percent, cxx_name = "firmwarePercent")]
+        /// What the device asks of the user ("Unplug the device..."), or "".
+        #[qproperty(QString, firmware_request, cxx_name = "firmwareRequest")]
+        #[qproperty(QString, firmware_error, cxx_name = "firmwareError")]
+        /// An install finished that finishes at the next restart.
+        #[qproperty(bool, firmware_restart, cxx_name = "firmwareRestart")]
         /// App updates installed here (apphistory::Entry as JSON), newest first.
         #[qproperty(QString, app_history_json, cxx_name = "appHistoryJson")]
         #[qproperty(QString, history_json, cxx_name = "historyJson")]
@@ -178,6 +197,21 @@ pub mod qobject {
         #[cxx_name = "enableBackgroundApps"]
         fn enable_background_apps(self: Pin<&mut Backend>, on: bool);
 
+        /// List firmware updates again (fwupd's local state, no download).
+        #[qinvokable]
+        #[cxx_name = "checkFirmware"]
+        fn check_firmware(self: Pin<&mut Backend>);
+        /// Install the update shown for `device_id` at `version` with the
+        /// shown `checksum` (refused if the release changed since).
+        #[qinvokable]
+        #[cxx_name = "installFirmware"]
+        fn install_firmware(
+            self: Pin<&mut Backend>,
+            device_id: &QString,
+            version: &QString,
+            checksum: &QString,
+        );
+
         #[qinvokable]
         #[cxx_name = "restartNow"]
         fn restart_now(self: Pin<&mut Backend>);
@@ -241,7 +275,8 @@ use crate::ops::{self, Op};
 use crate::schedule;
 use crate::view::{self, View};
 use crate::worker::{ROUND_AT, ROUND_ERROR};
-use crate::{apphistory, apps, changelog, crash, lock, notify, rc, restart, tray};
+use crate::{apphistory, apps, changelog, crash, firmware, lock, notify, rc, restart, tray};
+use atlas_updater_base::fwupd;
 
 const RC_RESTART: &str = rc::RESTART;
 const RC_CHECKED: &str = rc::CHECKED;
@@ -287,6 +322,16 @@ pub struct BackendRust {
     apps_status: QString,
     apps_error: QString,
     apps_auto: bool,
+    firmware_available: bool,
+    firmware_json: QString,
+    firmware_busy: bool,
+    firmware_op: QString,
+    firmware_device: QString,
+    firmware_status: QString,
+    firmware_percent: i32,
+    firmware_request: QString,
+    firmware_error: QString,
+    firmware_restart: bool,
     app_history_json: QString,
     history_json: QString,
     changelog_json: QString,
@@ -338,6 +383,8 @@ pub struct BackendRust {
     /// Apps a background round held back (`apps::row_key`) → what they ask
     /// for, shown on their rows until they are updated.
     apps_held: std::collections::HashMap<String, apps::HeldApp>,
+    /// Devices whose install this session said the computer must shut down.
+    firmware_shutdown: std::collections::HashSet<String>,
 }
 
 /// This machine's history, newest first (developer fixtures: theirs).
@@ -429,6 +476,21 @@ const CHANGELOG_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5 
 /// How long a failed (or missing) notes lookup is left alone.
 const NOTES_BACKOFF: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// Runs `f` to the end on a throw-away runtime (worker threads only). The
+/// IO driver is on: zbus needs it.
+fn run_async<T>(f: impl std::future::Future<Output = Result<T, OpError>>) -> Result<T, OpError> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt.block_on(f),
+        Err(e) => {
+            eprintln!("atlas-updater: cannot start a runtime: {e}");
+            Err(OpError::Message(INTERNAL.into()))
+        }
+    }
+}
+
 /// Runs `f` on a new named thread. `false` if the OS refused a thread.
 fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
     std::thread::Builder::new()
@@ -454,6 +516,20 @@ fn take_apps_lock(fixtures: bool) -> Option<lock::Held> {
         Err(e) => {
             // Not worth refusing the user's request over.
             eprintln!("atlas-updater: cannot take the app update lock: {e}");
+            None
+        }
+    }
+}
+
+/// Holds the firmware lock for the length of a window's own install.
+fn take_firmware_lock(fixtures: bool) -> Option<lock::Held> {
+    if fixtures {
+        return None;
+    }
+    match lock::take(lock::FIRMWARE, true) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("atlas-updater: cannot take the firmware lock: {e}");
             None
         }
     }
@@ -1360,11 +1436,202 @@ impl qobject::Backend {
         }
     }
 
+    // ---- firmware ----
+
+    pub fn check_firmware(mut self: Pin<&mut Self>) {
+        if *self.firmware_busy() {
+            return;
+        }
+        self.as_mut().set_firmware_busy(true);
+        self.as_mut().set_firmware_op(q("checkFirmware"));
+        self.as_mut().set_firmware_error(QString::default());
+        let fixtures = self.rust().fixtures.clone();
+        let qt = self.qt_thread();
+        if !spawn_named("atlas-firmware", move || {
+            if fixtures.is_some() && config::fixture_hold("checkFirmware") {
+                config::hold_forever();
+            }
+            let res = guarded(|| match fixtures.as_deref() {
+                Some(d) => firmware::fixture_listing(d).map_err(OpError::Message),
+                None => run_async(firmware::list()),
+            })
+            .unwrap_or_else(|| Err(OpError::Message(INTERNAL.into())));
+            let _ = qt.queue(move |mut obj| obj.as_mut().firmware_listed(res, None));
+        }) {
+            self.firmware_listed(
+                Err(OpError::Message("could not start a worker thread".into())),
+                None,
+            );
+        }
+    }
+
+    /// A listing arrived (`install_error`: an install ended with it).
+    fn firmware_listed(
+        mut self: Pin<&mut Self>,
+        res: Result<Option<fwupd::Listing>, OpError>,
+        install_error: Option<String>,
+    ) {
+        self.as_mut().firmware_idle();
+        match res {
+            Ok(None) => {
+                // After a failed install keep the page, so the error shows.
+                if install_error.is_none() {
+                    self.as_mut().set_firmware_available(false);
+                    self.as_mut().set_firmware_json(QString::default());
+                }
+            }
+            Ok(Some(l)) => {
+                self.as_mut().set_firmware_available(true);
+                let v = firmware::view(&l, &self.rust().firmware_shutdown);
+                let keep: std::collections::HashSet<&str> =
+                    l.pending.iter().map(|p| p.device_id.as_str()).collect();
+                self.as_mut()
+                    .rust_mut()
+                    .firmware_shutdown
+                    .retain(|d| keep.contains(d.as_str()));
+                let text = serde_json::to_string(&v)
+                    .unwrap_or_else(|_| r#"{"updates":[],"pending":[],"note":""}"#.into());
+                self.as_mut().set_firmware_json(q(&text));
+                // The restart row follows fwupd's state, not this session's.
+                let restart = v.pending.iter().any(|p| p.state == "reboot");
+                self.as_mut().set_firmware_restart(restart);
+            }
+            Err(e) => {
+                // The page keeps the old list and says why it is old.
+                let text = match e {
+                    OpError::Message(m) => format!("Could not check firmware updates: {m}"),
+                    OpError::Cancelled => "Could not check firmware updates.".to_string(),
+                };
+                self.as_mut().set_firmware_available(true);
+                self.as_mut().set_firmware_error(q(&text));
+            }
+        }
+        if let Some(e) = install_error {
+            self.as_mut().set_firmware_error(q(&e));
+        }
+    }
+
+    fn firmware_idle(mut self: Pin<&mut Self>) {
+        self.as_mut().set_firmware_busy(false);
+        self.as_mut().set_firmware_op(QString::default());
+        self.as_mut().set_firmware_device(QString::default());
+        self.as_mut().set_firmware_status(QString::default());
+        self.as_mut().set_firmware_percent(-1);
+        self.as_mut().set_firmware_request(QString::default());
+    }
+
+    /// The row's Install button, after the user confirmed.
+    pub fn install_firmware(
+        mut self: Pin<&mut Self>,
+        device_id: &QString,
+        version: &QString,
+        checksum: &QString,
+    ) {
+        if *self.firmware_busy() {
+            return;
+        }
+        let device_id = device_id.to_string();
+        let version = version.to_string();
+        let checksum = checksum.to_string();
+        let fixtures = self.rust().fixtures.clone();
+        self.as_mut().set_firmware_busy(true);
+        self.as_mut().set_firmware_op(q("installFirmware"));
+        self.as_mut().set_firmware_device(q(&device_id));
+        self.as_mut().set_firmware_error(QString::default());
+        self.as_mut().set_firmware_percent(-1);
+        self.as_mut().set_firmware_request(QString::default());
+        self.as_mut().set_firmware_status(q("Starting"));
+        let qt = self.qt_thread();
+        let qt_fail = qt.clone();
+        if !spawn_named("atlas-firmware-install", move || {
+            let qt_progress = qt.clone();
+            if fixtures.is_some() {
+                if config::fixture_hold("installFirmware") {
+                    config::hold_forever();
+                }
+                let _ = qt.queue(|mut obj| {
+                    obj.as_mut().firmware_idle();
+                    obj.as_mut()
+                        .set_info_text(q("Developer fixtures: firmware install skipped."));
+                });
+                return;
+            }
+            let dev = device_id.clone();
+            let res = guarded(|| {
+                // One firmware operation at a time.
+                let _held = take_firmware_lock(false);
+                let mut last_status = "";
+                let mut request: Option<String> = None;
+                let r = run_async(firmware::install(&device_id, &version, &checksum, |p| {
+                    if p.request.is_some() {
+                        request = p.request.clone();
+                    } else if p.status != last_status {
+                        request = None;
+                    }
+                    last_status = p.status;
+                    let req = request.clone().unwrap_or_default();
+                    let _ = qt_progress.queue(move |mut obj| {
+                        obj.as_mut().set_firmware_status(q(p.status));
+                        obj.as_mut()
+                            .set_firmware_percent(p.percent.map_or(-1, i32::from));
+                        obj.as_mut().set_firmware_request(q(&req));
+                    });
+                }));
+                // Whatever happened, list again: fwupd knows the state.
+                let listing = run_async(firmware::list());
+                (r, listing)
+            })
+            .unwrap_or_else(|| {
+                (
+                    Err(OpError::Message(INTERNAL.into())),
+                    Err(OpError::Message(INTERNAL.into())),
+                )
+            });
+            let _ = qt.queue(move |mut obj| {
+                let (r, listing) = res;
+                let mut err = None;
+                match r {
+                    Ok(done) => {
+                        if done.needs_shutdown {
+                            obj.as_mut().rust_mut().firmware_shutdown.insert(dev);
+                        }
+                        if done.needs_reboot {
+                            obj.as_mut().set_firmware_restart(true);
+                        }
+                    }
+                    Err(OpError::Cancelled) => {
+                        obj.as_mut().set_info_text(q(
+                            "The firmware update was cancelled. Nothing was changed.",
+                        ));
+                    }
+                    Err(OpError::Message(m)) => {
+                        err = Some(format!("Could not install the firmware update: {m}"));
+                    }
+                }
+                obj.as_mut().firmware_listed(listing, err);
+            });
+        }) {
+            let _ = qt_fail.queue(|mut obj| {
+                obj.as_mut().firmware_idle();
+                obj.as_mut().set_firmware_error(q(
+                    "Could not install the firmware update: could not start a worker thread",
+                ));
+            });
+        }
+    }
+
     // ---- restart ----
 
     /// "Restart Now" in the window. (A scheduled restart is the tray's.)
     pub fn restart_now(mut self: Pin<&mut Self>) {
         if *self.restarting() {
+            return;
+        }
+        // Never restart in the middle of a firmware flash.
+        if *self.firmware_busy() && self.firmware_op().to_string() == "installFirmware" {
+            self.as_mut().set_info_text(q(
+                "Wait for the firmware update to finish before restarting.",
+            ));
             return;
         }
         if self.rust().fixtures.is_some() {
@@ -1694,5 +1961,20 @@ mod tests {
     fn a_panicking_worker_is_reported_not_lost() {
         assert_eq!(guarded(|| 7), Some(7));
         assert_eq!(guarded(|| -> i32 { panic!("boom") }), None);
+    }
+
+    #[test]
+    fn run_async_has_the_io_driver_zbus_needs() {
+        // Without the IO driver this panics; with it, the connect fails
+        // with an error.
+        let r = run_async(async {
+            let b = zbus::connection::Builder::address("unix:path=/nonexistent-atlas-test/bus")
+                .map_err(|e| OpError::Message(e.to_string()))?;
+            b.build()
+                .await
+                .map(|_| ())
+                .map_err(|e| OpError::Message(e.to_string()))
+        });
+        assert!(matches!(r, Err(OpError::Message(m)) if !m.is_empty()));
     }
 }

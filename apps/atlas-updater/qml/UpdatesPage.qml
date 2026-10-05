@@ -37,6 +37,12 @@ AtlasPage {
         source: "distributor-logo"
     }
     readonly property var apps: page.backend.appsJson.length > 0 ? JSON.parse(page.backend.appsJson) : []
+    readonly property var firmware: page.backend.firmwareJson.length > 0 ? JSON.parse(page.backend.firmwareJson) : ({
+            "updates": [],
+            "pending": [],
+            "note": ""
+        })
+    readonly property bool installingFirmware: page.backend.firmwareBusy && page.backend.firmwareOp === "installFirmware"
     // Errors from these operations belong to the hero; the others (apps, crash
     // reports) stay in the banner at the top.
     readonly property bool heroError: ["check", "download", "restart", "rollback", "cancelRollback", "switch", "status", "timer"].indexOf(page.backend.errorOp) >= 0
@@ -131,6 +137,7 @@ AtlasPage {
             page.backend.refreshStatus();
         } else {
             page.backend.checkForUpdate();
+            page.backend.checkFirmware();
         }
     }
 
@@ -143,6 +150,7 @@ AtlasPage {
         if (Date.now() - page.lastAppsCheck > 10 * 60 * 1000) {
             page.appsChecked();
             backend.checkApps();
+            backend.checkFirmware();
         }
     }
 
@@ -174,6 +182,33 @@ AtlasPage {
         if (!page.availableIsBad) {
             badDialog.close();
         }
+    }
+
+    ConfirmDialog {
+        id: firmwareDialog
+        property var row: ({})
+        title: qsTr("Install Firmware %2 for %1?").arg(firmwareDialog.row.device ?? "").arg(firmwareDialog.row.version ?? "")
+        text: {
+            var t = qsTr("Keep the computer plugged in, and don't unplug %1 or turn the computer off until it finishes.").arg(firmwareDialog.row.device ?? "");
+            if (firmwareDialog.row.shutdown) {
+                t += " " + qsTr("It finishes when you shut down.");
+            } else if (firmwareDialog.row.reboot) {
+                t += " " + qsTr("It finishes when you restart.");
+            }
+            return t;
+        }
+        acceptText: qsTr("Install")
+        focusReject: true
+        onAccepted: page.backend.installFirmware(firmwareDialog.row.id, firmwareDialog.row.version, firmwareDialog.row.checksum ?? "")
+    }
+
+    ConfirmDialog {
+        id: detailsDialog
+        property var row: ({})
+        title: detailsDialog.row.device ?? ""
+        text: (detailsDialog.row.description ?? "").length > 0 ? detailsDialog.row.description : qsTr("This update has no release notes.")
+        showReject: false
+        acceptText: qsTr("Close")
     }
 
     Timer {
@@ -383,12 +418,13 @@ AtlasPage {
         PrimaryButton {
             text: page.restarting ? qsTr("Restarting System…") : (page.rollbackQueued ? qsTr("Restart Now") : qsTr("Restart to Update"))
             visible: page.restartReady
-            enabled: !page.backend.busy && !page.working
+            enabled: !page.backend.busy && !page.working && !page.installingFirmware
             onClicked: page.backend.restartNow()
         }
         SecondaryButton {
             text: qsTr("Restart Tonight")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0 && page.tonight > 0
+            enabled: !page.installingFirmware
             AtlasToolTip {
                 text: qsTr("Restarts at %1. You get a notification 5 minutes before.").arg(new Date(page.tonight * 1000).toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)))
                 shown: parent.hovered || parent.visualFocus
@@ -404,6 +440,7 @@ AtlasPage {
         SecondaryButton {
             text: qsTr("Pick a Time…")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0
+            enabled: !page.installingFirmware
             onClicked: scheduleDialog.open()
         }
 
@@ -451,7 +488,10 @@ AtlasPage {
             text: qsTr("Check for Updates")
             visible: !page.hasError && !page.restartReady && !page.checking && !page.downloading && !page.working
             enabled: !page.backend.busy
-            onClicked: page.backend.checkForUpdate()
+            onClicked: {
+                page.backend.checkForUpdate();
+                page.backend.checkFirmware();
+            }
         }
     }
 
@@ -599,6 +639,90 @@ AtlasPage {
                 text: qsTr("Update Apps")
                 enabled: !page.backend.appsBusy
                 onClicked: page.backend.updateApps()
+            }
+        }
+    }
+
+    // ---- firmware (fwupd) ----
+    Section {
+        title: qsTr("Firmware Updates")
+        visible: page.backend.firmwareAvailable
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+
+        SectionRow {
+            visible: page.backend.firmwareBusy
+            title: page.installingFirmware ? (page.backend.firmwareStatus.length > 0 ? page.backend.firmwareStatus + (page.backend.firmwarePercent >= 0 ? " · " + page.backend.firmwarePercent + "%" : "") + "…" : qsTr("Installing firmware…")) : qsTr("Looking for firmware updates…")
+            subtitle: page.installingFirmware ? page.backend.firmwareRequest : ""
+            busy: page.backend.firmwareBusy
+        }
+        SectionRow {
+            visible: page.backend.firmwareError.length > 0
+            iconName: "dialog-error"
+            title: page.backend.firmwareError
+        }
+        SectionRow {
+            visible: !page.backend.firmwareBusy && page.firmware.updates.length === 0 && page.firmware.pending.length === 0 && page.backend.firmwareError.length === 0
+            iconName: "checkmark"
+            title: qsTr("Firmware is up to date.")
+        }
+        SectionRow {
+            visible: page.firmware.note.length > 0
+            iconName: "dialog-information"
+            title: page.firmware.note
+        }
+        Repeater {
+            model: page.firmware.pending
+            delegate: SectionRow {
+                id: pendRow
+                required property var modelData
+                iconName: pendRow.modelData.state === "failed" ? "dialog-error" : "system-reboot"
+                title: pendRow.modelData.device
+                subtitle: pendRow.modelData.state === "failed" ? (pendRow.modelData.text.length > 0 ? qsTr("Version %1 did not install: %2").arg(pendRow.modelData.version).arg(pendRow.modelData.text) : qsTr("Version %1 did not install.").arg(pendRow.modelData.version)) : (pendRow.modelData.state === "shutdown" ? qsTr("Shut down to finish installing %1").arg(pendRow.modelData.version) : qsTr("Restart to finish installing %1").arg(pendRow.modelData.version))
+            }
+        }
+        Repeater {
+            model: page.firmware.updates
+            delegate: SectionRow {
+                id: fwRow
+                required property var modelData
+                iconName: "cpu"
+                title: fwRow.modelData.device
+                subtitle: [qsTr("%1 → %2").arg(fwRow.modelData.current).arg(fwRow.modelData.version), fwRow.modelData.vendor, fwRow.modelData.summary, fwRow.modelData.trusted ? "" : qsTr("Not signed by a trusted source")].filter(function (t) {
+                    return t.length > 0;
+                }).join(" · ")
+                AtlasBadge {
+                    visible: fwRow.modelData.important
+                    text: qsTr("Important")
+                    type: "warning"
+                }
+                SecondaryButton {
+                    text: qsTr("Details")
+                    Accessible.name: qsTr("Details, %1").arg(fwRow.modelData.device)
+                    onClicked: {
+                        detailsDialog.row = fwRow.modelData;
+                        detailsDialog.open();
+                    }
+                }
+                SecondaryButton {
+                    text: qsTr("Install")
+                    visible: fwRow.modelData.trusted
+                    Accessible.name: qsTr("Install firmware for %1").arg(fwRow.modelData.device)
+                    enabled: !page.backend.firmwareBusy
+                    onClicked: {
+                        firmwareDialog.row = fwRow.modelData;
+                        firmwareDialog.open();
+                    }
+                }
+            }
+        }
+        SectionRow {
+            visible: page.backend.firmwareRestart
+            iconName: "system-reboot"
+            title: qsTr("Restart to finish installing firmware")
+            SecondaryButton {
+                text: page.restarting ? qsTr("Restarting System…") : qsTr("Restart to Update")
+                enabled: !page.backend.busy && !page.working && !page.installingFirmware
+                onClicked: page.backend.restartNow()
             }
         }
     }

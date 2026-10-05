@@ -14,6 +14,11 @@ Name=App Updates Ready
 Comment=Updates for your apps are waiting for you to install them
 Action=Popup
 
+[Event/firmwareReady]
+Name=Firmware Updates Ready
+Comment=Firmware updates for your devices are waiting for you to install them
+Action=Popup
+
 [Event/restartSoon]
 Name=Restart Coming Up
 Comment=A scheduled restart to finish updating is about to happen

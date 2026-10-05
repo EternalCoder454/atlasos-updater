@@ -1,0 +1,34 @@
+{
+  "updates": [
+    {
+      "device_id": "2c6b2c0a1e5d6d9a0f7a6a9d3f7b8c1a2e4d5f60",
+      "device": "UEFI System Firmware",
+      "vendor": "Framework",
+      "current": "3.04",
+      "version": "3.07",
+      "summary": "Fixes a charging problem after sleep",
+      "description": "Fixes a bug that could stop the battery from charging after the laptop slept with the lid closed.\n• Updates the embedded controller\n• Improves resume time",
+      "urgency": "high",
+      "needs_reboot": true
+    },
+    {
+      "device_id": "9f1e8d7c6b5a49382716f5e4d3c2b1a009f8e7d6",
+      "device": "Logitech Unifying Receiver",
+      "vendor": "Logitech",
+      "current": "RQR24.05",
+      "version": "RQR24.07",
+      "summary": "Stability improvements",
+      "description": "Small reliability fixes.",
+      "urgency": "low"
+    }
+  ],
+  "pending": [
+    {
+      "device_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "device": "Thunderbolt Controller",
+      "version": "41.00",
+      "state": "reboot"
+    }
+  ],
+  "metadata_age_days": 3
+}

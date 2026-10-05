@@ -43,6 +43,7 @@ private Q_SLOTS:
 
 private:
     void watchOstree();
+    void watchRenderer(QQuickWindow *window);
 
     QObject *m_backend;
     QQmlApplicationEngine *m_engine = nullptr;

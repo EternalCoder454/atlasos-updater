@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 pub const APPS: &str = "atlas-updater-apps.lock";
 pub const CRASH: &str = "atlas-updater-crash.lock";
+pub const FIRMWARE: &str = "atlas-updater-firmware.lock";
 
 /// Held until dropped (closing the file releases the lock; so does the
 /// process ending, however it ends).

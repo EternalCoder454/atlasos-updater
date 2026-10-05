@@ -205,15 +205,32 @@ AtlasWindow {
     }
 
     // "The system is doing something for you now": an OS update downloading,
-    // staging or installing, or an app update running. Not checks, not idle,
-    // not errors (busy is off then). Last, so it draws over the content; it
-    // takes no input. Reduced motion is handled inside the control.
+    // staging or installing, or an app update running. Only while the system
+    // is being changed: an update, a channel switch or a rollback being
+    // staged, or apps being updated. Not for checks, status reads, errors or
+    // idle (ops.rs names the operations). The one source of truth for both
+    // glows below.
+    readonly property bool glowActive: (root.backend.busy && ["download", "switch", "rollback"].indexOf(root.backend.busyOp) >= 0) || (root.backend.appsBusy && root.backend.appsOp === "updateApps") || (root.backend.firmwareBusy && root.backend.firmwareOp === "installFirmware")
+    // The glow shows on the screens' edges, which outlast this window: Shell
+    // keeps the window's QML alive (hidden) while this is true.
+    readonly property bool glowOutlivesWindow: glowActive && screenGlow.usable
+    // Set by Shell from the render thread's GL_RENDERER (llvmpipe, softpipe).
+    // Goes when Atlas.Ui 1.5.0 (AtlasStyle.softwareRendering) is the minimum.
+    property bool softwareGl: false
+
+    // Around every screen's edges. It takes no input and has no windows or
+    // timers while inactive.
+    ScreenGlow {
+        id: screenGlow
+        active: root.glowActive
+        softwareGl: root.softwareGl
+    }
+    // Where screen-edge windows cannot be made (no layer-shell, an unknown
+    // platform): the glow along this window's edges instead. Last, so it draws
+    // over the content; it takes no input.
     AtlasEdgeGlow {
         anchors.fill: parent
-        // Only while the system is being changed: an update, a channel
-        // switch or a rollback being staged, or apps being updated. Not for
-        // checks or status reads (ops.rs names the operations).
-        active: (root.backend.busy && ["download", "switch", "rollback"].indexOf(root.backend.busyOp) >= 0) || (root.backend.appsBusy && root.backend.appsOp === "updateApps")
+        active: root.glowActive && !screenGlow.usable
     }
 
     Component {

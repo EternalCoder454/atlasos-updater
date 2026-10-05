@@ -16,6 +16,9 @@ pub const CHECKED: &str = "Checked";
 /// last app notice's key; `RoundError`: what went wrong in the background,
 /// for the window to show until something works again.
 pub const APPS: &str = "AppUpdates";
+/// `Notified`: the key of the firmware set the user was last told about
+/// (`fwupd::notice_key`); removed when no firmware update waits.
+pub const FIRMWARE: &str = "Firmware";
 
 fn settings() -> Settings {
     Settings::at(config_dir().join("atlas-updaterrc"))

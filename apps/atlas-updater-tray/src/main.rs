@@ -20,12 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use atlas_framework_system::bootc::Status;
+use atlas_updater_base::fwupd::{self, FirmwareUpdate};
 use atlas_updater_base::notify::{self, Note, Notifier, Urgency};
 use atlas_updater_base::ops::{self, Op};
 use atlas_updater_base::schedule::{self, Event, Schedule};
 use atlas_updater_base::view::{self, View};
 use atlas_updater_base::worker::{self, Outcome};
-use atlas_updater_base::{crash, rc, restart, tray};
+use atlas_updater_base::{crash, lock, rc, restart, tray};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
@@ -76,6 +77,8 @@ pub enum Msg {
     Reload,
     RestartEnded(Result<(), String>, Option<i64>),
     WorkerDone(Job, Option<Outcome>),
+    /// A firmware listing ended: `None` when it failed (logged).
+    Firmware(Option<FwFound>),
     Collected(Option<(String, String)>),
 }
 
@@ -84,6 +87,7 @@ pub enum Msg {
 enum Kind {
     Staged,
     Apps,
+    Firmware,
     RestartSoon,
     RestartFailed,
     Crash,
@@ -131,6 +135,12 @@ struct Tray {
     round_pending: bool,
     update_pending: bool,
     apps_failures: u32,
+    /// A firmware listing is running.
+    fw_inflight: bool,
+    /// Firmware updates are waiting (from the last listing).
+    fw_waiting: bool,
+    /// The scheduled restart is waiting for a firmware update to finish.
+    fw_postponed: bool,
     collecting: bool,
     collect_again: bool,
     look: Look,
@@ -163,6 +173,7 @@ impl Tray {
 
     fn look(&mut self) -> Look {
         let staged = self.view.staged.present;
+        let firmware = self.fw_waiting;
         if !staged {
             self.restart_failed = false;
         }
@@ -173,14 +184,23 @@ impl Tray {
                 "Update {} is ready. Restart to install it.",
                 self.view.staged.version
             )
+        } else if firmware {
+            "Firmware updates are available.".to_string()
         } else {
             "Your system is up to date.".to_string()
         };
         if at > 0 {
             tip.push_str(&format!("\nRestart scheduled for {}", timefmt::short(at)));
+            if self.fw_postponed {
+                tip.push_str("\nWaiting for a firmware update to finish first.");
+            }
         }
         Look {
-            status: if staged { "NeedsAttention" } else { "Passive" },
+            status: if staged || firmware {
+                "NeedsAttention"
+            } else {
+                "Passive"
+            },
             icon: self.icons.base.clone(),
             attention: if urgent {
                 self.icons.urgent.clone()
@@ -359,6 +379,9 @@ impl Tray {
             (Kind::RestartFailed, notify::DEFAULT_ACTION) => {
                 self.open_window(&["--page", "updates"], token)
             }
+            (Kind::Firmware, notify::DEFAULT_ACTION) => {
+                self.open_window(&["--page", "updates"], token)
+            }
             (_, notify::DEFAULT_ACTION) => self.open_window(&[], token),
             // An old notice can outlive the update it was about.
             (Kind::Staged, "restart") | (Kind::RestartSoon, "restart-now")
@@ -469,6 +492,7 @@ impl Tray {
         }
         self.soon_shown = false;
         self.warn_missing = false;
+        self.fw_postponed = false;
         self.update_item().await;
     }
 
@@ -503,8 +527,21 @@ impl Tray {
                         "The scheduled restart did not happen because its warning could not be shown. The update is still waiting. Restart when you are ready.",
                     )
                     .await;
+                } else if self.view.restart_needed && firmware_flashing() {
+                    // Never restart in the middle of a firmware flash: look
+                    // again in a minute (the warning was already given).
+                    let again = schedule::unix_now() + FW_RESTART_RETRY_SECS;
+                    eprintln!(
+                        "atlas-updater-tray: restart postponed: a firmware update is running"
+                    );
+                    rc::set(rc::RESTART, "ScheduledAt", Some(&again.to_string()));
+                    self.scheduled_at = again;
+                    self.fw_postponed = true;
+                    self.schedule.set_restart(Some(again));
+                    self.update_item().await;
                 } else if self.view.restart_needed {
                     // scheduled_at stays set while the restart runs.
+                    self.fw_postponed = false;
                     self.start_restart(Some(t)).await;
                 } else if !self.status_known || self.last_status_error.is_some() {
                     self.clear_schedule().await;
@@ -603,6 +640,13 @@ impl Tray {
     /// one: only that restart's end clears the schedule.
     async fn start_restart(&mut self, scheduled: Option<i64>) {
         if self.restarting {
+            return;
+        }
+        if scheduled.is_none() && firmware_flashing() {
+            self.restart_problem(
+                "Wait for the firmware update to finish before restarting. The update is still waiting.",
+            )
+            .await;
             return;
         }
         self.restarting = true;
@@ -749,6 +793,7 @@ impl Tray {
     // ---- app updates (in workers) ----
 
     fn apps_round(&mut self) {
+        self.firmware_round();
         if self.worker.is_some() {
             self.round_pending = true;
             return;
@@ -893,6 +938,72 @@ impl Tray {
         }
     }
 
+    // ---- firmware (listed with each round, never installed here) ----
+
+    /// Lists firmware in a short task: one system-bus connection that is
+    /// dropped when done, so nothing idles between rounds. Without fwupd
+    /// there is nothing to ask beyond one bus lookup.
+    fn firmware_round(&mut self) {
+        if std::mem::replace(&mut self.fw_inflight, true) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(FW_TIME_LIMIT, firmware_list())
+                .await
+                .unwrap_or_else(|_| {
+                    eprintln!("atlas-updater-tray: fwupd took too long; firmware not listed");
+                    None
+                })
+        });
+        // Awaited apart, so a panic in the task still ends the round (the
+        // in-flight flag is cleared by the message).
+        tokio::spawn(async move {
+            let found = task.await.unwrap_or_else(|e| {
+                eprintln!("atlas-updater-tray: the firmware task failed: {e}");
+                None
+            });
+            let _ = tx.send(Msg::Firmware(found));
+        });
+    }
+
+    async fn firmware_done(&mut self, found: Option<FwFound>) {
+        self.fw_inflight = false;
+        // A failed listing changes nothing: the next round tries again.
+        let Some(found) = found else { return };
+        let waiting = !found.updates.is_empty();
+        let saved = rc::get(rc::FIRMWARE, FW_NOTIFIED);
+        let window = if found.key.is_empty() || saved.as_deref() == Some(found.key.as_str()) {
+            false
+        } else {
+            self.window_running().await
+        };
+        match firmware_step(&found.key, saved.as_deref(), window) {
+            FwStep::Keep => {}
+            FwStep::Clear => rc::set(rc::FIRMWARE, FW_NOTIFIED, None),
+            FwStep::Notify => {
+                let n = Note {
+                    event: "firmwareReady",
+                    title: "Firmware updates available".into(),
+                    text: notify::escape(&firmware_text(&found.updates)),
+                    icon: String::new(),
+                    actions: vec![(notify::DEFAULT_ACTION, "Open Atlas Updater".into())],
+                    urgency: None,
+                    persistent: false,
+                };
+                // Counted as told only once shown (or turned off by the
+                // user): one that could not be shown comes with the next round.
+                if self.try_notify(Kind::Firmware, n).await.is_ok() {
+                    rc::set(rc::FIRMWARE, FW_NOTIFIED, Some(&found.key));
+                }
+            }
+        }
+        if self.fw_waiting != waiting {
+            self.fw_waiting = waiting;
+            self.update_item().await;
+        }
+    }
+
     /// A background round failed: try again later, later each time.
     fn apps_failed(&mut self) {
         self.apps_failures = self.apps_failures.saturating_add(1);
@@ -933,10 +1044,136 @@ impl Tray {
             }
             Msg::RestartEnded(res, scheduled) => self.restart_ended(res, scheduled).await,
             Msg::WorkerDone(job, out) => self.worker_done(job, out).await,
+            Msg::Firmware(found) => self.firmware_done(found).await,
             Msg::Collected(first) => self.collected(first).await,
         }
         true
     }
+}
+
+/// What a firmware listing found.
+#[derive(Debug)]
+pub struct FwFound {
+    updates: Vec<FirmwareUpdate>,
+    key: String,
+}
+
+/// How long a scheduled restart waits when a firmware update is running.
+const FW_RESTART_RETRY_SECS: i64 = 60;
+
+/// Whether a firmware install holds the firmware lock (the window's own).
+/// Without the lock to look at, nothing is known to run.
+fn firmware_flashing() -> bool {
+    match lock::take(lock::FIRMWARE, false) {
+        Ok(Some(_free)) => false,
+        Ok(None) => true,
+        Err(e) => {
+            eprintln!("atlas-updater-tray: cannot look at the firmware lock: {e}");
+            false
+        }
+    }
+}
+
+/// Most a firmware listing may take, connecting included.
+const FW_TIME_LIMIT: Duration = Duration::from_secs(90);
+/// The key in `[Firmware]` that holds the set the user was told about.
+const FW_NOTIFIED: &str = "Notified";
+/// Most device names in the notification.
+const FW_NAMES_SHOWN: usize = 3;
+
+/// Lists firmware over the system bus. No fwupd (not running and not
+/// installed) is an empty list; a failure is logged (every round it happens)
+/// and gives `None`.
+async fn firmware_list() -> Option<FwFound> {
+    let conn = match zbus::Connection::system().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("atlas-updater-tray: firmware not listed: no system bus: {e}");
+            return None;
+        }
+    };
+    match fwupd::available(&conn).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Some(FwFound {
+                updates: Vec::new(),
+                key: String::new(),
+            });
+        }
+        Err(e) => {
+            eprintln!("atlas-updater-tray: firmware not listed: {}", fw_error(&e));
+            return None;
+        }
+    }
+    match fwupd::list(&conn).await {
+        Ok(l) => Some(FwFound {
+            key: fwupd::notice_key(&l.updates),
+            updates: l.updates,
+        }),
+        Err(e) => {
+            eprintln!("atlas-updater-tray: firmware not listed: {}", fw_error(&e));
+            None
+        }
+    }
+}
+
+/// What went wrong, in one line for the log.
+fn fw_error(e: &fwupd::Error) -> String {
+    match e {
+        fwupd::Error::Cancelled => "refused".into(),
+        fwupd::Error::Message(m) => m.lines().next().unwrap_or_default().to_string(),
+    }
+}
+
+/// What to do with the saved notice key after a listing.
+#[derive(Debug, PartialEq, Eq)]
+enum FwStep {
+    /// Nothing to say, nothing to change.
+    Keep,
+    /// Nothing waits any more: forget the set.
+    Clear,
+    /// A new set: say so, and keep its key once shown.
+    Notify,
+}
+
+/// `key` is the listed set's (empty for none), `saved` the one the user
+/// was told about. While the window is open the user is looking at the
+/// list: no notice, and the key stays, so the set is told about later.
+fn firmware_step(key: &str, saved: Option<&str>, window_open: bool) -> FwStep {
+    if key.is_empty() {
+        return if saved.is_some() {
+            FwStep::Clear
+        } else {
+            FwStep::Keep
+        };
+    }
+    if saved == Some(key) || window_open {
+        FwStep::Keep
+    } else {
+        FwStep::Notify
+    }
+}
+
+/// "Firmware updates are available for A, B and 2 more." (device names
+/// are fwupd's: escaped by the caller).
+fn firmware_text(updates: &[FirmwareUpdate]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for u in updates {
+        let n = u.device.trim();
+        if !n.is_empty() && !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    if names.is_empty() {
+        return "Firmware updates are available.".into();
+    }
+    let more = names.len().saturating_sub(FW_NAMES_SHOWN);
+    names.truncate(FW_NAMES_SHOWN);
+    let mut list = names.join(", ");
+    if more > 0 {
+        list.push_str(&format!(" and {more} more"));
+    }
+    format!("Firmware updates are available for {list}.")
 }
 
 async fn next_message(s: &mut Option<MessageStream>) -> Option<zbus::Message> {
@@ -1056,6 +1293,9 @@ async fn run() -> Result<(), String> {
         round_pending: false,
         update_pending: false,
         apps_failures: 0,
+        fw_inflight: false,
+        fw_postponed: false,
+        fw_waiting: false,
         collecting: false,
         collect_again: false,
         menu_revision: 1,
@@ -1292,6 +1532,55 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fw(device: &str) -> FirmwareUpdate {
+        FirmwareUpdate {
+            device_id: device.into(),
+            device: device.into(),
+            vendor: String::new(),
+            current: "1".into(),
+            version: "2".into(),
+            summary: String::new(),
+            description: String::new(),
+            urgency: fwupd::Urgency::Unknown,
+            size: 0,
+            checksums: Vec::new(),
+            locations: Vec::new(),
+            remote_id: String::new(),
+            trusted: true,
+            needs_reboot: false,
+            needs_shutdown: false,
+            internal: false,
+        }
+    }
+
+    #[test]
+    fn firmware_notified_once_per_set() {
+        // New set: tell. Same set: not again. Window open: neither a notice
+        // nor a key change, so it is told once the window is closed.
+        assert_eq!(firmware_step("a", None, false), FwStep::Notify);
+        assert_eq!(firmware_step("a", Some("a"), false), FwStep::Keep);
+        assert_eq!(firmware_step("b", Some("a"), false), FwStep::Notify);
+        assert_eq!(firmware_step("a", None, true), FwStep::Keep);
+        assert_eq!(firmware_step("b", Some("a"), true), FwStep::Keep);
+        // Nothing waits: forget, so the same set later is news again.
+        assert_eq!(firmware_step("", Some("a"), false), FwStep::Clear);
+        assert_eq!(firmware_step("", Some("a"), true), FwStep::Clear);
+        assert_eq!(firmware_step("", None, false), FwStep::Keep);
+    }
+
+    #[test]
+    fn firmware_text_names_devices() {
+        assert_eq!(
+            firmware_text(&[fw("UEFI dbx"), fw(" "), fw("UEFI dbx")]),
+            "Firmware updates are available for UEFI dbx."
+        );
+        assert_eq!(
+            firmware_text(&[fw("A"), fw("B"), fw("C"), fw("D"), fw("E")]),
+            "Firmware updates are available for A, B, C and 2 more."
+        );
+        assert_eq!(firmware_text(&[fw("")]), "Firmware updates are available.");
+    }
 
     #[test]
     fn failed_rounds_back_off() {
