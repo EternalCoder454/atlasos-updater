@@ -27,8 +27,8 @@
 %endif
 
 Name:           atlas
-Version:        0.1.0
-Release:        2%{?dist}
+Version:        0.2.0
+Release:        1%{?dist}
 Summary:        Atlas system helper and Atlas Updater for AtlasOS
 License:        MIT
 URL:            https://github.com/EternalCoder454/atlasos-updater
@@ -239,6 +239,11 @@ systemctl --no-reload preset atlas-record-boot.service atlas-drivers.timer >/dev
 %endif
 
 %changelog
+* Mon Oct 05 2026 Atlas <atlas@eterneon.net> - 0.2.0-1
+- Firmware updates through fwupd
+- The progress glow runs around the screens' edges
+- Drivers: switch to the atlasos-nvidia image on NVIDIA Turing or newer, and back
+
 * Sun Oct 04 2026 Atlas <atlas@eterneon.net> - 0.1.0-2
 - atlas-core is now atlas-system-helper (Provides and Obsoletes atlas-core)
 

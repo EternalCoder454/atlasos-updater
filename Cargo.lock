@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-update-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atlas-framework-system",
  "libc",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-updater"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atlas-framework-core",
  "atlas-framework-flatpak",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-updater-base"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atlas-framework-core",
  "atlas-framework-system",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-updater-tray"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atlas-framework-core",
  "atlas-framework-system",
