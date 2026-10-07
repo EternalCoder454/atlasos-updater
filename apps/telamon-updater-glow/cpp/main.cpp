@@ -17,11 +17,31 @@
 #include <QTimer>
 
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 
 using namespace std::chrono_literals;
 
 int main(int argc, char *argv[])
 {
+    // --version and --help need no screen: answered before Qt looks for one
+    // (the package's build checks run without a display).
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--version") || !std::strcmp(argv[i], "-v")) {
+            std::printf("telamon-updater-glow %s\n", TELAMON_UPDATER_GLOW_VERSION);
+            return 0;
+        }
+        if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
+            std::printf("Usage: telamon-updater-glow [--seconds <n>]\n\n"
+                        "Draws the glow around the screens' edges while Telamon OS is being changed.\n"
+                        "Started and ended by telamon-updater-tray.\n\n"
+                        "Options:\n"
+                        "  --seconds <n>  End after <n> seconds.\n"
+                        "  -v, --version  Print the version.\n"
+                        "  -h, --help     Print this help.\n");
+            return 0;
+        }
+    }
     QGuiApplication app(argc, argv);
     // The layer-shell scope of the surfaces is "<name>-glow".
     QGuiApplication::setApplicationName(QStringLiteral("telamon-updater"));
