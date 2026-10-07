@@ -4,10 +4,10 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 import "dates.js" as Dates
 
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -25,7 +25,7 @@ AtlasPage {
         backend: page.backend
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.reports.length === 0
@@ -81,19 +81,19 @@ AtlasPage {
             Section {
                 title: qsTr("Stack Trace")
                 visible: card.modelData.stacktrace.length > 0
-                AtlasCodeView {
+                TelamonCodeView {
                     Layout.fillWidth: true
                     // Text lines up with the rows' text (SectionRow pads 12).
-                    Layout.leftMargin: AtlasStyle.spacingLarge
-                    Layout.rightMargin: AtlasStyle.spacingSmall
-                    Layout.topMargin: AtlasStyle.spacingSmall
-                    Layout.bottomMargin: AtlasStyle.spacingSmall
+                    Layout.leftMargin: TelamonStyle.spacingLarge
+                    Layout.rightMargin: TelamonStyle.spacingSmall
+                    Layout.topMargin: TelamonStyle.spacingSmall
+                    Layout.bottomMargin: TelamonStyle.spacingSmall
                     framed: false
                     showCopy: true
                     maximumHeight: Kirigami.Units.gridUnit * 10
-                    // Atlas.Ui 1.4.0 draws the sideways scroll bar of a long
+                    // Telamon.Ui 1.4.0 draws the sideways scroll bar of a long
                     // line over the last line, even scrolled to the end: end
-                    // on an empty line for it to cover (until Atlas.Ui 1.5.0).
+                    // on an empty line for it to cover (until Telamon.Ui 1.5.0).
                     text: card.modelData.stacktrace.replace(/\n?$/, "\n")
                     Accessible.name: qsTr("Stack Trace")
                 }
@@ -108,14 +108,14 @@ AtlasPage {
                     expanded: card.showPayload
                     onClicked: card.showPayload = !card.showPayload
                 }
-                AtlasCodeView {
+                TelamonCodeView {
                     visible: card.showPayload
                     Layout.fillWidth: true
                     // Text lines up with the rows' text (SectionRow pads 12).
-                    Layout.leftMargin: AtlasStyle.spacingLarge
-                    Layout.rightMargin: AtlasStyle.spacingSmall
-                    Layout.topMargin: AtlasStyle.spacingSmall
-                    Layout.bottomMargin: AtlasStyle.spacingSmall
+                    Layout.leftMargin: TelamonStyle.spacingLarge
+                    Layout.rightMargin: TelamonStyle.spacingSmall
+                    Layout.topMargin: TelamonStyle.spacingSmall
+                    Layout.bottomMargin: TelamonStyle.spacingSmall
                     framed: false
                     showCopy: true
                     maximumHeight: Kirigami.Units.gridUnit * 14
@@ -143,7 +143,7 @@ AtlasPage {
                     onClicked: page.backend.sendReport(card.modelData.eventId)
                 }
                 SecondaryButton {
-                    variant: AtlasButton.Destructive
+                    variant: TelamonButton.Destructive
                     text: qsTr("Don't Send")
                     enabled: !page.backend.busy
                     onClicked: page.backend.discardReport(card.modelData.eventId)

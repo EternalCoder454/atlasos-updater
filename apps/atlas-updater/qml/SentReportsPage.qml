@@ -3,10 +3,10 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 import "dates.js" as Dates
 
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -25,7 +25,7 @@ AtlasPage {
         showReject: false
         width: Math.min(parent ? parent.width - Kirigami.Units.gridUnit * 2 : 0, Kirigami.Units.gridUnit * 36)
 
-        AtlasCodeView {
+        TelamonCodeView {
             Layout.fillWidth: true
             // An empty last line for the sideways scroll bar to cover
             // (see ReportsPage.qml).
@@ -36,7 +36,7 @@ AtlasPage {
         }
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.sent.length === 0

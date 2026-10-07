@@ -3,7 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Shapes
 import QtQuick.Window
-import Atlas.Ui
+import Telamon.Ui
 
 // The drawing of the screen-edge glow: one continuous frame along all four
 // edges of a screen-sized item, strongest at the edge and gone `depth` pixels
@@ -22,7 +22,7 @@ Item {
 
     // How far the glow reaches in from each edge, in pixels.
     property real depth: 54
-    property color tone: AtlasStyle.accent
+    property color tone: TelamonStyle.accent
 
     // The depth on whole device pixels, so that the pieces along the top and
     // left meet on a pixel boundary at fractional scales too.
@@ -30,7 +30,7 @@ Item {
     readonly property real d: Math.max(1, Math.round(Math.min(depth, width / 2, height / 2) * _dpr)) / _dpr
     // From the inner end (0, nothing) to the screen edge (1): an ease-in curve
     // with a lighter rim along the very edge.
-    readonly property real _top: AtlasStyle["highContrast"] === true ? 1 : 0.9
+    readonly property real _top: TelamonStyle["highContrast"] === true ? 1 : 0.9
     readonly property color _rim: Qt.tint(tone, Qt.rgba(1, 1, 1, 0.3))
 
     Accessible.ignored: true

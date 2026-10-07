@@ -3,10 +3,10 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 import "dates.js" as Dates
 
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -124,7 +124,7 @@ AtlasPage {
     }
 
     function copyDetails() {
-        AtlasClipboard.setText(page.backend.errorText);
+        TelamonClipboard.setText(page.backend.errorText);
         copied.restart();
     }
 
@@ -244,7 +244,7 @@ AtlasPage {
             timePicker.minutes = 0;
         }
 
-        AtlasLabel {
+        TelamonLabel {
             Layout.fillWidth: true
             visible: scheduleDialog.problem.length > 0
             text: scheduleDialog.problem
@@ -255,14 +255,14 @@ AtlasPage {
         RowLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
-            AtlasComboBox {
+            TelamonComboBox {
                 id: dayBox
                 Layout.fillWidth: true
                 onActivated: scheduleDialog.problem = ""
                 model: [qsTr("Today"), qsTr("Tomorrow")]
                 Accessible.name: qsTr("Day")
             }
-            AtlasTimePicker {
+            TelamonTimePicker {
                 id: timePicker
                 onEdited: scheduleDialog.problem = ""
             }
@@ -304,12 +304,12 @@ AtlasPage {
                 return Kirigami.Theme.negativeTextColor;
             }
             if (page.restartReady) {
-                return AtlasStyle.accent;
+                return TelamonStyle.accent;
             }
             if (page.backend.updateAvailable && page.availableIsBad) {
                 return Kirigami.Theme.neutralTextColor;
             }
-            return page.backend.updateAvailable ? AtlasStyle.accent : Kirigami.Theme.positiveTextColor;
+            return page.backend.updateAvailable ? TelamonStyle.accent : Kirigami.Theme.positiveTextColor;
         }
         // Up to date: the OS logo in its own colours with a check badge,
         // not a tinted circle. The logo is `LOGO=` from os-release, then
@@ -425,7 +425,7 @@ AtlasPage {
             text: qsTr("Restart Tonight")
             visible: page.restartReady && !page.working && page.backend.scheduledAt === 0 && page.tonight > 0
             enabled: !page.installingFirmware
-            AtlasToolTip {
+            TelamonToolTip {
                 text: qsTr("Restarts at %1. You get a notification 5 minutes before.").arg(new Date(page.tonight * 1000).toLocaleTimeString(Qt.locale(), Qt.locale().timeFormat(1)))
                 shown: parent.hovered || parent.visualFocus
             }
@@ -495,9 +495,9 @@ AtlasPage {
         }
     }
 
-    AtlasLabel {
+    TelamonLabel {
         Layout.fillWidth: true
-        textStyle: AtlasLabel.Caption
+        textStyle: TelamonLabel.Caption
         Layout.topMargin: -Kirigami.Units.smallSpacing
         Layout.bottomMargin: Kirigami.Units.largeSpacing
         visible: page.backend.lastChecked > 0 && page.backend.loaded && !page.hasError && !page.checking && !page.downloading && !page.working
@@ -690,7 +690,7 @@ AtlasPage {
                 subtitle: [qsTr("%1 → %2").arg(fwRow.modelData.current).arg(fwRow.modelData.version), fwRow.modelData.vendor, fwRow.modelData.summary, fwRow.modelData.trusted ? "" : qsTr("Not signed by a trusted source")].filter(function (t) {
                     return t.length > 0;
                 }).join(" · ")
-                AtlasBadge {
+                TelamonBadge {
                     visible: fwRow.modelData.important
                     text: qsTr("Important")
                     type: "warning"

@@ -1,6 +1,6 @@
 //! Crash report helpers both processes use.
 
-use atlas_framework_system::crash::AppInfo;
+use telamon_framework_system::crash::AppInfo;
 
 pub const APP_ID: &str = "net.eterneon.atlas.updater";
 pub const REPO: &str = "atlasos-updater";
@@ -30,8 +30,8 @@ pub fn display_name(app_name: &str) -> &str {
 /// Blocking.
 pub fn collect() -> Option<(String, String)> {
     let _held = crate::lock::take(crate::lock::CRASH, true).ok().flatten();
-    let mut new = atlas_framework_system::crash::collect_coredumps(None);
-    new.extend(atlas_framework_system::crash::collect_events(None));
+    let mut new = telamon_framework_system::crash::collect_coredumps(None);
+    new.extend(telamon_framework_system::crash::collect_events(None));
     new.first()
         .map(|r| (display_name(&r.app_name).to_string(), r.report_type.clone()))
 }

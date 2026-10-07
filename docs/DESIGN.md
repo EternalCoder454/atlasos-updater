@@ -7,13 +7,13 @@ This repo holds two things:
   the progress parser (packaged as atlas-system-helper; it was atlas-core).
 - **atlas-updater**: the Atlas Updater app (`net.eterneon.atlas.updater`).
 
-Atlas.Ui, the QML module every Atlas app shares, its Material Symbols fonts,
+Telamon.Ui, the QML module every Atlas app shares, its Material Symbols fonts,
 the design rules for Atlas apps and the app template live in
 **atlas-framework** (`EternalCoder454/atlas-framework`, `~/Documents/Atlas
-Framework`). The app uses the installed Atlas.Ui (the atlas-ui package). The
-Rust code Atlas apps share is there too: atlas-framework-core (os-release),
-atlas-framework-system (bootc types, history, events, crash reports) and
-atlas-framework-flatpak (the libflatpak wrapper). Both crates here use them
+Framework`). The app uses the installed Telamon.Ui (the telamon-ui package). The
+Rust code Atlas apps share is there too: telamon-framework-core (os-release),
+telamon-framework-system (bootc types, history, events, crash reports) and
+telamon-framework-flatpak (the libflatpak wrapper). Both crates here use them
 directly, pinned to one git rev.
 
 Stack: Rust + Qt 6.11 + Kirigami 6.30 through CXX-Qt. Everything builds and runs
@@ -32,7 +32,7 @@ crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-help
   data/                       D-Bus, polkit, systemd files for the helper
 crates/atlas-updater-base/    what the window and the tray share: settings (rc), ops,
                               schedule, view, restart, locks, worker result, the fwupd
-                              client, and the notifier (atlas_framework_system::notify,
+                              client, and the notifier (telamon_framework_system::notify,
                               feature `notify`)
 apps/atlas-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
                               app jobs it runs for the tray (`--worker`, no Qt)
@@ -295,7 +295,7 @@ signature; the containers policy covers both. The code is
   image's `nvidia-key-setup` does the key enrollment. The staged deployment
   also puts the tray in its usual restart state.
 
-## Flatpak wrapper (atlas-framework-flatpak)
+## Flatpak wrapper (telamon-framework-flatpak)
 
 This uses libflatpak through the `libflatpak` crate (gtk-rs style). System
 installs go through flatpak's own system helper, which asks polkit itself, so
@@ -499,13 +499,13 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   each showing its part of the same screen-sized frame. The windows exist
   only while the glow is on (none and no timer otherwise) and are rebuilt
   when screens come or go. Without the layer-shell module, or on another
-  platform, the glow falls back to `AtlasEdgeGlow` inside the window. It
+  platform, the glow falls back to `TelamonEdgeGlow` inside the window. It
   breathes: one opacity per window, 0.6 to 1 over 2.4 s, set at 30 frames per
   second from a timer, so the gradients are never redrawn. It is static (0.9)
-  under reduced motion (`AtlasStyle.reducedMotion`, or Plasma's animation
-  speed at instant) and with software rendering (`AtlasStyle.softwareRendering`:
+  under reduced motion (`TelamonStyle.reducedMotion`, or Plasma's animation
+  speed at instant) and with software rendering (`TelamonStyle.softwareRendering`:
   the software scene graph or a software GL driver such as llvmpipe, and
-  `ATLAS_SOFTWARE_RENDERING=0/1` overrides it; with an Atlas.Ui older than
+  `TELAMON_SOFTWARE_RENDERING=0/1` overrides it; with a Telamon.Ui older than
   1.5.0, the scene graph API and `Shell::watchRenderer`'s GL renderer check). The app never asks for the software scene graph,
   so it draws on the GPU wherever there is a hardware GL driver. Closing the
   window while it is on keeps the window's QML (hidden) alive until the
@@ -528,10 +528,10 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   Icon names come from the icon theme in `kdeglobals` (Papirus's update
   icons when present, else ours), looked up once at start.
 - Notifications go straight to `org.freedesktop.Notifications`, through
-  atlas-framework's sender (`atlas_framework_system::notify`, a 10 s
+  atlas-framework's sender (`telamon_framework_system::notify`, a 10 s
   timeout per call), with KNotification's hints (`desktop-entry`, `x-kde-appname=atlas-updater`,
   `x-kde-eventId`), so Plasma's per-event settings in
-  `atlas-updater.notifyrc` keep working; an event whose popup the user
+  `telamon-updater.notifyrc` keep working; an event whose popup the user
   turned off there is not sent. Action signals count only from the server
   that showed the notification.
 - Staged-update detection at idle: an inotify watch on `/run/ostree/`
@@ -708,7 +708,7 @@ an open system.
 
 ## Privacy and crash reports
 
-Crash reports are the only telemetry. `atlas_framework_system::crash` (opt-in, off by
+Crash reports are the only telemetry. `telamon_framework_system::crash` (opt-in, off by
 default; when off nothing is collected or written):
 
 - **Settings.** Per user, `~/.config/atlas/crash-reporting.toml`,

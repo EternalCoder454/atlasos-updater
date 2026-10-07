@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::progress::Progress;
-use atlas_framework_system::bootc::{self, Channel, Status};
+use telamon_framework_system::bootc::{self, Channel, Status};
 use zbus::export::futures_core::Stream;
 
 pub const BUS_NAME: &str = "net.eterneon.atlas.SystemHelper";

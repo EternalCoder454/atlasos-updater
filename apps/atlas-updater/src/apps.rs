@@ -1,8 +1,8 @@
-//! Flatpak app updates (through atlas-framework-flatpak).
+//! Flatpak app updates (through telamon-framework-flatpak).
 
 use std::path::Path;
 
-use atlas_framework_flatpak::{self as flatpak, AppUpdate, InstallationKind};
+use telamon_framework_flatpak::{self as flatpak, AppUpdate, InstallationKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{apphistory, config, power};

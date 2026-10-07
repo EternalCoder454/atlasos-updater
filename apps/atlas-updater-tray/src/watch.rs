@@ -19,7 +19,7 @@ const RUN: &str = "/run";
 const COREDUMP: &str = "/var/lib/systemd/coredump";
 const COREDUMP_PARENTS: [&str; 2] = ["/var/lib/systemd", "/var/lib"];
 // The helper's state directory keeps the name from before the package was
-// atlas-system-helper (atlas_framework_system::events::DEFAULT_PATH).
+// atlas-system-helper (telamon_framework_system::events::DEFAULT_PATH).
 const EVENTS: &str = "/var/lib/atlas-core/events.jsonl";
 const EVENTS_PARENTS: [&str; 2] = ["/var/lib/atlas-core", "/var/lib"];
 

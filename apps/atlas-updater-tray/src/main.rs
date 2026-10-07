@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use atlas_framework_system::bootc::Status;
+use telamon_framework_system::bootc::Status;
 use atlas_updater_base::fwupd::{self, FirmwareUpdate};
 use atlas_updater_base::notify::{self, Note, Notifier, Urgency};
 use atlas_updater_base::ops::{self, Op};
@@ -68,7 +68,7 @@ fn seen_marker(saved: Option<String>, stat: &str, now: &str) -> String {
                 .trim()
                 .parse()
                 .ok()?;
-            Some(atlas_framework_system::history::rfc3339_from_unix(secs))
+            Some(telamon_framework_system::history::rfc3339_from_unix(secs))
         })
         .unwrap_or_else(|| now.to_string())
 }
@@ -77,9 +77,9 @@ fn seen_marker(saved: Option<String>, stat: &str, now: &str) -> String {
 /// the helper) that is later than `seen`. Times are RFC 3339 UTC, so text
 /// order is time order.
 fn newest_driver_event<'a>(
-    events: &'a [atlas_framework_system::events::Event],
+    events: &'a [telamon_framework_system::events::Event],
     seen: &str,
-) -> Option<&'a atlas_framework_system::events::Event> {
+) -> Option<&'a telamon_framework_system::events::Event> {
     events
         .iter()
         .filter(|e| matches!(e.event.as_str(), "driver-install" | "driver-remove"))
@@ -91,7 +91,7 @@ fn newest_driver_event<'a>(
 /// here get one. The text is only for an install with Secure Boot on: the
 /// image's key setup asks for the driver's key once at the next start.
 fn driver_text(
-    e: &atlas_framework_system::events::Event,
+    e: &telamon_framework_system::events::Event,
     secure_boot: bool,
 ) -> Option<(String, String)> {
     let name = match e.version.as_deref()? {
@@ -802,7 +802,7 @@ impl Tray {
             self.schedule.apps_in(APPS_SOON);
         }
         self.apps_auto = auto;
-        self.set_crash(atlas_framework_system::crash::Settings::load().enabled);
+        self.set_crash(telamon_framework_system::crash::Settings::load().enabled);
         self.update_item().await;
     }
 
@@ -873,12 +873,12 @@ impl Tray {
     /// the last notice (the newest event only). The first run only marks the
     /// time: nothing from before the tray ever ran is announced.
     async fn driver_notice(&mut self) {
-        let events = atlas_framework_system::events::read(std::path::Path::new(
-            atlas_framework_system::events::DEFAULT_PATH,
+        let events = telamon_framework_system::events::read(std::path::Path::new(
+            telamon_framework_system::events::DEFAULT_PATH,
         ));
         // No marker yet: what was staged since this boot began is news.
         let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
-        let now = atlas_framework_system::history::now_rfc3339();
+        let now = telamon_framework_system::history::now_rfc3339();
         let seen = seen_marker(rc::get(rc::NOTIFIED, DRIVER_SEEN), &stat, &now);
         let Some(e) = newest_driver_event(&events, &seen) else {
             rc::set(rc::NOTIFIED, DRIVER_SEEN, Some(&seen));
@@ -1487,7 +1487,7 @@ async fn run() -> Result<(), String> {
     }
 
     // Crash reports are opt-in: only when on are the sources watched and read.
-    let crash_on = atlas_framework_system::crash::Settings::load().enabled;
+    let crash_on = telamon_framework_system::crash::Settings::load().enabled;
     let mut watcher = new_watcher(crash_on);
     if watcher.is_none() {
         t.watch_retry = Some(Instant::now() + WATCH_RETRY);
@@ -1629,7 +1629,7 @@ fn main() -> ExitCode {
     unsafe {
         libc::setlocale(libc::LC_ALL, c"".as_ptr());
     }
-    atlas_framework_system::crash::install(crash::app_info());
+    telamon_framework_system::crash::install(crash::app_info());
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1711,8 +1711,8 @@ mod tests {
         );
     }
 
-    fn ev(event: &str, driver: Option<&str>, time: &str) -> atlas_framework_system::events::Event {
-        atlas_framework_system::events::Event {
+    fn ev(event: &str, driver: Option<&str>, time: &str) -> telamon_framework_system::events::Event {
+        telamon_framework_system::events::Event {
             event: event.into(),
             version: driver.map(Into::into),
             error: None,

@@ -212,7 +212,7 @@ fn read_tail(f: &File) -> io::Result<Vec<u8>> {
 /// over the old one, so a crash leaves one or the other.
 fn trim(f: &File, path: &Path) -> io::Result<()> {
     let bytes = read_tail(f)?;
-    let lines: Vec<_> = atlas_framework_core::fsutil::lossy_lines(&bytes)
+    let lines: Vec<_> = telamon_framework_core::fsutil::lossy_lines(&bytes)
         .into_iter()
         .filter(|l| l.len() <= LINE_MAX)
         .collect();
@@ -263,7 +263,7 @@ pub fn read(fixtures: Option<&Path>) -> Vec<Entry> {
 /// Any app with access to the home folder can write the file: entries are
 /// cleaned like text from a remote, and impossible ones are dropped.
 fn sane(mut e: Entry, now: i64) -> Option<Entry> {
-    use atlas_framework_flatpak::{clean, clean_to};
+    use telamon_framework_flatpak::{clean, clean_to};
     // A day of clock difference is fine; a date in the far future isn't.
     if e.at < 0 || e.at > now + 86_400 {
         return None;

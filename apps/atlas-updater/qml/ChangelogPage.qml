@@ -4,12 +4,12 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 import "dates.js" as Dates
 
 // What changed in every version this computer went through (and the one
 // waiting or offered), newest first, with each version's release notes.
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -75,7 +75,7 @@ AtlasPage {
         }
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && (page.loadState === "loading" || page.loadState === "")
@@ -83,7 +83,7 @@ AtlasPage {
         title: qsTr("Loading the changelog…")
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && page.loadState === "error"
@@ -95,7 +95,7 @@ AtlasPage {
         onTriggered: page.backend.loadChangelog()
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.items.length === 0 && page.loadState === "ready"

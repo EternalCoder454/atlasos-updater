@@ -14,7 +14,7 @@ qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
 find_package(KF6DBusAddons REQUIRED)
 find_package(Corrosion REQUIRED)
-# atlas-framework-flatpak links libflatpak and GLib into the Rust library.
+# telamon-framework-flatpak links libflatpak and GLib into the Rust library.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FLATPAK REQUIRED IMPORTED_TARGET flatpak gio-2.0)
 
@@ -29,11 +29,11 @@ qt_add_executable(atlas-updater-app
 set_target_properties(atlas-updater-app PROPERTIES OUTPUT_NAME atlas-updater)
 target_compile_definitions(atlas-updater-app PRIVATE ATLAS_UPDATER_VERSION="${PROJECT_VERSION}")
 
-# Atlas.Ui, the shared Atlas look, is installed like Kirigami (atlas-ui, from
+# Telamon.Ui, the shared Atlas look, is installed like Kirigami (telamon-ui, from
 # atlas-framework): QML imports it and nothing links it. qmlcachegen and
 # qmllint read its types from the installed copy.
-if(NOT EXISTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_QML}/Atlas/Ui/qmldir")
-    message(FATAL_ERROR "Atlas.Ui is not installed: install atlas-ui (atlas-framework)")
+if(NOT EXISTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_QML}/Telamon/Ui/qmldir")
+    message(FATAL_ERROR "Telamon.Ui is not installed: install telamon-ui (atlas-framework)")
 endif()
 
 # qmlcachegen compiles every QML/JS file to C++ at build time; the app reads
@@ -63,7 +63,7 @@ install(FILES data/net.eterneon.atlas.updater.desktop
 # atlas-updater-tray itself is a plain Cargo binary (packaging/atlas.spec).
 install(FILES data/net.eterneon.atlas.updater-tray.desktop
         DESTINATION /etc/xdg/autostart)
-install(FILES data/atlas-updater.notifyrc
+install(FILES data/telamon-updater.notifyrc
         DESTINATION ${CMAKE_INSTALL_DATADIR}/knotifications6)
 install(FILES data/net.eterneon.atlas.updater.metainfo.xml
         DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)

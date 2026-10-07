@@ -20,8 +20,8 @@ together with the code that implements the change.
   host.** Unit-test the logic (argument validation, ref/tag rewriting, JSON
   parsing, history) with fixtures. The helper's D-Bus and polkit paths are
   tested in the VM.
-- **Atlas.Ui is not here.** It lives in atlas-framework (`~/Documents/Atlas
-  Framework`) and the app builds against the installed module (atlas-ui), so
+- **Telamon.Ui is not here.** It lives in atlas-framework (`~/Documents/Atlas
+  Framework`) and the app builds against the installed module (telamon-ui), so
   the build container needs its RPMs: build them there
   (`packaging/build-rpm.sh`), then pass `ATLAS_LOCAL_RPMS=<their dir>` to this
   repo's `build-rpm.sh`, or `dnf install` them before a CMake build.

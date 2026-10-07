@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use atlas_framework_system::{bootc, history};
+use telamon_framework_system::{bootc, history};
 use atlas_update_engine::helper::service::{IDLE_TIMEOUT, Service, serve};
 use atlas_update_engine::helper::{
     Core, DriverRun, DriversCfg, OP_LOCK_FILE, SystemBootc, events, layered,

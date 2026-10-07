@@ -49,49 +49,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "atlas-framework-core"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "libc",
- "log",
- "serde",
-]
-
-[[package]]
-name = "atlas-framework-flatpak"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "libflatpak",
- "log",
-]
-
-[[package]]
-name = "atlas-framework-system"
-version = "1.6.0"
-source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v1.6.0#b9d72940fb94178f400c3f074fe8f9744b6c6f53"
-dependencies = [
- "atlas-framework-core",
- "getrandom 0.3.4",
- "libc",
- "log",
- "serde",
- "serde_json",
- "tokio",
- "unicode-normalization",
- "zbus",
-]
-
-[[package]]
 name = "atlas-update-engine"
 version = "0.2.0"
 dependencies = [
- "atlas-framework-system",
  "libc",
  "rustix",
  "serde",
  "serde_json",
+ "telamon-framework-system",
  "tempfile",
  "tokio",
  "zbus",
@@ -101,9 +66,6 @@ dependencies = [
 name = "atlas-updater"
 version = "0.2.0"
 dependencies = [
- "atlas-framework-core",
- "atlas-framework-flatpak",
- "atlas-framework-system",
  "atlas-update-engine",
  "atlas-updater-base",
  "cxx",
@@ -115,6 +77,9 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "telamon-framework-core",
+ "telamon-framework-flatpak",
+ "telamon-framework-system",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -126,12 +91,12 @@ dependencies = [
 name = "atlas-updater-base"
 version = "0.2.0"
 dependencies = [
- "atlas-framework-core",
- "atlas-framework-system",
  "atlas-update-engine",
  "libc",
  "serde",
  "serde_json",
+ "telamon-framework-core",
+ "telamon-framework-system",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -142,12 +107,12 @@ dependencies = [
 name = "atlas-updater-tray"
 version = "0.2.0"
 dependencies = [
- "atlas-framework-core",
- "atlas-framework-system",
  "atlas-updater-base",
  "libc",
  "rustix",
  "serde",
+ "telamon-framework-core",
+ "telamon-framework-system",
  "tempfile",
  "tokio",
  "zbus",
@@ -1198,6 +1163,41 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "telamon-framework-core"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "libc",
+ "log",
+ "serde",
+]
+
+[[package]]
+name = "telamon-framework-flatpak"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "libflatpak",
+ "log",
+]
+
+[[package]]
+name = "telamon-framework-system"
+version = "2.0.0"
+source = "git+https://github.com/EternalCoder454/atlas-framework?tag=v2.0.0#8e6a53569363aec3d7e42920875d03ca113ef3eb"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "telamon-framework-core",
+ "tokio",
+ "unicode-normalization",
+ "zbus",
+]
 
 [[package]]
 name = "tempfile"

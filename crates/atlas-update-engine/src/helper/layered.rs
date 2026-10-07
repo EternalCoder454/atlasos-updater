@@ -21,8 +21,8 @@
 
 use serde_json::{Value, json};
 
-use atlas_framework_system::bootc::{ImageReference, ImageStatus, TRANSPORTS, utc_second};
-use atlas_framework_system::history::rfc3339_from_unix;
+use telamon_framework_system::bootc::{ImageReference, ImageStatus, TRANSPORTS, utc_second};
+use telamon_framework_system::history::rfc3339_from_unix;
 
 /// Where the helper keeps the last update check's result on such a system
 /// (bootc keeps its own in the ostree repo). /var/lib/atlas-core is the
@@ -252,7 +252,7 @@ pub fn fill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_framework_system::bootc::{Channel, Status};
+    use telamon_framework_system::bootc::{Channel, Status};
 
     const BOOTC: &str = include_str!("../../tests/fixtures/status-layered.json");
     const RPM_OSTREE: &str = include_str!("../../tests/fixtures/rpm-ostree-layered.json");

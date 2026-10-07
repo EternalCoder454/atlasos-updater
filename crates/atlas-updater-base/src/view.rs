@@ -1,6 +1,6 @@
 //! Turns a bootc `Status` into the plain values the QML screens show.
 
-use atlas_framework_system::bootc::{BootEntry, Status};
+use telamon_framework_system::bootc::{BootEntry, Status};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Slot {

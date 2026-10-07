@@ -17,9 +17,9 @@ pub mod view;
 pub mod worker;
 
 /// Desktop notifications: the framework's sender (feature `notify`).
-pub use atlas_framework_system::notify;
+pub use telamon_framework_system::notify;
 
-/// Sends notifications under the app's names, as atlas-updater.notifyrc
+/// Sends notifications under the app's names, as telamon-updater.notifyrc
 /// declares them.
 pub fn notifier() -> notify::Notifier {
     notify::Notifier::new(&crash::app_info())
@@ -28,7 +28,7 @@ pub fn notifier() -> notify::Notifier {
 #[cfg(test)]
 mod tests {
     /// Plasma files the notifications by these names: they must stay what
-    /// atlas-updater.notifyrc and the desktop file are called.
+    /// telamon-updater.notifyrc and the desktop file are called.
     #[test]
     fn notifications_go_out_under_the_apps_names() {
         let n = super::notifier();

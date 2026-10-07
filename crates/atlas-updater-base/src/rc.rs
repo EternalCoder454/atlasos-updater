@@ -4,7 +4,7 @@
 //! the file handling is the framework's [`Settings`]: locked, atomic and
 //! KConfig-compatible.
 
-use atlas_framework_core::settings::{Settings, config_dir};
+use telamon_framework_core::settings::{Settings, config_dir};
 
 /// `ScheduledAt`: Unix seconds of the scheduled restart.
 pub const RESTART: &str = "Restart";

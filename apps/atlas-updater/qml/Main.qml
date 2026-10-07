@@ -4,9 +4,9 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
-AtlasWindow {
+TelamonWindow {
     id: root
 
     // Both come from Shell::openWindow() (setInitialProperties).
@@ -33,7 +33,7 @@ AtlasWindow {
     // When the app list was last checked, so revisiting Updates does not run a
     // Flatpak check every time.
     property double lastAppsCheck: 0
-    // Icons only when the window is narrow. Not AtlasWindow.sidebarCollapsed:
+    // Icons only when the window is narrow. Not TelamonWindow.sidebarCollapsed:
     // that folds at 30 grid units, and this sidebar folds at 38.
     readonly property bool compact: width < Kirigami.Units.gridUnit * 38
 
@@ -98,11 +98,11 @@ AtlasWindow {
             id: sidebar
             Layout.fillHeight: true
             Layout.preferredWidth: root.compact ? Kirigami.Units.gridUnit * 3.6 : Kirigami.Units.gridUnit * 12.5
-            color: root.sidebarColor(AtlasStyle.base)
+            color: root.sidebarColor(TelamonStyle.base)
 
             Behavior on Layout.preferredWidth {
                 NumberAnimation {
-                    duration: AtlasStyle.duration
+                    duration: TelamonStyle.duration
                     easing.type: Easing.OutCubic
                 }
             }
@@ -111,15 +111,15 @@ AtlasWindow {
                 anchors.right: parent.right
                 height: parent.height
                 width: 1
-                color: AtlasStyle.separator
+                color: TelamonStyle.separator
             }
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: AtlasStyle.spacingLarge
-                anchors.rightMargin: AtlasStyle.spacingLarge + 1
-                anchors.topMargin: AtlasStyle.spacingXLarge
-                spacing: AtlasStyle.spacingXSmall
+                anchors.margins: TelamonStyle.spacingLarge
+                anchors.rightMargin: TelamonStyle.spacingLarge + 1
+                anchors.topMargin: TelamonStyle.spacingXLarge
+                spacing: TelamonStyle.spacingXSmall
 
                 NavItem {
                     page: "updates"
@@ -181,14 +181,14 @@ AtlasWindow {
                         property: "opacity"
                         from: 0
                         to: 1
-                        duration: AtlasStyle.durationLong
+                        duration: TelamonStyle.durationLong
                         easing.type: Easing.OutCubic
                     }
                     NumberAnimation {
                         property: "y"
                         from: Kirigami.Units.gridUnit
                         to: 0
-                        duration: AtlasStyle.durationLong
+                        duration: TelamonStyle.durationLong
                         easing.type: Easing.OutCubic
                     }
                 }
@@ -198,7 +198,7 @@ AtlasWindow {
                     property: "opacity"
                     from: 1
                     to: 0
-                    duration: AtlasStyle.durationShort
+                    duration: TelamonStyle.durationShort
                 }
             }
         }
@@ -220,7 +220,7 @@ AtlasWindow {
     // demo: closing the window ends it.)
     readonly property bool glowOutlivesWindow: glowForOperation && screenGlow.usable
     // Set by Shell from the render thread's GL_RENDERER (llvmpipe, softpipe).
-    // Goes when Atlas.Ui 1.5.0 (AtlasStyle.softwareRendering) is the minimum.
+    // Goes when Telamon.Ui 1.5.0 (TelamonStyle.softwareRendering) is the minimum.
     property bool softwareGl: false
 
     // Around every screen's edges. It takes no input and has no windows or
@@ -233,7 +233,7 @@ AtlasWindow {
     // Where screen-edge windows cannot be made (no layer-shell, an unknown
     // platform): the glow along this window's edges instead. Last, so it draws
     // over the content; it takes no input.
-    AtlasEdgeGlow {
+    TelamonEdgeGlow {
         anchors.fill: parent
         active: root.glowActive && !screenGlow.usable
     }

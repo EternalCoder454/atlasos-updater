@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use atlas_framework_system::bootc::ImageReference;
+use telamon_framework_system::bootc::ImageReference;
 use serde::{Deserialize, Serialize};
 
 /// Where images of AtlasOS live (the booted repo must start with this).

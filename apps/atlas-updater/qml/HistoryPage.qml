@@ -3,10 +3,10 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 import "dates.js" as Dates
 
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -25,7 +25,7 @@ AtlasPage {
         }
     }
 
-    AtlasEmptyState {
+    TelamonEmptyState {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.gridUnit * 3
         visible: page.entries.length === 0 && page.appEntries.length === 0

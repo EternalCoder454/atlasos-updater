@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 // Rust, see src/lib.rs and src/crash.rs.
-extern "C" void *atlas_backend_new();
+extern "C" void *telamon_backend_new();
 extern "C" void atlas_crash_install();
 extern "C" void atlas_crash_fatal(const char *msg);
 extern "C" int atlas_worker(const char *job);
@@ -128,7 +128,7 @@ int main(int argc, char *argv[])
     // One instance per session; a second launch raises the first one.
     KDBusService service(KDBusService::Unique);
 
-    auto *backend = static_cast<QObject *>(atlas_backend_new());
+    auto *backend = static_cast<QObject *>(telamon_backend_new());
     // main() owns it: a destroyed QML engine must never delete it.
     QQmlEngine::setObjectOwnership(backend, QQmlEngine::CppOwnership);
     int rc = 0;

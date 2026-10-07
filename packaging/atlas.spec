@@ -58,11 +58,11 @@ BuildRequires:  cmake(Qt6QmlTools)
 BuildRequires:  qt6-qtbase-devel
 BuildRequires:  cmake(KF6DBusAddons)
 BuildRequires:  pkgconfig(gio-2.0)
-# QML modules qmlcachegen resolves at build time (not linked). atlas-ui comes
+# QML modules qmlcachegen resolves at build time (not linked). telamon-ui comes
 # from atlas-framework, which is in no repository: install its RPMs first
 # (build-rpm.sh does, given ATLAS_LOCAL_RPMS).
 BuildRequires:  kf6-kirigami-devel
-BuildRequires:  atlas-ui >= 1.4.0
+BuildRequires:  telamon-ui >= 2.0.0
 # org.kde.layershell, for the screen-edge glow (ScreenGlow.qml)
 BuildRequires:  layer-shell-qt
 %endif
@@ -98,10 +98,10 @@ removal by dnf.
 %package -n atlas-updater
 Summary:        Atlas Updater for AtlasOS
 Requires:       atlas-system-helper = %{version}-%{release}
-# Atlas.Ui, the shared look (atlas-framework). 1.4.0 has the controls and
+# Telamon.Ui, the shared look (atlas-framework). 1.4.0 has the controls and
 # tokens the pages use; 1.1.0 and later ship
 # /usr/share/atlas/crash-reporting.toml, the crash report server.
-Requires:       atlas-ui >= 1.4.0
+Requires:       telamon-ui >= 2.0.0
 Requires:       kf6-kirigami
 # The update glow runs around the screens' edges as layer-shell overlays.
 Requires:       layer-shell-qt
@@ -231,7 +231,7 @@ systemctl --no-reload preset atlas-record-boot.service atlas-drivers.timer >/dev
 %{_datadir}/dbus-1/services/net.eterneon.atlas.updater.Tray.service
 %{_datadir}/applications/net.eterneon.atlas.updater.desktop
 %{_sysconfdir}/xdg/autostart/net.eterneon.atlas.updater-tray.desktop
-%{_datadir}/knotifications6/atlas-updater.notifyrc
+%{_datadir}/knotifications6/telamon-updater.notifyrc
 %{_datadir}/metainfo/net.eterneon.atlas.updater.metainfo.xml
 %{_datadir}/icons/hicolor/scalable/apps/net.eterneon.atlas.updater.svg
 %{_datadir}/icons/hicolor/scalable/status/net.eterneon.atlas.updater-symbolic.svg

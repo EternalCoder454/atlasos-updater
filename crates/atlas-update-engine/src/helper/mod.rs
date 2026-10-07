@@ -4,7 +4,7 @@
 //! is in [`service`]; everything else here is plain code that unit tests drive
 //! with a fake [`BootcRunner`].
 
-pub use atlas_framework_system::events;
+pub use telamon_framework_system::events;
 pub mod drivers;
 pub mod layered;
 pub mod live;
@@ -27,8 +27,8 @@ use crate::helper_client::{
     STATE_UNREAD_CANCEL,
 };
 use crate::progress::{BootcParser, RpmOstreeParser};
-use atlas_framework_system::bootc::{Channel, ImageReference, Status, version_cmp};
-use atlas_framework_system::history;
+use telamon_framework_system::bootc::{Channel, ImageReference, Status, version_cmp};
+use telamon_framework_system::history;
 use live::{ProgressCell, ProgressSink};
 
 /// bootc is always run by absolute path, and so are rpm-ostree and skopeo,
@@ -508,7 +508,7 @@ fn supervise(
 /// The refusal text for `found`, an image older than what `before` has.
 fn downgrade_message(
     before: &Status,
-    found: &atlas_framework_system::bootc::ImageStatus,
+    found: &telamon_framework_system::bootc::ImageStatus,
 ) -> String {
     let installed = before
         .status
@@ -848,21 +848,21 @@ impl Core {
     }
 
     /// Read the containers policy from this file
-    /// ([`CONTAINERS_POLICY`](atlas_framework_system::bootc::CONTAINERS_POLICY)).
+    /// ([`CONTAINERS_POLICY`](telamon_framework_system::bootc::CONTAINERS_POLICY)).
     pub fn with_policy(mut self, path: PathBuf) -> Self {
         self.policy = Some(path);
         self
     }
 
     /// True when the containers policy demands a signature for the registry
-    /// image `image` (see [`atlas_framework_system::bootc::policy_requires_signature`]). False
+    /// image `image` (see [`telamon_framework_system::bootc::policy_requires_signature`]). False
     /// when it can't be read.
     fn policy_requires_signature(&self, image: &str) -> bool {
         self.policy
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .is_some_and(|v| atlas_framework_system::bootc::policy_requires_signature(&v, image))
+            .is_some_and(|v| telamon_framework_system::bootc::policy_requires_signature(&v, image))
     }
 
     /// Also record update and rollback events to this file.
@@ -1336,7 +1336,7 @@ impl Core {
     fn refuse_older_before_pull(
         &self,
         before: Option<&Status>,
-        target: &atlas_framework_system::bootc::ImageReference,
+        target: &telamon_framework_system::bootc::ImageReference,
     ) -> Result<(), HelperError> {
         let Some(before) = before else {
             return Ok(());
@@ -1641,7 +1641,7 @@ impl Core {
     }
 
     /// The last [`Core::layered_check`] result.
-    fn saved_update(&self) -> Option<atlas_framework_system::bootc::ImageStatus> {
+    fn saved_update(&self) -> Option<telamon_framework_system::bootc::ImageStatus> {
         let text = std::fs::read_to_string(self.update_file.as_ref()?).ok()?;
         serde_json::from_str(&text).ok()
     }

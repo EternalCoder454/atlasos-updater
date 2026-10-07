@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use atlas_framework_system::bootc::{Channel, Status};
+use telamon_framework_system::bootc::{Channel, Status};
 use atlas_update_engine::helper_client::HelperClient;
 use atlas_update_engine::progress::Progress;
 
@@ -127,7 +127,7 @@ fn fixture_status(op: &Op, dir: &Path, on_progress: &OnProgress) -> Result<Statu
     let mut st =
         Status::from_json(&text).map_err(|e| OpError::Message(format!("Bad fixture: {e}")))?;
     st.bad_image_digests =
-        atlas_framework_system::bootc::bad_image_digests(&dir.join("bad-image-digests"));
+        telamon_framework_system::bootc::bad_image_digests(&dir.join("bad-image-digests"));
     Ok(st)
 }
 

@@ -139,7 +139,7 @@ void Shell::openWindow(const QString &page)
 // Tells the window (its `softwareGl` property) when its OpenGL renderer is a
 // software one, so that the screen-edge glow stays still. Read once, when the
 // scene graph starts, on the render thread (where the GL context is current).
-// Goes when Atlas.Ui 1.5.0 (AtlasStyle.softwareRendering) is the minimum.
+// Goes when Telamon.Ui 1.5.0 (TelamonStyle.softwareRendering) is the minimum.
 void Shell::watchRenderer(QQuickWindow *window)
 {
     connect(

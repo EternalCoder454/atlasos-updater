@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use atlas_framework_core::settings::{Settings, config_dir};
+use telamon_framework_core::settings::{Settings, config_dir};
 
 pub struct Icons {
     pub base: String,

@@ -1,15 +1,15 @@
-//! Opt-in crash reports (atlas_framework_system::crash). Off unless the user turns them
+//! Opt-in crash reports (telamon_framework_system::crash). Off unless the user turns them
 //! on in Settings; every report is shown before it is sent.
 
 use std::ffi::{CStr, c_char};
 
-use atlas_framework_system::crash::{self, Report};
+use telamon_framework_system::crash::{self, Report};
 use serde_json::{Value, json};
 
 pub use atlas_updater_base::crash::{REPO, app_info, display_name};
 
 /// Called first thing from `main.cpp`: panics save a report, but only when
-/// the user enabled crash reports (atlas-framework-system checks the setting).
+/// the user enabled crash reports (telamon-framework-system checks the setting).
 #[unsafe(no_mangle)]
 pub extern "C" fn atlas_crash_install() {
     crash::install(app_info());

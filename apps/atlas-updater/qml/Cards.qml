@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
 // Messages every page shows at the top: errors in plain language, results.
 ColumnLayout {
@@ -12,7 +12,7 @@ ColumnLayout {
     // The progress line (pages without their own busy display).
     property bool showBusy: showError
 
-    spacing: AtlasStyle.spacingSmall
+    spacing: TelamonStyle.spacingSmall
     visible: backend.fixturesActive || (showError && backend.errorText.length > 0) || backend.infoText.length > 0 || (backend.busy && showBusy)
 
     InfoBanner {
@@ -54,11 +54,11 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         visible: root.backend.busy && root.showBusy
-        spacing: AtlasStyle.spacingLarge
-        AtlasSpinner {
+        spacing: TelamonStyle.spacingLarge
+        TelamonSpinner {
             running: root.backend.busy
         }
-        AtlasLabel {
+        TelamonLabel {
             Layout.fillWidth: true
             text: root.backend.busyText
             wrapMode: Text.Wrap

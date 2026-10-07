@@ -1,8 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
-import Atlas.Ui
+import Telamon.Ui
 
-AtlasPage {
+TelamonPage {
     id: page
 
     required property var backend
@@ -20,17 +20,17 @@ AtlasPage {
         acceptText: qsTr("Close")
         showReject: false
 
-        AtlasLabel {
+        TelamonLabel {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: qsTr("Only this: the AtlasOS version, channel and previous version; the app's name, version and category (Plasma, KWin, Atlas app, other); the stack trace; the kernel; the GPU model and driver; uptime; the CPU model and how much RAM there is and is used; a random ID that changes every 30 days; the time; and the type of report.")
         }
-        AtlasLabel {
+        TelamonLabel {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: qsTr("Never: core dumps, your user name, the computer's name, MAC or IP addresses, serial numbers, installed apps, file contents, command lines or environment. Home folder paths are replaced with USER.")
         }
-        AtlasLabel {
+        TelamonLabel {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: qsTr("You always see the exact data before anything is sent, and you decide each time.")

@@ -198,7 +198,7 @@ fn combining(c: char) -> bool {
 
 /// Remote text made safe to show: control characters become spaces,
 /// invisible and direction-changing ones go, at most `max` characters
-/// (same rules as atlas_framework_flatpak's `clean_to`, which this crate
+/// (same rules as telamon_framework_flatpak's `clean_to`, which this crate
 /// cannot link: it would pull libflatpak into the tray).
 pub fn clean_to(s: &str, max: usize) -> String {
     clean_impl(s, max, false)
