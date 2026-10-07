@@ -1,6 +1,7 @@
 //! The panel icon: a StatusNotifierItem (what KStatusNotifierItem exported
 //! before, same Id, so Plasma keeps the user's tray settings for it), its
-//! menu over com.canonical.dbusmenu, and the tray's own small interface.
+//! menu over com.canonical.dbusmenu, and the tray's own small interface
+//! (`Reload`, `SetWorking`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -136,7 +137,7 @@ impl Item {
 
     fn scroll(&self, _delta: i32, _orientation: &str) {}
 
-    /// Sent by Plasma just before `Activate`: lets the window take focus.
+    /// Sent by Plasma just before `Activate`: lets Settings take focus.
     fn provide_xdg_activation_token(&self, token: String) {
         let _ = self.tx.send(Msg::Token(token));
     }
@@ -204,7 +205,7 @@ impl Menu {
                 "children-display".to_string(),
                 Value::from("submenu".to_string()),
             )]),
-            OPEN => item("Open Telamon Updater", crate::APP_ICON, true),
+            OPEN => item("Open Updates", crate::APP_ICON, true),
             CHECK => item("Check for Updates", "view-refresh", true),
             RESTART => item("Restart to Update", "system-reboot", self.restart),
             CANCEL => item("Cancel Scheduled Restart", "dialog-cancel", self.cancel),
@@ -352,7 +353,7 @@ impl Menu {
     ) -> zbus::Result<()>;
 }
 
-// ---- the window's way in ----
+// ---- the way in for Settings ----
 
 #[derive(Clone)]
 pub struct Control {
@@ -363,11 +364,41 @@ pub struct Control {
 
 #[interface(name = "net.eterneon.telamon.updater.Tray")]
 impl Control {
-    /// Read the settings again: the window changed one (telamon_updater_base::tray).
+    /// Read the settings again: Settings changed one (telamon_updater_base::tray).
     fn reload(&self) {
         if !self.pending.swap(true, Ordering::SeqCst) {
             let _ = self.tx.send(Msg::Reload);
         }
+    }
+
+    /// The caller says whether it is changing the system (an update, a
+    /// switch or a go back being staged, apps updating, firmware installing):
+    /// the screen-edge glow shows while anybody does. The claim is the
+    /// caller's connection's: `false` releases it, so does the connection
+    /// closing, and it runs out 3 hours after the last `true`. One boolean:
+    /// nothing else is accepted (the bus refuses any other signature).
+    fn set_working(
+        &self,
+        on: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let sender = header
+            .sender()
+            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("no sender".into()))?;
+        self.working(sender.as_str(), on)
+    }
+}
+
+impl Control {
+    fn working(&self, sender: &str, on: bool) -> zbus::fdo::Result<()> {
+        // A unique name (":1.23"), whatever the caller says: it is the
+        // key of the claim.
+        if !sender.starts_with(':') {
+            return Err(zbus::fdo::Error::InvalidArgs("not a unique name".into()));
+        }
+        self.tx
+            .send(Msg::SetWorking(sender.to_string(), on))
+            .map_err(|_| zbus::fdo::Error::Failed("the tray is ending".into()))
     }
 }
 
@@ -416,6 +447,23 @@ mod control_tests {
         pending.store(false, Ordering::SeqCst);
         control.reload();
         assert!(matches!(rx.try_recv(), Ok(Msg::Reload)));
+    }
+
+    #[test]
+    fn a_claim_reaches_the_tray_with_the_callers_unique_name() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let control = Control {
+            tx,
+            pending: Arc::new(AtomicBool::new(false)),
+        };
+        control.working(":1.42", true).unwrap();
+        control.working(":1.42", false).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Msg::SetWorking(s, true)) if s == ":1.42"));
+        assert!(matches!(rx.try_recv(), Ok(Msg::SetWorking(s, false)) if s == ":1.42"));
+        // never a well-known name or anything else as the key
+        assert!(control.working("org.example.Name", true).is_err());
+        assert!(control.working("", true).is_err());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

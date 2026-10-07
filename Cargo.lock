@@ -904,6 +904,7 @@ dependencies = [
  "serde",
  "telamon-framework-core",
  "telamon-framework-system",
+ "telamon-update-engine",
  "telamon-updater-base",
  "tempfile",
  "tokio",

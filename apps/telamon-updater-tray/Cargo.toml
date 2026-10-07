@@ -8,11 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 # Resident all session, so it stays small: no Qt, no libflatpak. App rounds
-# run in short-lived `telamon-updater --worker` processes; the window is a
-# separate process too.
+# run in short-lived `telamon-updater --worker` processes; the window is
+# Telamon Settings' and the screen-edge glow is `telamon-updater-glow`, both
+# separate processes.
 
 [dependencies]
 telamon-updater-base = { path = "../../crates/telamon-updater-base" }
+telamon-update-engine = { path = "../../crates/telamon-update-engine" }
 # Pinned to a release tag (Cargo.lock holds its commit: build with
 # --locked); move it forward on purpose, together with the other crates'.
 telamon-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
@@ -20,7 +22,7 @@ telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-fra
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "time", "sync", "net", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "net", "macros", "process"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]

@@ -1,14 +1,20 @@
 //! telamon-updater-tray: the part of Telamon Updater that runs all session. It
 //! keeps the schedule (status poll, app rounds, the scheduled restart),
-//! sends the notifications and shows the panel icon. No Qt and no
-//! libflatpak, so it stays a few MB: the window is `telamon-updater` (started
-//! on demand, gone when closed) and app rounds run in short-lived
+//! sends the notifications, shows the panel icon and the screen-edge glow
+//! while the system is being changed. No Qt and no libflatpak, so it stays a
+//! few MB: the window is Telamon Settings' Updates page (started by the
+//! tray's menu, icon and notifications), the glow is the program
+//! `telamon-updater-glow` and app rounds run in short-lived
 //! `telamon-updater --worker` processes.
 
+mod bus;
+mod glow;
 mod icons;
+mod open;
 mod sni;
 mod timefmt;
 mod watch;
+mod working;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -33,6 +39,7 @@ use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::message::Type as MsgType;
 use zbus::{MatchRule, MessageStream};
 
+use open::Open;
 use sni::{Item, Look, Menu};
 
 pub const APP_ICON: &str = crash::APP_ID;
@@ -51,6 +58,9 @@ const CRASH_SETTLE: Duration = Duration::from_millis(3000);
 /// After the change watch broke: set it up again.
 const WATCH_RETRY: Duration = Duration::from_secs(60);
 const WORKER_OUTPUT_LIMIT: u64 = 64 * 1024;
+
+/// The label of the notifications' button that opens Settings' Updates page.
+const OPEN_UPDATES: &str = "Open Updates";
 
 /// notifyrc key: the time of the last driver event announced.
 const DRIVER_SEEN: &str = "DriverEventTime";
@@ -156,6 +166,12 @@ pub enum Msg {
     /// A firmware listing ended: `None` when it failed (logged).
     Firmware(Option<FwFound>),
     Collected(Option<(String, String)>),
+    /// `SetWorking` from this caller (its unique name).
+    SetWorking(String, bool),
+    /// A caller that held a claim left the session bus.
+    SenderGone(String),
+    /// The system helper's `Progress` is (not) empty, under this name.
+    Helper(working::Helper, bool),
 }
 
 /// What a notification we sent is about, for its actions.
@@ -197,7 +213,7 @@ struct Tray {
     tokens: HashMap<u32, String>,
     /// The notification server's unique name: only its signals count.
     notify_owner: Option<String>,
-    /// From ProvideXdgActivationToken, for the next window opened.
+    /// From ProvideXdgActivationToken, for the next time Settings is opened.
     item_token: Option<String>,
     status_inflight: bool,
     status_again: bool,
@@ -222,6 +238,26 @@ struct Tray {
     collect_again: bool,
     look: Look,
     menu_revision: u32,
+    /// Who says the system is being changed, and what the glow does about it.
+    working: working::Machine,
+    glow: glow::Glow,
+    /// One task per caller that holds a claim: it ends when the caller leaves.
+    claim_watch: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// A glow that cannot be started is logged once.
+    glow_start_logged: bool,
+}
+
+/// What a notification's action opens in Telamon Settings, if it opens
+/// anything: its default action (a click on the notice) and the buttons
+/// that are only "open".
+fn action_target(kind: Kind, key: &str) -> Option<Open> {
+    match (kind, key) {
+        (Kind::Crash, "review" | notify::DEFAULT_ACTION) => Some(Open::CrashReview),
+        (Kind::Firmware, notify::DEFAULT_ACTION) => Some(Open::Firmware),
+        (Kind::Apps, notify::DEFAULT_ACTION) => Some(Open::Apps),
+        (_, notify::DEFAULT_ACTION) => Some(Open::Updates),
+        _ => None,
+    }
 }
 
 /// A sibling program in this one's directory (`/usr/bin`).
@@ -349,37 +385,22 @@ impl Tray {
         }
     }
 
-    // ---- the window ----
+    // ---- Telamon Settings ----
 
-    async fn window_running(&self) -> bool {
-        match zbus::fdo::DBusProxy::new(&self.conn).await {
-            Ok(p) => p
-                .name_has_owner(tray::WINDOW_BUS_NAME.try_into().expect("a valid bus name"))
-                .await
-                .unwrap_or(false),
-            Err(_) => false,
-        }
-    }
-
-    /// Opens the window (or raises it: the window is single-instance and
-    /// hands a second launch's arguments to the first).
-    fn open_window(&self, args: &[&str], token: Option<String>) {
-        let mut cmd = Command::new(sibling("telamon-updater"));
-        cmd.args(args).stdin(Stdio::null());
-        match token {
-            Some(t) => cmd.env("XDG_ACTIVATION_TOKEN", t),
-            None => cmd.env_remove("XDG_ACTIVATION_TOKEN"),
-        };
+    /// Opens Telamon Settings (or raises it: it is single-instance and hands
+    /// a second launch's arguments to the first).
+    fn open_settings(&self, what: Open, token: Option<String>) {
+        let mut cmd = open::command(&open::settings_bin(), what, token);
         match cmd.spawn() {
             Ok(mut child) => {
-                // Reaped when it exits; the window may stay open for hours.
+                // Reaped when it exits; Settings may stay open for hours.
                 if !spawn_thread("telamon-reap", move || {
                     let _ = child.wait();
                 }) {
-                    eprintln!("telamon-updater-tray: cannot wait for the window");
+                    eprintln!("telamon-updater-tray: cannot wait for Telamon Settings");
                 }
             }
-            Err(e) => eprintln!("telamon-updater-tray: cannot open the window: {e}"),
+            Err(e) => eprintln!("telamon-updater-tray: cannot open Telamon Settings: {e}"),
         }
     }
 
@@ -452,14 +473,11 @@ impl Tray {
     }
 
     async fn on_action(&mut self, kind: Kind, key: &str, token: Option<String>) {
+        if let Some(what) = action_target(kind, key) {
+            self.open_settings(what, token);
+            return;
+        }
         match (kind, key) {
-            (Kind::RestartFailed, notify::DEFAULT_ACTION) => {
-                self.open_window(&["--page", "updates"], token)
-            }
-            (Kind::Firmware, notify::DEFAULT_ACTION) => {
-                self.open_window(&["--page", "updates"], token)
-            }
-            (_, notify::DEFAULT_ACTION) => self.open_window(&[], token),
             // An old notice can outlive the update it was about.
             (Kind::Staged, "restart") | (Kind::RestartSoon, "restart-now")
                 if self.view.staged.present =>
@@ -468,7 +486,6 @@ impl Tray {
             }
             (Kind::RestartSoon, "cancel-restart") => self.cancel_restart().await,
             (Kind::Apps, "update-apps") => self.update_apps(),
-            (Kind::Crash, "review") => self.open_window(&["--page", "reports"], token),
             _ => {}
         }
     }
@@ -524,30 +541,28 @@ impl Tray {
         self.status_known = true;
         let staged = self.view.staged.clone();
         // Tell the user once per staged image, even across restarts of the
-        // tray. While the window is open, the user is looking at it.
+        // tray.
         if staged.present
             && !staged.digest.is_empty()
             && rc::get(rc::NOTIFIED, "StagedDigest").as_deref() != Some(staged.digest.as_str())
         {
             rc::set(rc::NOTIFIED, "StagedDigest", Some(&staged.digest));
-            if !self.window_running().await {
-                let n = Note {
-                    event: "updateStaged",
-                    title: "Update ready".into(),
-                    text: format!(
-                        "Telamon OS {} is downloaded. Restart to finish installing it.",
-                        notify::escape(&staged.version)
-                    ),
-                    icon: String::new(),
-                    actions: vec![
-                        ("restart", "Restart to Update".into()),
-                        (notify::DEFAULT_ACTION, "Open Telamon Updater".into()),
-                    ],
-                    urgency: None,
-                    persistent: false,
-                };
-                self.notify(Kind::Staged, n).await;
-            }
+            let n = Note {
+                event: "updateStaged",
+                title: "Update ready".into(),
+                text: format!(
+                    "Telamon OS {} is downloaded. Restart to finish installing it.",
+                    notify::escape(&staged.version)
+                ),
+                icon: String::new(),
+                actions: vec![
+                    ("restart", "Restart to Update".into()),
+                    (notify::DEFAULT_ACTION, OPEN_UPDATES.into()),
+                ],
+                urgency: None,
+                persistent: false,
+            };
+            self.notify(Kind::Staged, n).await;
         }
         if !staged.present && !self.view.restart_needed && self.scheduled_at != 0 {
             // The staged update is gone (rebooted or cleaned): the plan is moot.
@@ -623,7 +638,7 @@ impl Tray {
                 } else if !self.status_known || self.last_status_error.is_some() {
                     self.clear_schedule().await;
                     self.restart_problem(
-                        "The scheduled restart did not happen because Telamon Updater could not check the update. Open Telamon Updater to see what is waiting.",
+                        "The scheduled restart did not happen because Telamon Updater could not check the update. Open Updates to see what is waiting.",
                     )
                     .await;
                 } else {
@@ -687,7 +702,7 @@ impl Tray {
         self.update_item().await;
     }
 
-    /// Whether `t` is still the time saved in the settings. The window's
+    /// Whether `t` is still the time saved in the settings. Settings'
     /// Reload may never have arrived (it quit right after the change): the
     /// file decides, never only what this process remembers.
     async fn still_saved(&mut self, t: i64) -> bool {
@@ -706,7 +721,7 @@ impl Tray {
             title: "Restart did not happen".into(),
             text: notify::escape(text),
             icon: String::new(),
-            actions: vec![(notify::DEFAULT_ACTION, "Open Telamon Updater".into())],
+            actions: vec![(notify::DEFAULT_ACTION, OPEN_UPDATES.into())],
             urgency: Some(Urgency::High),
             persistent: false,
         };
@@ -766,7 +781,7 @@ impl Tray {
         self.update_item().await;
     }
 
-    // ---- settings the window changed ----
+    // ---- settings Settings changed ----
 
     async fn reload(&mut self) {
         let saved = rc::scheduled_at();
@@ -893,7 +908,7 @@ impl Tray {
             title,
             text,
             icon: String::new(),
-            actions: vec![(notify::DEFAULT_ACTION, "Open Telamon Updater".into())],
+            actions: vec![(notify::DEFAULT_ACTION, OPEN_UPDATES.into())],
             urgency: None,
             persistent: false,
         };
@@ -1005,9 +1020,8 @@ impl Tray {
         // worker died or said nothing.
         let notice = match out.and_then(|o| o.notice) {
             None if update_failed => Some(worker::Notice {
-                text:
-                    "Telamon Updater could not update the apps. Open Telamon Updater to try again."
-                        .into(),
+                text: "Telamon Updater could not update the apps. Open Updates to try again."
+                    .into(),
                 key: None,
                 can_update: false,
             }),
@@ -1015,11 +1029,11 @@ impl Tray {
         };
         if let Some(notice) = notice {
             let mut actions = Vec::new();
-            // An app asking for new permissions is reviewed in the window first.
+            // An app asking for new permissions is reviewed on the Updates page first.
             if notice.can_update {
                 actions.push(("update-apps", "Update Apps".to_string()));
             }
-            actions.push((notify::DEFAULT_ACTION, "Open Telamon Updater".to_string()));
+            actions.push((notify::DEFAULT_ACTION, OPEN_UPDATES.to_string()));
             let n = Note {
                 event: "appUpdatesReady",
                 title: if update_failed {
@@ -1084,12 +1098,7 @@ impl Tray {
         let Some(found) = found else { return };
         let waiting = !found.updates.is_empty();
         let saved = rc::get(rc::FIRMWARE, FW_NOTIFIED);
-        let window = if found.key.is_empty() || saved.as_deref() == Some(found.key.as_str()) {
-            false
-        } else {
-            self.window_running().await
-        };
-        match firmware_step(&found.key, saved.as_deref(), window) {
+        match firmware_step(&found.key, saved.as_deref()) {
             FwStep::Keep => {}
             FwStep::Clear => rc::set(rc::FIRMWARE, FW_NOTIFIED, None),
             FwStep::Notify => {
@@ -1098,7 +1107,7 @@ impl Tray {
                     title: "Firmware updates available".into(),
                     text: notify::escape(&firmware_text(&found.updates)),
                     icon: String::new(),
-                    actions: vec![(notify::DEFAULT_ACTION, "Open Telamon Updater".into())],
+                    actions: vec![(notify::DEFAULT_ACTION, OPEN_UPDATES.into())],
                     urgency: None,
                     persistent: false,
                 };
@@ -1126,8 +1135,8 @@ impl Tray {
     async fn on_menu(&mut self, id: i32) -> bool {
         let token = self.item_token.take();
         match id {
-            sni::OPEN => self.open_window(&[], token),
-            sni::CHECK => self.open_window(&["--check"], token),
+            sni::OPEN => self.open_settings(Open::Updates, token),
+            sni::CHECK => self.open_settings(Open::Check, token),
             // Hidden items can still be "clicked" over D-Bus: act only on
             // what the menu shows.
             sni::RESTART if self.view.staged.present => self.start_restart(None).await,
@@ -1138,13 +1147,84 @@ impl Tray {
         true
     }
 
+    // ---- the glow ----
+
+    async fn set_working(&mut self, sender: String, on: bool) {
+        let now = std::time::Instant::now();
+        match self.working.claim(&sender, on, now) {
+            Ok(a) => {
+                if on {
+                    if !self.claim_watch.contains_key(&sender) {
+                        let task =
+                            bus::watch_sender(self.conn.clone(), sender.clone(), self.tx.clone());
+                        self.claim_watch.insert(sender, task);
+                    }
+                } else if let Some(task) = self.claim_watch.remove(&sender) {
+                    task.abort();
+                }
+                self.apply(a);
+            }
+            Err(working::TooMany) => {
+                eprintln!(
+                    "telamon-updater-tray: too many programs claim to be changing the system"
+                );
+            }
+        }
+    }
+
+    /// Starts, ends or kills the glow as the machine decided.
+    fn apply(&mut self, action: Option<working::Action>) {
+        // Claims that ran out have no one to watch for.
+        self.claim_watch.retain(|s, task| {
+            let keep = self.working.has_claim(s);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        match action {
+            Some(working::Action::Start) => {
+                if let Err(e) = self.glow.spawn() {
+                    // Once: the next try is when the system was idle in between.
+                    if !std::mem::replace(&mut self.glow_start_logged, true) {
+                        eprintln!(
+                            "telamon-updater-tray: cannot start the update glow ({}): {e}",
+                            glow::glow_bin().display()
+                        );
+                    }
+                    self.working.start_failed();
+                }
+            }
+            Some(working::Action::Terminate) => self.glow.terminate(),
+            Some(working::Action::Kill) => self.glow.kill(),
+            None => {}
+        }
+    }
+
+    fn glow_exited(&mut self, status: std::io::Result<std::process::ExitStatus>) {
+        let action = self.working.exited(std::time::Instant::now());
+        // Ended when it was not asked to: the machine decides what follows.
+        if self.working.wanted() {
+            eprintln!(
+                "telamon-updater-tray: the update glow {}",
+                glow::describe(&status)
+            );
+        }
+        self.apply(action);
+    }
+
+    fn working_tick(&mut self) {
+        let a = self.working.tick(std::time::Instant::now());
+        self.apply(a);
+    }
+
     async fn handle(&mut self, m: Msg) -> bool {
         match m {
             Msg::Sched(ev) => self.on_event(ev).await,
             Msg::Status(res) => self.on_status(*res).await,
             Msg::Activate => {
                 let token = self.item_token.take();
-                self.open_window(&[], token);
+                self.open_settings(Open::Updates, token);
             }
             Msg::Token(t) => self.item_token = Some(t),
             Msg::Menu(id) => return self.on_menu(id).await,
@@ -1157,6 +1237,18 @@ impl Tray {
             Msg::WorkerDone(job, out) => self.worker_done(job, out).await,
             Msg::Firmware(found) => self.firmware_done(found).await,
             Msg::Collected(first) => self.collected(first).await,
+            Msg::SetWorking(sender, on) => self.set_working(sender, on).await,
+            Msg::SenderGone(sender) => {
+                self.claim_watch.remove(&sender);
+                let a = self.working.sender_gone(&sender, std::time::Instant::now());
+                self.apply(a);
+            }
+            Msg::Helper(which, set) => {
+                let a = self
+                    .working
+                    .helper_progress(which, set, std::time::Instant::now());
+                self.apply(a);
+            }
         }
         true
     }
@@ -1172,7 +1264,7 @@ pub struct FwFound {
 /// How long a scheduled restart waits when a firmware update is running.
 const FW_RESTART_RETRY_SECS: i64 = 60;
 
-/// Whether a firmware install holds the firmware lock (the window's own).
+/// Whether a firmware install holds the firmware lock (Settings' own).
 /// Without the lock to look at, nothing is known to run.
 fn firmware_flashing() -> bool {
     match lock::take(lock::FIRMWARE, false) {
@@ -1254,9 +1346,8 @@ enum FwStep {
 }
 
 /// `key` is the listed set's (empty for none), `saved` the one the user
-/// was told about. While the window is open the user is looking at the
-/// list: no notice, and the key stays, so the set is told about later.
-fn firmware_step(key: &str, saved: Option<&str>, window_open: bool) -> FwStep {
+/// was told about.
+fn firmware_step(key: &str, saved: Option<&str>) -> FwStep {
     if key.is_empty() {
         return if saved.is_some() {
             FwStep::Clear
@@ -1264,7 +1355,7 @@ fn firmware_step(key: &str, saved: Option<&str>, window_open: bool) -> FwStep {
             FwStep::Keep
         };
     }
-    if saved == Some(key) || window_open {
+    if saved == Some(key) {
         FwStep::Keep
     } else {
         FwStep::Notify
@@ -1293,7 +1384,7 @@ fn firmware_text(updates: &[FirmwareUpdate]) -> String {
     format!("Firmware updates are available for {list}.")
 }
 
-async fn next_message(s: &mut Option<MessageStream>) -> Option<zbus::Message> {
+pub(crate) async fn next_message(s: &mut Option<MessageStream>) -> Option<zbus::Message> {
     let Some(s) = s else {
         return std::future::pending().await;
     };
@@ -1416,6 +1507,10 @@ async fn run() -> Result<(), String> {
         collecting: false,
         collect_again: false,
         menu_revision: 1,
+        working: working::Machine::default(),
+        glow: glow::Glow::new(glow::glow_bin()),
+        claim_watch: HashMap::new(),
+        glow_start_logged: false,
     };
     let look = t.look();
     t.look = look.clone();
@@ -1442,7 +1537,7 @@ async fn run() -> Result<(), String> {
         )
         .await
         .map_err(|e| e.to_string())?;
-    // The window's way in, under the new name and the old one (this release).
+    // Settings' way in, under the new name and the old one (this release).
     let control = sni::Control {
         tx: tx.clone(),
         pending: reload_pending.clone(),
@@ -1455,8 +1550,8 @@ async fn run() -> Result<(), String> {
         .at(tray::LEGACY_PATH, sni::LegacyControl(control))
         .await
         .map_err(|e| e.to_string())?;
-    // One tray per session. Taken once the objects are served: the window's
-    // Reload, which may be what started us, must find them. Both names: a
+    // One tray per session. Taken once the objects are served: Settings'
+    // Reload or SetWorking, which may be what started us, must find them. Both names: a
     // program that still calls the old one reaches us, and a tray from before
     // the rename, which holds the old name only, keeps us out (two trays
     // would watch and notify twice; it goes at the next login).
@@ -1541,6 +1636,8 @@ async fn run() -> Result<(), String> {
     t.refresh_status();
     t.update_item().await;
 
+    // The system helper's progress: a glow with Settings closed.
+    let helper_task = bus::follow_helper(tx.clone());
     let mut ostree_at: Option<Instant> = None;
     let mut crash_at: Option<Instant> = None;
     let mut events_at: Option<Instant> = None;
@@ -1591,6 +1688,8 @@ async fn run() -> Result<(), String> {
                     t.watch_retry = Some(Instant::now() + WATCH_RETRY);
                 }
             }
+            status = t.glow.exited() => t.glow_exited(status),
+            _ = sleep_until(t.working.next_deadline().map(Instant::from_std)) => t.working_tick(),
             _ = sleep_until(ostree_at) => {
                 ostree_at = None;
                 t.refresh_status();
@@ -1649,6 +1748,11 @@ async fn run() -> Result<(), String> {
         }
     }
     t.schedule.stop();
+    helper_task.abort();
+    for (_, task) in t.claim_watch.drain() {
+        task.abort();
+    }
+    t.glow.shutdown().await;
     Ok(())
 }
 
@@ -1708,17 +1812,46 @@ mod tests {
 
     #[test]
     fn firmware_notified_once_per_set() {
-        // New set: tell. Same set: not again. Window open: neither a notice
-        // nor a key change, so it is told once the window is closed.
-        assert_eq!(firmware_step("a", None, false), FwStep::Notify);
-        assert_eq!(firmware_step("a", Some("a"), false), FwStep::Keep);
-        assert_eq!(firmware_step("b", Some("a"), false), FwStep::Notify);
-        assert_eq!(firmware_step("a", None, true), FwStep::Keep);
-        assert_eq!(firmware_step("b", Some("a"), true), FwStep::Keep);
+        // New set: tell. Same set: not again. (Whether Settings is open
+        // makes no difference: the Updater has no window to look at.)
+        assert_eq!(firmware_step("a", None), FwStep::Notify);
+        assert_eq!(firmware_step("a", Some("a")), FwStep::Keep);
+        assert_eq!(firmware_step("b", Some("a")), FwStep::Notify);
         // Nothing waits: forget, so the same set later is news again.
-        assert_eq!(firmware_step("", Some("a"), false), FwStep::Clear);
-        assert_eq!(firmware_step("", Some("a"), true), FwStep::Clear);
-        assert_eq!(firmware_step("", None, false), FwStep::Keep);
+        assert_eq!(firmware_step("", Some("a")), FwStep::Clear);
+        assert_eq!(firmware_step("", None), FwStep::Keep);
+    }
+
+    #[test]
+    fn notifications_open_the_page_that_has_what_they_are_about() {
+        use notify::DEFAULT_ACTION as D;
+        // the icon, the menu and the plain notices: the Updates page
+        for k in [
+            Kind::Staged,
+            Kind::RestartSoon,
+            Kind::RestartFailed,
+            Kind::Driver,
+        ] {
+            assert_eq!(action_target(k, D), Some(Open::Updates), "{k:?}");
+        }
+        assert_eq!(action_target(Kind::Firmware, D), Some(Open::Firmware));
+        assert_eq!(action_target(Kind::Apps, D), Some(Open::Apps));
+        assert_eq!(
+            action_target(Kind::Crash, "review"),
+            Some(Open::CrashReview)
+        );
+        assert_eq!(action_target(Kind::Crash, D), Some(Open::CrashReview));
+        // buttons that do something else, and anything unknown, open nothing
+        for (k, key) in [
+            (Kind::Staged, "restart"),
+            (Kind::RestartSoon, "restart-now"),
+            (Kind::RestartSoon, "cancel-restart"),
+            (Kind::Apps, "update-apps"),
+            (Kind::Firmware, "review"),
+            (Kind::Staged, "bogus"),
+        ] {
+            assert_eq!(action_target(k, key), None, "{k:?} {key}");
+        }
     }
 
     #[test]
