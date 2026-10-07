@@ -2,11 +2,14 @@
 Type=Application
 Name=Telamon Updater
 GenericName=System Updates
-Comment=Check for and install Telamon OS updates, go back, and switch channel
+Comment=Opens the Updates page of Telamon Settings
 Exec=telamon-updater
 Icon=net.eterneon.telamon.updater
 Terminal=false
-Categories=Qt;KDE;System;
+# Telamon Updater has no window: the Updates page is Telamon Settings'
+# (that is where the menu entry is). This launcher stays for pins and
+# launchers that still start the updater; it hands over to telamon-settings.
+NoDisplay=true
+Categories=System;
 Keywords=update;upgrade;system;rollback;channel;flatpak;
 StartupNotify=true
-X-DBUS-StartupType=Unique

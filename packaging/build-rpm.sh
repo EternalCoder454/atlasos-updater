@@ -4,9 +4,9 @@
 # The binary RPMs (no source, no debuginfo) are copied to <out dir>.
 # Cargo needs network access.
 # TELAMON_LOCAL_RPMS=<dir> installs the RPMs in <dir> first: the Telamon
-# framework's (telamon-ui), which the app builds against and no repository has.
+# framework's (telamon-ui), which the glow builds against and no repository has.
 # TELAMON_BUILD_CACHE=<dir> (optional, such as a podman cache mount) keeps cargo's
-# downloads, cargo's output and the CMake build in <dir>, and builds in a fixed
+# downloads, cargo's output and the glow's CMake build in <dir>, and builds in a fixed
 # place, so the next build only recompiles what changed.
 # The names these variables had until 0.3.0, ATLAS_LOCAL_RPMS and
 # ATLAS_BUILD_CACHE, still work when the new ones are not set.
@@ -58,7 +58,7 @@ main() {
         # scripts don't track system headers): start over when they change.
         # (rpm -q fails for a package --without app doesn't install.)
         toolchain=$(rustc -vV
-            rpm -q rust cargo gcc-c++ cmake corrosion qt6-qtbase-devel qt6-qtdeclarative-devel || true)
+            rpm -q rust cargo gcc-c++ cmake qt6-qtbase-devel qt6-qtdeclarative-devel || true)
         if [ "$(cat "$cache/toolchain" 2>/dev/null)" != "$toolchain" ]; then
             rm -rf "$cache/target" "$cache/cmake"
             printf '%s\n' "$toolchain" >"$cache/toolchain"
@@ -69,7 +69,7 @@ main() {
             rm -rf "$cache/cmake"
             printf '%s\n' "$version" >"$cache/version"
         fi
-        # The app's QML is compiled against the installed Telamon.Ui (its
+        # The glow's QML is compiled against the installed Telamon.Ui (its
         # qmltypes and .qml files), which CMake doesn't track: rebuild the
         # CMake side, not cargo's, whenever that changes. (--without app
         # builds don't install it: cat fails, which pipefail mustn't see.)
