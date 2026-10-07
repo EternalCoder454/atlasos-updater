@@ -715,8 +715,8 @@ default; when off nothing is collected or written):
   `enabled = false` (`crash::Settings`). **Endpoint:** a GlitchTip (Sentry
   compatible) DSN, `dsn = ""` in `/etc/atlas/crash-reporting.toml`, default
   shipped in `/usr/share/atlas/crash-reporting.toml`:
-  `https://atlasos@atlasos.eterneon.net/crash/1`, the AtlasOS relay (store
-  URL `https://atlasos.eterneon.net/crash/api/1/store/`). An empty `dsn` in
+  `https://atlasos@telamon.eterneon.net/crash/1`, the AtlasOS relay (store
+  URL `https://telamon.eterneon.net/crash/api/1/store/`). An empty `dsn` in
   `/etc` turns sending off; with no DSN `send()` fails with "no endpoint
   configured".
 - **Sources.** Atlas app Rust panics (`crash::install`, `record_fatal` for Qt
