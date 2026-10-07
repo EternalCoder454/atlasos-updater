@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=net.eterneon.telamon.SystemHelper
+Exec=/bin/false
+User=root
+SystemdService=telamon-system-helper.service

@@ -1,17 +1,20 @@
-# Atlas Updater and its system helper: design
+# Telamon Updater and its system helper: design
 
-AtlasOS is a Fedora Kinoite 44 bootc image (`ghcr.io/eternalcoder454/atlasos`).
+Telamon OS is a Fedora Kinoite 44 bootc image (`ghcr.io/eternalcoder454/atlasos`).
 This repo holds two things:
 
-- **atlas-update-engine**: the privileged system helper, its D-Bus client and
-  the progress parser (packaged as atlas-system-helper; it was atlas-core).
-- **atlas-updater**: the Atlas Updater app (`net.eterneon.atlas.updater`).
+- **telamon-update-engine**: the privileged system helper, its D-Bus client and
+  the progress parser (packaged as telamon-system-helper; it was
+  atlas-system-helper until 0.3.0, and atlas-core before that).
+- **telamon-updater**: the Telamon Updater app (`net.eterneon.telamon.updater`;
+  it was Atlas Updater, `net.eterneon.atlas.updater`, until 0.3.0).
 
-Telamon.Ui, the QML module every Atlas app shares, its Material Symbols fonts,
-the design rules for Atlas apps and the app template live in
-**atlas-framework** (`EternalCoder454/atlas-framework`, `~/Documents/Atlas
-Framework`). The app uses the installed Telamon.Ui (the telamon-ui package). The
-Rust code Atlas apps share is there too: telamon-framework-core (os-release),
+Telamon.Ui, the QML module every Telamon app shares, its Telamon Symbols
+fonts, the design rules for Telamon apps and the app template live in
+the **Telamon framework** (`EternalCoder454/atlas-framework` on GitHub until
+the repository is renamed, `~/Documents/Atlas Framework`). The app uses the
+installed Telamon.Ui (the telamon-ui package). The Rust code Telamon apps
+share is there too: telamon-framework-core (os-release),
 telamon-framework-system (bootc types, history, events, crash reports) and
 telamon-framework-flatpak (the libflatpak wrapper). Both crates here use them
 directly, pinned to one git rev.
@@ -24,45 +27,50 @@ Rust 1.98).
 
 ```
 Cargo.toml                    workspace: the crates and apps below
-crates/atlas-update-engine/   lib `atlas_update_engine` + bin `atlas-system-helper`
+crates/telamon-update-engine/   lib `telamon_update_engine` + bin `telamon-system-helper`
   src/helper_client.rs        zbus proxy for the system helper (what apps call)
   src/progress.rs             progress of a running Upgrade/SwitchChannel
   src/helper/                 helper logic: bootc runner, polkit, retry, layered
-  src/bin/atlas-system-helper.rs  the D-Bus system service
+  src/bin/telamon-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
-crates/atlas-updater-base/    what the window and the tray share: settings (rc), ops,
+crates/telamon-updater-base/    what the window and the tray share: settings (rc), ops,
                               schedule, view, restart, locks, worker result, the fwupd
                               client, and the notifier (telamon_framework_system::notify,
                               feature `notify`)
-apps/atlas-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
+apps/telamon-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
                               app jobs it runs for the tray (`--worker`, no Qt)
-apps/atlas-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
+apps/telamon-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
   data/                       its D-Bus session service file
   qml/                        Kirigami UI, compiled ahead of time (qmlcachegen)
   data/                       .desktop, autostart .desktop, .notifyrc, metainfo, icon
-packaging/atlas.spec          one spec, subpackages `atlas-system-helper` and `atlas-updater`
+packaging/telamon-updater.spec  one spec: the app is the main package `telamon-updater`,
+                              the helper the subpackage `telamon-system-helper`
 packaging/build-rpm.sh        builds the RPMs inside fedora:44: build-rpm.sh <out dir>
 ```
 
-## System helper (atlas-system-helper)
+## System helper (telamon-system-helper)
 
 bootc has no D-Bus API and needs root, so apps go through a small system
 service. It is D-Bus activated, so nothing runs at idle; it exits after 60 s
 without calls.
 
-- Binary: `/usr/libexec/atlas-system-helper`
-- Bus name: `net.eterneon.atlas.SystemHelper` (system bus)
-- Object: `/net/eterneon/atlas/SystemHelper`
-- Interface: `net.eterneon.atlas.SystemHelper1`
+- Binary: `/usr/libexec/telamon-system-helper`
+- Bus name: `net.eterneon.telamon.SystemHelper` (system bus)
+- Object: `/net/eterneon/telamon/SystemHelper`
+- Interface: `net.eterneon.telamon.SystemHelper1`
+
+The helper also answers under its **old identity** for this release (see
+"Old names" below): the same six methods and the `Progress` property, from the
+same process.
 
 | Method | Returns | Runs | polkit action | Default |
 |---|---|---|---|---|
-| `Status()` | `s` JSON | `bootc status --json` | `net.eterneon.atlas.system.status` | yes (any) |
-| `CheckForUpdate()` | `s` JSON | `bootc upgrade --check`, then `bootc status --json` | `net.eterneon.atlas.system.check` | yes (active) |
-| `Upgrade()` | `s` JSON | `bootc upgrade` (stages only; never `--apply`); refuses a downgrade (below) | `net.eterneon.atlas.system.upgrade` | auth_admin_keep; wheel: yes (rules.d) |
-| `Rollback()` | `s` JSON | `bootc rollback` | `net.eterneon.atlas.system.rollback` | auth_admin_keep |
-| `CancelRollback()` | `s` JSON | `bootc rollback` again, only while one is queued | `net.eterneon.atlas.system.rollback` | auth_admin_keep |
-| `SwitchChannel(s channel)` | `s` JSON | `bootc switch <ref with tag = channel>`; refuses a downgrade (below) | `net.eterneon.atlas.system.switch-channel` | auth_admin_keep |
+| `Status()` | `s` JSON | `bootc status --json` | `net.eterneon.telamon.system.status` | yes (any) |
+| `CheckForUpdate()` | `s` JSON | `bootc upgrade --check`, then `bootc status --json` | `net.eterneon.telamon.system.check` | yes (active) |
+| `Upgrade()` | `s` JSON | `bootc upgrade` (stages only; never `--apply`); refuses a downgrade (below) | `net.eterneon.telamon.system.upgrade` | auth_admin_keep; wheel: yes (rules.d) |
+| `Rollback()` | `s` JSON | `bootc rollback` | `net.eterneon.telamon.system.rollback` | auth_admin_keep |
+| `CancelRollback()` | `s` JSON | `bootc rollback` again, only while one is queued | `net.eterneon.telamon.system.rollback` | auth_admin_keep |
+| `SwitchChannel(s channel)` | `s` JSON | `bootc switch <ref with tag = channel>`; refuses a downgrade (below) | `net.eterneon.telamon.system.switch-channel` | auth_admin_keep |
 
 The returned JSON string is `bootc status --json` after the action.
 
@@ -72,14 +80,14 @@ Rules:
   is the booted image's own ref with only the tag replaced
   (`ghcr.io/eternalcoder454/atlasos:stable` → `:testing`; an `oci:` or
   local-registry ref in a test VM works the same way). The transport stays
-  the same. Anything else is rejected with `net.eterneon.atlas.Error.InvalidArgument`.
+  the same. Anything else is rejected with `net.eterneon.telamon.Error.InvalidArgument`.
 - bootc runs by absolute path (`/usr/bin/bootc`) with a fixed argv and a clean
   environment (no inherited PATH or LD_*).
 - polkit: `CheckAuthorization` on `org.freedesktop.PolicyKit1.Authority`, with
   subject `system-bus-name` (the caller's unique name) and the
-  AllowUserInteraction flag. A failed check gives `net.eterneon.atlas.Error.NotAuthorized`.
-- One operation at a time. A second call while one runs gets `net.eterneon.atlas.Error.Busy`.
-- bootc failures give `net.eterneon.atlas.Error.Failed`, with bootc's stderr
+  AllowUserInteraction flag. A failed check gives `net.eterneon.telamon.Error.NotAuthorized`.
+- One operation at a time. A second call while one runs gets `net.eterneon.telamon.Error.Busy`.
+- bootc failures give `net.eterneon.telamon.Error.Failed`, with bootc's stderr
   (last 4 KB) as the message.
 - Calls take minutes (`Upgrade` downloads the image), so clients use no method
   timeout.
@@ -89,7 +97,7 @@ Rules:
   `SwitchChannel` read the status once before they start and reuse it (a
   system with local rpm-ostree changes goes to rpm-ostree at once).
 - While the helper exits (idle or SIGTERM) it releases its bus name first;
-  calls that still reach it get `net.eterneon.atlas.Error.ShuttingDown`, and
+  calls that still reach it get `net.eterneon.telamon.Error.ShuttingDown`, and
   the client retries once. On SIGTERM a running bootc gets 40 s, then SIGTERM.
   No shutdown inhibitor: ostree pulls transactionally and stages atomically,
   so an interrupted bootc leaves the system unchanged (from ostree's design;
@@ -97,6 +105,11 @@ Rules:
 - bootc runs in its own process group with a timeout (2 min status/check,
   60 min upgrade/rollback/switch) and 4 MiB output caps.
 - D-Bus policy: anyone may call the interface (polkit decides). Only root may own the name.
+- Each identity has its own D-Bus policy file and activation file; both
+  activation files start `telamon-system-helper.service`, which takes both
+  names (`BusName=` is the new one). If another helper (one from before the
+  upgrade, still running) owns the old name, the new helper serves the new
+  name only until that one is gone.
 
 **Downgrades.** Signatures prove who built an image, not that it is the
 newest: a tag moved back to an older signed build (with its old security
@@ -116,7 +129,7 @@ image after) and, for a downgrade, remove it again with `rpm-ostree cleanup
 -p` and fail with `helper_client::DOWNGRADE_REFUSED` and the two versions
 (recorded as `update-failed` / `channel-switch-failed`). That also removes
 what was staged before (it was replaced), and the message says so. The
-background stager skips it the same way (AtlasOS side), asking the registry
+background stager skips it the same way (Telamon OS side), asking the registry
 with skopeo when the image ref points at no deployment (as after such a
 removal), and skipping the run if it can't. Go Back and a switch to the
 other channel remain the ways to an older build; an image of another
@@ -151,7 +164,7 @@ and saves the stager a second deployment to record it.
 
 **Progress.** The interface has one read-only property, `Progress` (`s`, not a
 method, so the six-method rule stands): while `Upgrade` or `SwitchChannel`
-runs, the JSON of `atlas_update_engine::progress::Progress`, otherwise `""`.
+runs, the JSON of `telamon_update_engine::progress::Progress`, otherwise `""`.
 
 ```json
 {"op":"upgrade","stage":"downloading","done":123,"total":300028591,"detail":""}
@@ -209,8 +222,8 @@ paths (`/usr/bin/rpm-ostree`, `/usr/bin/skopeo`), fixed argv, clean
 environment, the same timeouts and caps. `Rollback` is `rpm-ostree rollback`
 there too: a second `bootc rollback` doesn't undo the first on such a system.
 
-**History.** `atlas-system-helper record-boot` (CLI mode, run as root by
-`atlas-record-boot.service`, a oneshot at boot) appends one line to
+**History.** `telamon-system-helper record-boot` (CLI mode, run as root by
+`telamon-record-boot.service`, a oneshot at boot) appends one line to
 `/var/lib/atlas-core/history.jsonl` when the booted image digest differs from
 the last line:
 `{"version":"44.20261002","digest":"sha256:…","image":"ghcr.io/…:stable","timestamp":"<image build time>","first_booted":"<RFC3339 now>"}`.
@@ -251,13 +264,13 @@ signature; the containers policy covers both. The code is
   `stable` or `testing` (no digest). Anything else (other refs, local
   builds, other transports, no container image) does nothing and logs one
   line. If the staged deployment already is the target it does nothing.
-- **When.** `atlas-drivers.timer` (OnBootSec=2min, OnUnitActiveSec=6h,
+- **When.** `telamon-drivers.timer` (OnBootSec=2min, OnUnitActiveSec=6h,
   Persistent, RandomizedDelaySec=5min; enabled by the preset) starts
-  `atlas-drivers.service` (oneshot, after `network-online.target`, hardened
-  like the helper), which runs `atlas-system-helper drivers`. At the start of
+  `telamon-drivers.service` (oneshot, after `network-online.target`, hardened
+  like the helper), which runs `telamon-system-helper drivers`. At the start of
   the helper's `CheckForUpdate` the helper only plans (sysfs and the state
   file) and, if a switch is due, asks systemd (`StartUnit
-  atlas-drivers.service`, mode `replace`, not waited for) to run it: the pull
+  telamon-drivers.service`, mode `replace`, not waited for) to run it: the pull
   never runs inside the D-Bus call, and a failure never fails the check.
 - **Only a checked pull.** The step skips (logs why) unless the booted origin
   is signed (`containerPolicy`) or the containers policy demands a signature
@@ -265,8 +278,11 @@ signature; the containers policy covers both. The code is
 - **Switching** is the channel switch's code (`Op::SwitchDriver`, internal,
   not reachable over D-Bus): same `--enforce-container-sigpolicy` / signed
   origin rules, the pre-pull downgrade check, staged for the next boot, never
-  applied. A new operation lock file, `/run/atlas-system-helper.lock`
-  (root's, 0600, `O_NOFOLLOW`, `flock`), is shared by every helper process
+  applied. An operation lock file, `/run/telamon-system-helper.lock`, and
+  `/run/atlas-system-helper.lock`, its name until 0.3.0 (both root's, 0600,
+  `O_NOFOLLOW`, `flock`; both are taken, the new one first, and given up
+  together, so the OS image's scripts and a helper from before the upgrade,
+  which know only the old one, are kept out as well), is shared by every helper process
   and taken by every changing operation (upgrade, switch, rollback, driver
   switch), so a driver switch never overlaps another operation; if it is
   held, the driver step skips this round. The holder's name is written into
@@ -369,7 +385,7 @@ asks polkit itself, so our helper is not involved, and it is D-Bus activated.
 Firmware never installs by itself: only the user's press of "Install" in
 the window installs it.
 
-`crates/atlas-updater-base/src/fwupd.rs` (zbus only, used by the tray and
+`crates/telamon-updater-base/src/fwupd.rs` (zbus only, used by the tray and
 the window):
 
 ```rust
@@ -408,7 +424,7 @@ pub fn notice_key(updates: &[FirmwareUpdate]) -> String;  // hash of (device_id,
   text is (`clean`/`clean_to`; descriptions up to 2,000 characters).
 - `metadata_age`: from `GetRemotes`, the newest `ModificationTime` among
   enabled download remotes (`Type` 1); `None` when none was ever fetched.
-  The metadata is refreshed by `fwupd-refresh.timer` (the AtlasOS image
+  The metadata is refreshed by `fwupd-refresh.timer` (the Telamon OS image
   enables it); the app adds no poller of its own.
 - `install` first calls `SetFeatureFlags` with `detach-action`,
   `update-action`, `requests`, `requests-non-generic` and
@@ -424,7 +440,7 @@ pub fn notice_key(updates: &[FirmwareUpdate]) -> String;  // hash of (device_id,
   `NeedsUserAction`, `NothingToDo`, `NotSupported`, `AlreadyPending`,
   anything else as fwupd's message.
 
-The window (`apps/atlas-updater/src/firmware.rs`) downloads the file before
+The window (`apps/telamon-updater/src/firmware.rs`) downloads the file before
 `install`. The row carries the release's `trusted` flag and the checksum it
 picked; `installFirmware(deviceId, version, checksum)` reads the release
 again by `GetUpgrades` and refuses ("This update changed since it was
@@ -433,7 +449,7 @@ ones shown. A release that fwupd does not mark trusted (neither
 `trusted-payload` nor `trusted-metadata` in `TrustFlags`, bits 0 and 1;
 fwupd checks the payload again itself when it installs) is never
 downloaded or installed ("This update is not signed by a trusted source,
-so Atlas Updater won't install it."); the row says "Not signed by a trusted
+so Telamon Updater won't install it."); the row says "Not signed by a trusted
 source" and has no Install button. The first location that is an
 absolute `https://` URL, or a relative one joined to the remote's
 `FirmwareBaseUri` (which must be `https://`), is fetched with ureq (rustls,
@@ -451,11 +467,11 @@ from fwupd. What authenticates the firmware is fwupd checking the cabinet
 against its signed metadata. Download errors are logged by kind only (a
 redirect URL can carry a token). Remote hosts that are `localhost` or an
 IP address (loopback, private, link-local, unspecified, shared or unique-local) are refused. Debug
-builds with `ATLAS_UPDATER_FIRMWARE_FILES` set to a folder (the test rig,
+builds with `TELAMON_UPDATER_FIRMWARE_FILES` set to a folder (the test rig,
 `tools/fwupd-rig.sh`, whose local remote has no `FirmwareBaseUri`) read a
 relative location from that folder instead, by file name only (no `/` or
 `..`, symlinks refused). One firmware operation runs
-at a time (`$XDG_RUNTIME_DIR/atlas-updater-firmware.lock`); fwupd also runs
+at a time (`$XDG_RUNTIME_DIR/telamon-updater-firmware.lock`); fwupd also runs
 one at a time.
 
 Nothing restarts or quits while a firmware install runs: the window's
@@ -468,20 +484,20 @@ device's firmware version"; a reply already queued when fwupd leaves the
 bus still counts. The "Restart to finish installing firmware" row follows
 fwupd's listing (a device pending a reboot), not only this session's install.
 
-## Atlas Updater app
+## Telamon Updater app
 
-- Binary and package: `atlas-updater`. App ID: `net.eterneon.atlas.updater`.
-- Two programs. `atlas-updater-tray` autostarts at login and runs all
+- Binary and package: `telamon-updater`. App ID: `net.eterneon.telamon.updater`.
+- Two programs. `telamon-updater-tray` autostarts at login and runs all
   session: the panel icon, the schedule and the notifications. It has no Qt
   and loads no libflatpak, so it stays at a few MB (2.5 MB PSS idle in the
-  test rig, against 94 MB for the Qt tray it replaced). `atlas-updater` is
+  test rig, against 94 MB for the Qt tray it replaced). `telamon-updater` is
   the window: started when the user opens it (from the panel icon, a
   notification or the menu), it quits once the window is closed and no
   operation runs. A second launch raises the existing window (single
-  instance through D-Bus on the session bus, `net.eterneon.atlas.updater`),
+  instance through D-Bus on the session bus, `net.eterneon.telamon.updater`),
   passing on `--page <updates|settings|reports|sent>` and `--check`.
-  `atlas-updater --tray`, from older autostart entries, hands over to
-  `atlas-updater-tray`.
+  `telamon-updater --tray`, from older autostart entries, hands over to
+  `telamon-updater-tray`.
 - Update glow ("the system is being changed": an update, switch or rollback
   being staged, apps being updated, or a firmware install running; not checks): `ScreenGlow.qml` draws
   it around the edges of every screen, not inside the window: one continuous
@@ -491,7 +507,7 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   inner corner, so the glow turns each corner in a quarter circle) share one
   set of stops and meet edge to edge without antialiasing: no seam, gap or
   overlap. On Wayland each screen gets one full-screen, transparent layer-shell
-  overlay (`org.kde.layershell`, scope `atlas-updater-glow`, anchored to all
+  overlay (`org.kde.layershell`, scope `telamon-updater-glow`, anchored to all
   four edges, no keyboard, exclusion zone -1, and `WindowTransparentForInput`,
   which gives it an empty input region). On X11 a full-screen transparent
   window would black out the screen without a compositor, so there are four
@@ -510,26 +526,26 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   so it draws on the GPU wherever there is a hardware GL driver. Closing the
   window while it is on keeps the window's QML (hidden) alive until the
   operation ends, so the glow stays. Developer option, honoured in every
-  build because it only draws: `ATLAS_UPDATER_GLOW_DEMO=1 atlas-updater`
+  build because it only draws: `TELAMON_UPDATER_GLOW_DEMO=1 telamon-updater`
   turns the glow on while the window is open, with nothing running (closing
   the window ends it).
-- The tray owns the session bus name `net.eterneon.atlas.updater.Tray`
-  (one tray per session; a second one exits) with one method, `Reload()`
-  at `/net/eterneon/atlas/updater/Tray`: read `atlas-updaterrc` and the
+- The tray owns the session bus name `net.eterneon.telamon.updater.Tray`
+  (one tray per session; a second one exits) with one method, `Reload()`,
+  at `/net/eterneon/telamon/updater/Tray`: read `telamon-updaterrc` and the
   crash report setting again. The window calls it after changing the
   scheduled restart, background app updates or crash reports, and once at
   start; a D-Bus service file starts the tray if the user quit it. The
   window follows what the tray changes by watching the config folder.
 - Panel icon: a StatusNotifierItem (`org.kde.StatusNotifierItem-<pid>-1`,
-  Id `net.eterneon.atlas.updater`, as KStatusNotifierItem exported it) with
+  Id `net.eterneon.telamon.updater`, as KStatusNotifierItem exported it) with
   a com.canonical.dbusmenu menu: Open, Check for Updates, Restart to Update
   (while staged), Cancel Scheduled Restart (while one is set), Quit. It
   registers again whenever the StatusNotifierWatcher (Plasma) comes back.
   Icon names come from the icon theme in `kdeglobals` (Papirus's update
   icons when present, else ours), looked up once at start.
 - Notifications go straight to `org.freedesktop.Notifications`, through
-  atlas-framework's sender (`telamon_framework_system::notify`, a 10 s
-  timeout per call), with KNotification's hints (`desktop-entry`, `x-kde-appname=atlas-updater`,
+  the framework's sender (`telamon_framework_system::notify`, a 10 s
+  timeout per call), with KNotification's hints (`desktop-entry`, `x-kde-appname=telamon-updater`,
   `x-kde-eventId`), so Plasma's per-event settings in
   `telamon-updater.notifyrc` keep working; an event whose popup the user
   turned off there is not sent. Action signals count only from the server
@@ -541,7 +557,7 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   "Restart to Update" action, unless the window is open, and the panel
   icon goes to NeedsAttention.
 - The background download and staging is the OS's job
-  (`atlasos-update-stage.timer` in the AtlasOS image runs `bootc upgrade`, or
+  (`atlasos-update-stage.timer` in the Telamon OS image runs `bootc upgrade`, or
   `rpm-ostree upgrade` on a system with local rpm-ostree changes).
   The app only shows it.
 
@@ -557,7 +573,7 @@ Screens:
     reads the ref heads from `/ostree/repo/refs/heads/ostree/container/image`
     and picks that entry.
   - An update whose digest is in `/var/lib/atlasos/bad-image-digests`
-    (written by the AtlasOS image's greenboot red.d script when an image
+    (written by the Telamon OS image's greenboot red.d script when an image
     fails its boot health checks for the last time and is rolled back) is
     shown as a warning, "Version X didn't start properly", with "Download
     Anyway" behind a confirmation instead of "Download Update". The
@@ -567,18 +583,18 @@ Screens:
     `release_notes_url` with `{version}` filled in (default
     `https://api.github.com/repos/EternalCoder454/AtlasOS/releases/tags/{version}`,
     using the `.body` field). The URL can be overridden in
-    `/etc/atlas-updater/updater.toml`. If no release exists: "No release
+    `/etc/telamon-updater/updater.toml`. If no release exists: "No release
     notes for this version".
   - Flatpak app updates on the same screen, with an "Update Apps" button.
   - "Download app updates in the background" (Automatic Updates section),
-    **off by default**, saved per user in `atlas-updaterrc`
+    **off by default**, saved per user in `telamon-updaterrc`
     (`[AppUpdates] Automatic`). The tray looks for app updates 10 minutes
     after it starts, then every 6 hours, and a minute after the switch is
-    turned on, each time in a short-lived `atlas-updater --worker
+    turned on, each time in a short-lived `telamon-updater --worker
     apps-round` (no Qt; it prints its result as one JSON line, dies with
     the tray, and is ended after 6 hours). A notice counts as given once
     it is on screen: one that could not be shown comes again next round. One app operation runs at a time: the worker and the window
-    take `$XDG_RUNTIME_DIR/atlas-updater-apps.lock` (a round finding it
+    take `$XDG_RUNTIME_DIR/telamon-updater-apps.lock` (a round finding it
     taken tries again in 5 minutes). A round's error is kept in
     `[AppUpdates] RoundError` for the window, and `RoundAt` tells an open
     window to list the apps again. Nothing is looked up while NetworkManager
@@ -647,15 +663,15 @@ Screens:
     local state; no download). The tray lists firmware with each app round
     (10 minutes after start, then every 6 hours; it needs no network: the
     metadata is fwupd's) and sends `firmwareReady` ("Firmware updates are
-    available for <devices>", action "Open Atlas Updater" to the Updates
-    page) once per set: `[Firmware] Notified` in `atlas-updaterrc` holds
+    available for <devices>", action "Open Telamon Updater" to the Updates
+    page) once per set: `[Firmware] Notified` in `telamon-updaterrc` holds
     `notice_key`, cleared when nothing waits. No notice while the window
     is open.
   - "Restart to Update", and "Restart Later…" (pick a time today or
     tomorrow; the tray restarts then, with a notification 5 minutes
     before, and never without it: a warning that could not be shown, or
     an update it could not check, turns the restart into a "did not
-    happen" notice; before acting, the tray reads the saved time again; the setting persists in `~/.config/atlas-updaterrc`; can be
+    happen" notice; before acting, the tray reads the saved time again; the setting persists in `~/.config/telamon-updaterrc`; can be
     cancelled, from the window, the menu or the notification).
   - Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
     session bus, so apps can save first.
@@ -666,7 +682,7 @@ Screens:
   `SwitchChannel`, then offers the restart.
 - **History**: the versions this machine has booted, newest first, from
   `history.jsonl`; below them the app updates this user installed, by hand
-  or in the background, from `~/.local/state/atlas-updater/app-updates.jsonl`
+  or in the background, from `~/.local/state/telamon-updater/app-updates.jsonl`
   (one JSON object per line, cut to the newest 500 past 256 KB). Any app
   with home access can write there, so the file is opened without following
   symlinks and without blocking, must be a regular file of this user, and
@@ -678,7 +694,7 @@ Screens:
   writes a temporary file with a fresh name (`create_new`, 0600) and
   renames it.
 
-## AtlasOS side (the AtlasOS repo, not here)
+## Telamon OS side (the Telamon OS repo, not here)
 
 - Image tags: `stable` (weekly) and `testing` (daily), each version tagged
   `44.YYYYMMDD-N` (N: the build's number that day; older ones are plain
@@ -689,19 +705,70 @@ Screens:
   whose service tries a download that failed with a network error again
   after 15 minutes (`update-stage` exits 75; at most 4 tries in 3 hours),
   and
-  autostarts the tray (`atlas-updater-tray`; an image that still names
-  `atlas-updater --tray` works too),
+  autostarts the tray (`telamon-updater-tray`; an image that still names
+  `telamon-updater --tray` works too),
   keeps Discover's notifier out, and installs the RPMs built by
   `packaging/build-rpm.sh` during the container build.
 - Ships fwupd with `fwupd-refresh.timer` enabled (Fedora's desktop
   editions leave it off for GNOME Software and Discover), and without
   Discover's fwupd backend, so firmware has one updater.
 
+## Old names (0.3.0 only)
+
+Atlas Updater became Telamon Updater in 0.3.0 (version 0.2.0 was the last
+with the Atlas names). Apps and the OS image move one by one, so for this
+release everything another program may still use is served **under both
+names**, from the same code. **Remove the old names in the next release**
+(0.4.0): the code and files below are marked "legacy" or "old" where they are.
+
+| What | New | Still served (old) |
+|---|---|---|
+| RPMs | `telamon-updater`, `telamon-system-helper` | `Provides: atlas-updater`, `atlas-system-helper` (and `atlas-core`), `Obsoletes: ... < 0.3.0` |
+| Programs | `/usr/bin/telamon-updater`, `telamon-updater-tray`, `/usr/libexec/telamon-system-helper` | links `/usr/bin/atlas-updater`, `atlas-updater-tray`, `/usr/libexec/atlas-system-helper` (the image's autostart runs `atlas-updater-tray` / `atlas-updater --tray`; its greenboot scripts run `atlas-system-helper record-event ...`; the helper's command line does not depend on argv[0]) |
+| Helper, system bus | name `net.eterneon.telamon.SystemHelper`, object `/net/eterneon/telamon/SystemHelper`, interface `net.eterneon.telamon.SystemHelper1`, errors `net.eterneon.telamon.Error.*`, polkit `net.eterneon.telamon.system.{status,check,upgrade,rollback,switch-channel}` | the same six methods and `Progress` under `net.eterneon.atlas.SystemHelper` / `/net/eterneon/atlas/SystemHelper` / `net.eterneon.atlas.SystemHelper1`, errors `net.eterneon.atlas.Error.*`, polkit `net.eterneon.atlas.system.*` (same defaults; a call that arrives through the old name is checked against the old ids, so the image's polkit rules for them keep applying). Both D-Bus policy files and both activation files ship, and `rules.d/50-telamon-system.rules` covers both id sets (wheel: yes for check and upgrade) |
+| Helper's client | `helper_client` calls the new name | when the new name has no owner and no activation file (an older helper is installed), it calls the old name, decided once when it connects |
+| Tray, session bus | `net.eterneon.telamon.updater.Tray`, `/net/eterneon/telamon/updater/Tray`, `Reload` | the same under `net.eterneon.atlas.updater.Tray` (both names taken; both activation files ship). A tray from before the rename still running owns the old name: the new tray then exits at once, and the window's `Reload` falls back to the old name; the next login starts the new one. The status notifier Id is `net.eterneon.telamon.updater` |
+| systemd units | `telamon-system-helper.service`, `telamon-record-boot.service`, `telamon-drivers.service`, `telamon-drivers.timer`, preset `50-telamon-system-helper.preset` | the old unit names are symlinks to the new files in the same directory (aliases: units the image enabled under them keep working). The old preset file is the image's. The helper starts `telamon-drivers.service` |
+| Locks | `$XDG_RUNTIME_DIR/telamon-updater-{apps,crash,firmware}.lock`, `/run/telamon-system-helper.lock` | `atlas-updater-*.lock`, `/run/atlas-system-helper.lock`: **both** are taken, the new one first and then the old, and given up together, so old and new programs (the Store) exclude each other. The helper's lock still names its holder in both files |
+| Settings and state | `~/.config/telamon-updaterrc`, `~/.local/state/telamon-updater/` (`app-updates.jsonl`), `~/.cache/telamon-updater/`, `/etc/telamon-updater/updater.toml` | moved once (below); `/etc/atlas-updater/updater.toml` is read when the new file is absent |
+| Developer variables | `TELAMON_UPDATER_{FIXTURES,FIXTURE_HOLD,PAGE,GLOW_DEMO,FIRMWARE_FILES}` | `ATLAS_UPDATER_*` (the new name wins) |
+| `build-rpm.sh` | `TELAMON_LOCAL_RPMS`, `TELAMON_BUILD_CACHE` | `ATLAS_LOCAL_RPMS`, `ATLAS_BUILD_CACHE` |
+
+Not carried over, on purpose: the desktop files `net.eterneon.atlas.updater.desktop`
+and `...-tray.desktop` (the OS image's autostart or masking by those names is
+the image's to change), the icon names `net.eterneon.atlas.updater*`, the
+journal identifiers (`journalctl -t atlas-updater` finds only old entries; use
+`-t telamon-updater`), the single-instance name of the window
+(`net.eterneon.telamon.updater`: the window goes away), the old preset file and
+`/etc/dnf/protected.d/atlas.conf` (the old package's). The framework 2.0.0
+moves its own files itself (`telamon-updaterrc`'s `[Atlas]` group is still
+read, `~/.config/atlas-updater.notifyrc` choices, the crash-reporting settings
+and state): nothing here repeats that.
+
+**What stays as it is** because it is the image's or the registry's:
+`ghcr.io/eternalcoder454/atlasos` and the `EternalCoder454/AtlasOS` GitHub
+project, `/var/lib/atlasos/bad-image-digests`, `/var/lib/atlas-core`
+(this directory), `atlasos-update-stage.timer`, the `atlasos_version` field
+and the "Atlas app" category of crash reports, and the framework's repository
+name `atlas-framework` until it is renamed.
+
+**Moving the user's files** (`telamon_updater_base::migrate`, run by the tray,
+the window and the worker when they start, and by the first use of the
+settings or the history): `~/.config/atlas-updaterrc` to `telamon-updaterrc`,
+`~/.local/state/atlas-updater/` to `telamon-updater/` and
+`~/.cache/atlas-updater/` to `telamon-updater/`. Each is a **move** (one
+atomic `rename`, never replacing anything), one way: nothing is written to
+the old name afterwards. It happens only when the new name is not there; if
+both folders exist the old one is merged file by file (a file the new folder
+already has stays in the old one, nothing is overwritten or deleted). A link
+is never followed or moved, and only what belongs to the user is touched. A
+folder keeps its mode (0700 for the state folder).
+
 ## System app
 
-atlas-system-helper and atlas-updater are required parts of AtlasOS, not optional apps.
+telamon-system-helper and telamon-updater are required parts of Telamon OS, not optional apps.
 They come with the image in the read-only `/usr`, which Discover and dnf
-can't remove. `/etc/dnf/protected.d/atlas.conf` (shipped by atlas-system-helper)
+can't remove. `/etc/dnf/protected.d/telamon-updater.conf` (shipped by telamon-system-helper)
 protects them from dnf in mutable contexts, and the image build fails without
 them. Root can still `rpm-ostree override remove` them; that's the limit on
 an open system.
@@ -711,15 +778,17 @@ an open system.
 Crash reports are the only telemetry. `telamon_framework_system::crash` (opt-in, off by
 default; when off nothing is collected or written):
 
-- **Settings.** Per user, `~/.config/atlas/crash-reporting.toml`,
-  `enabled = false` (`crash::Settings`). **Endpoint:** a GlitchTip (Sentry
-  compatible) DSN, `dsn = ""` in `/etc/atlas/crash-reporting.toml`, default
-  shipped in `/usr/share/atlas/crash-reporting.toml`:
-  `https://atlasos@telamon.eterneon.net/crash/1`, the AtlasOS relay (store
+- **Settings.** Per user, `~/.config/telamon/crash-reporting.toml`,
+  `enabled = false` (`crash::Settings`; the framework still reads the
+  `atlas/` files of before 2.0.0 until the new ones exist). **Endpoint:** a
+  GlitchTip (Sentry compatible) DSN, `dsn = ""` in
+  `/etc/telamon/crash-reporting.toml`, default shipped in
+  `/usr/share/telamon/crash-reporting.toml`:
+  `https://atlasos@telamon.eterneon.net/crash/1`, the Telamon OS relay (store
   URL `https://telamon.eterneon.net/crash/api/1/store/`). An empty `dsn` in
   `/etc` turns sending off; with no DSN `send()` fails with "no endpoint
   configured".
-- **Sources.** Atlas app Rust panics (`crash::install`, `record_fatal` for Qt
+- **Sources.** Telamon app Rust panics (`crash::install`, `record_fatal` for Qt
   fatal messages); systemd-coredump entries of the user's own processes
   (`collect_coredumps`: journal fields COREDUMP_EXE/COMM/SIGNAL_NAME/
   TIMESTAMP/PACKAGE_NAME/PACKAGE_VERSION and the stack trace in MESSAGE only,
@@ -729,13 +798,13 @@ default; when off nothing is collected or written):
   (`update-staged`, `update-failed`, `rollback-requested`, `rollback-failed`,
   `channel-switched`, `channel-switch-failed`; `record-boot` adds
   `update-applied`, `rollback-applied`, `automatic-rollback`; greenboot
-  scripts call `atlas-system-helper record-event health-check-failed|
+  scripts call `telamon-system-helper record-event health-check-failed|
   health-check-passed`). Only failures become reports (`REPORTED_EVENTS`:
   `update-failed`, `rollback-failed`, `channel-switch-failed`,
   `automatic-rollback`, `health-check-failed`); other events are skipped
   and the marker moves past them. Pending reports of other helper events
   from older versions are deleted when pending reports are loaded.
-- **Collected, only this.** AtlasOS version, channel and previous version;
+- **Collected, only this.** Telamon OS version, channel and previous version;
   app name, version and category (Plasma, KWin, Atlas app, other); the stack
   trace; kernel; GPU model (pci.ids) and driver; uptime; CPU model, RAM total
   and use; a rotating random ID (new every 30 days; never `/etc/machine-id`),
@@ -766,7 +835,7 @@ default; when off nothing is collected or written):
   localhost, 127.0.0.1, ::1). `/usr/bin/curl` runs with a cleared
   environment, `-q`, `--proto`, `--noproxy '*'`, no redirects, and the body
   from a 0600 temp file.
-- **Consent.** Reports wait in `$XDG_STATE_HOME/atlas/crash-reports/pending/`.
+- **Consent.** Reports wait in `$XDG_STATE_HOME/telamon/crash-reports/pending/`.
   The app shows `Report::payload()` (the exact Sentry event JSON that `send()`
   posts to `{dsn host}/api/{project}/store/`) and only then calls `send()`,
   which moves the report to `sent/` (kept 90 days). The relay posts the

@@ -1,0 +1,2 @@
+enable telamon-record-boot.service
+enable telamon-drivers.timer

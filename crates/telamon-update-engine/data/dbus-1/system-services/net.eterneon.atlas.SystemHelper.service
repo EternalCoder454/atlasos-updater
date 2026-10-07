@@ -1,0 +1,7 @@
+# The name the helper had until 0.3.0: D-Bus starts the same unit for it, and
+# the helper takes both names (remove with the old identity).
+[D-BUS Service]
+Name=net.eterneon.atlas.SystemHelper
+Exec=/bin/false
+User=root
+SystemdService=telamon-system-helper.service

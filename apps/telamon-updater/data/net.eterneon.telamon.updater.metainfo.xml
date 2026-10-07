@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.updater</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Telamon Updater</name>
+  <summary>Update Telamon OS, go back to the previous version, and pick a channel</summary>
+  <description>
+    <p>Telamon Updater shows the Telamon OS version you are running, the update that is waiting for a restart, and the version you can go back to. It reads the release notes of the new version, updates Flatpak apps, and lets you restart now or at a time you choose.</p>
+    <p>It never collects usage data. If it crashes, it can save a report with system information and resource use, but nothing is sent unless you choose to send it.</p>
+  </description>
+  <launchable type="desktop-id">net.eterneon.telamon.updater.desktop</launchable>
+  <url type="homepage">https://github.com/EternalCoder454/AtlasOS</url>
+  <url type="vcs-browser">https://github.com/EternalCoder454/atlasos-updater</url>
+  <url type="bugtracker">https://github.com/EternalCoder454/atlasos-updater/issues</url>
+  <developer id="net.eterneon">
+    <name>Eterneon</name>
+  </developer>
+  <categories>
+    <category>System</category>
+  </categories>
+  <provides>
+    <binary>telamon-updater</binary>
+    <id>net.eterneon.atlas.updater.desktop</id>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.3.0" date="2026-10-07">
+      <description>
+        <p>Renamed to Telamon Updater (it was Atlas Updater). Your settings and history come along.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-10-01"/>
+  </releases>
+</component>

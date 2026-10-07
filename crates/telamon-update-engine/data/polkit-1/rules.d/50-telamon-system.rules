@@ -1,0 +1,16 @@
+// Administrators (wheel) in an active local session may check for and stage
+// updates without a password. Going back and switching channel still ask.
+// The ids under net.eterneon.atlas.system are the ones before 0.3.0, which a
+// call through the helper's old D-Bus name is checked against.
+polkit.addRule(function(action, subject) {
+    var ids = [
+        "net.eterneon.telamon.system.check",
+        "net.eterneon.telamon.system.upgrade",
+        "net.eterneon.atlas.system.check",
+        "net.eterneon.atlas.system.upgrade"
+    ];
+    if (ids.indexOf(action.id) >= 0 &&
+        subject.local && subject.active && subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

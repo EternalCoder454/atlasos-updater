@@ -1,0 +1,5 @@
+# The name the tray had until 0.3.0: D-Bus starts the same tray for it, which
+# takes both names (remove with the old name).
+[D-BUS Service]
+Name=net.eterneon.atlas.updater.Tray
+Exec=/usr/bin/telamon-updater-tray

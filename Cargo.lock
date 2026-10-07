@@ -49,76 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atlas-update-engine"
-version = "0.2.0"
-dependencies = [
- "libc",
- "rustix",
- "serde",
- "serde_json",
- "telamon-framework-system",
- "tempfile",
- "tokio",
- "zbus",
-]
-
-[[package]]
-name = "atlas-updater"
-version = "0.2.0"
-dependencies = [
- "atlas-update-engine",
- "atlas-updater-base",
- "cxx",
- "cxx-qt",
- "cxx-qt-build",
- "cxx-qt-lib",
- "libc",
- "pulldown-cmark",
- "ring",
- "serde",
- "serde_json",
- "telamon-framework-core",
- "telamon-framework-flatpak",
- "telamon-framework-system",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "ureq",
- "zbus",
-]
-
-[[package]]
-name = "atlas-updater-base"
-version = "0.2.0"
-dependencies = [
- "atlas-update-engine",
- "libc",
- "serde",
- "serde_json",
- "telamon-framework-core",
- "telamon-framework-system",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "zbus",
-]
-
-[[package]]
-name = "atlas-updater-tray"
-version = "0.2.0"
-dependencies = [
- "atlas-updater-base",
- "libc",
- "rustix",
- "serde",
- "telamon-framework-core",
- "telamon-framework-system",
- "tempfile",
- "tokio",
- "zbus",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1196,6 +1126,77 @@ dependencies = [
  "telamon-framework-core",
  "tokio",
  "unicode-normalization",
+ "zbus",
+]
+
+[[package]]
+name = "telamon-update-engine"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "telamon-framework-system",
+ "tempfile",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
+name = "telamon-updater"
+version = "0.3.0"
+dependencies = [
+ "cxx",
+ "cxx-qt",
+ "cxx-qt-build",
+ "cxx-qt-lib",
+ "libc",
+ "pulldown-cmark",
+ "ring",
+ "serde",
+ "serde_json",
+ "telamon-framework-core",
+ "telamon-framework-flatpak",
+ "telamon-framework-system",
+ "telamon-update-engine",
+ "telamon-updater-base",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "ureq",
+ "zbus",
+]
+
+[[package]]
+name = "telamon-updater-base"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "telamon-framework-core",
+ "telamon-framework-system",
+ "telamon-update-engine",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "zbus",
+]
+
+[[package]]
+name = "telamon-updater-tray"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "serde",
+ "telamon-framework-core",
+ "telamon-framework-system",
+ "telamon-updater-base",
+ "tempfile",
+ "tokio",
  "zbus",
 ]
 
