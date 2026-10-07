@@ -1,27 +1,31 @@
 # Telamon Updater and its system helper: design
 
 Telamon OS is a Fedora Kinoite 44 bootc image (`ghcr.io/eternalcoder454/atlasos`).
-This repo holds two things:
+This repo holds the background part of updating:
 
 - **telamon-update-engine**: the privileged system helper, its D-Bus client and
   the progress parser (packaged as telamon-system-helper; it was
   atlas-system-helper until 0.3.0, and atlas-core before that).
-- **telamon-updater**: the Telamon Updater app (`net.eterneon.telamon.updater`;
-  it was Atlas Updater, `net.eterneon.atlas.updater`, until 0.3.0).
+- **telamon-updater** (`net.eterneon.telamon.updater`; it was Atlas Updater,
+  `net.eterneon.atlas.updater`, until 0.3.0): the tray (panel icon,
+  schedule, notifications), the screen-edge glow program and the app update
+  worker. It has no window: the Updates page of **Telamon Settings** is what
+  Atlas Updater's window was. The code behind that page that has no Qt is
+  here, as `telamon-updater-core`, and Settings uses it.
 
 Telamon.Ui, the QML module every Telamon app shares, its Telamon Symbols
 fonts, the design rules for Telamon apps and the app template live in
 the **Telamon framework** (`EternalCoder454/atlas-framework` on GitHub until
-the repository is renamed, `~/Documents/Atlas Framework`). The app uses the
-installed Telamon.Ui (the telamon-ui package). The Rust code Telamon apps
-share is there too: telamon-framework-core (os-release),
+the repository is renamed, `~/Documents/Atlas Framework`). The glow program
+uses the installed Telamon.Ui (the telamon-ui package). The Rust code Telamon
+apps share is there too: telamon-framework-core (os-release),
 telamon-framework-system (bootc types, history, events, crash reports) and
-telamon-framework-flatpak (the libflatpak wrapper). Both crates here use them
-directly, pinned to one git rev.
+telamon-framework-flatpak (the libflatpak wrapper). The crates here use them
+directly, pinned to one git tag (v2.0.0; Cargo.lock holds the commit).
 
-Stack: Rust + Qt 6.11 + Kirigami 6.30 through CXX-Qt. Everything builds and runs
-on Fedora 44 (Qt 6.11.2, KF6 6.30, bootc 1.16.13, flatpak 1.18.2, polkit 127,
-Rust 1.98).
+Stack: Rust (zbus; the tray and the helper), and Qt 6.11 + Kirigami 6.30 for
+the glow program only. Everything builds and runs on Fedora 44 (Qt 6.11.2, KF6
+6.30, bootc 1.16.13, flatpak 1.18.2, polkit 127, Rust 1.98).
 
 ## Layout
 
@@ -33,19 +37,34 @@ crates/telamon-update-engine/   lib `telamon_update_engine` + bin `telamon-syste
   src/helper/                 helper logic: bootc runner, polkit, retry, layered
   src/bin/telamon-system-helper.rs  the D-Bus system service
   data/                       D-Bus, polkit, systemd files for the helper
-crates/telamon-updater-base/    what the window and the tray share: settings (rc), ops,
-                              schedule, view, restart, locks, worker result, the fwupd
-                              client, and the notifier (telamon_framework_system::notify,
-                              feature `notify`)
-apps/telamon-updater/           the window (CMake + Corrosion, or cxx-qt-build), and the
-                              app jobs it runs for the tray (`--worker`, no Qt)
+crates/telamon-updater-base/    what the tray and Settings' page share, no Qt, no
+                              libflatpak: settings (rc), ops, schedule, view, restart,
+                              locks, worker result, the fwupd client, the tray's
+                              names and client calls (`tray`), the notifier
+                              (telamon_framework_system::notify, feature `notify`)
+crates/telamon-updater-core/    the window's code without Qt, now behind Telamon
+                              Settings' Updates page: apps (Flatpak), apphistory,
+                              firmware, notes, changelog, power, and `worker` (the
+                              app update jobs); re-exports base, engine, config, errors,
+                              lock, notify, ops, rc, restart, schedule, tray, view
+  fixtures/, fixtures-states/ TELAMON_UPDATER_FIXTURES states (dev builds)
+apps/telamon-updater/           the `telamon-updater` command: `--worker` jobs for the
+                              tray, `--tray`, else hands over to `telamon-settings`;
+                              data/: .desktop (NoDisplay), autostart .desktop,
+                              .notifyrc, metainfo, icons
 apps/telamon-updater-tray/      the resident tray: plain Rust, no Qt (zbus, inotify)
-  data/                       its D-Bus session service file
-  qml/                        Kirigami UI, compiled ahead of time (qmlcachegen)
-  data/                       .desktop, autostart .desktop, .notifyrc, metainfo, icon
-packaging/telamon-updater.spec  one spec: the app is the main package `telamon-updater`,
-                              the helper the subpackage `telamon-system-helper`
+  src/open.rs                 what opens in Telamon Settings, and how it is started
+  src/working.rs              the glow's state machine (claims, helper progress)
+  src/glow.rs, src/bus.rs     the glow's process; what is followed on the buses
+  tests/tray_bus.rs           the real tray on private buses
+  data/                       its D-Bus session service files (new and old name)
+apps/telamon-updater-glow/    `telamon-updater-glow`: Qt/QML, draws the screen-edge
+                              glow only (the one CMake project)
+packaging/telamon-updater.spec  one spec: the main package `telamon-updater` (tray,
+                              forwarder, glow), the helper the subpackage
+                              `telamon-system-helper`
 packaging/build-rpm.sh        builds the RPMs inside fedora:44: build-rpm.sh <out dir>
+tools/fwupd-rig.sh            a private fwupd for the firmware tests (containers only)
 ```
 
 ## System helper (telamon-system-helper)
@@ -383,10 +402,10 @@ Firmware updates come from fwupd (2.1.8 on Fedora 44), over its system bus
 API `org.freedesktop.fwupd` at `/` (interface `org.freedesktop.fwupd`). fwupd
 asks polkit itself, so our helper is not involved, and it is D-Bus activated.
 Firmware never installs by itself: only the user's press of "Install" in
-the window installs it.
+Telamon Settings' Updates page installs it.
 
 `crates/telamon-updater-base/src/fwupd.rs` (zbus only, used by the tray and
-the window):
+Settings' Updates page):
 
 ```rust
 pub struct FirmwareUpdate { pub device_id: String, pub device: String /* Name */,
@@ -440,7 +459,8 @@ pub fn notice_key(updates: &[FirmwareUpdate]) -> String;  // hash of (device_id,
   `NeedsUserAction`, `NothingToDo`, `NotSupported`, `AlreadyPending`,
   anything else as fwupd's message.
 
-The window (`apps/telamon-updater/src/firmware.rs`) downloads the file before
+Settings' Updates page, through `crates/telamon-updater-core/src/firmware.rs`,
+downloads the file before
 `install`. The row carries the release's `trusted` flag and the checksum it
 picked; `installFirmware(deviceId, version, checksum)` reads the release
 again by `GetUpgrades` and refuses ("This update changed since it was
@@ -474,8 +494,8 @@ relative location from that folder instead, by file name only (no `/` or
 at a time (`$XDG_RUNTIME_DIR/telamon-updater-firmware.lock`); fwupd also runs
 one at a time.
 
-Nothing restarts or quits while a firmware install runs: the window's
-"Restart" buttons are off and `restartNow` refuses, the window stays until
+Nothing restarts or quits while a firmware install runs: the page's
+"Restart" buttons are off and `restartNow` refuses, Settings stays until
 the install ends after it is closed, and the tray postpones a scheduled
 restart (looking again each minute, saying so in its tooltip) and refuses
 "Restart Now" while the firmware lock is held. The wait for fwupd's
@@ -484,62 +504,145 @@ device's firmware version"; a reply already queued when fwupd leaves the
 bus still counts. The "Restart to finish installing firmware" row follows
 fwupd's listing (a device pending a reboot), not only this session's install.
 
-## Telamon Updater app
+## Telamon Updater (the background part)
 
-- Binary and package: `telamon-updater`. App ID: `net.eterneon.telamon.updater`.
-- Two programs. `telamon-updater-tray` autostarts at login and runs all
-  session: the panel icon, the schedule and the notifications. It has no Qt
-  and loads no libflatpak, so it stays at a few MB (2.5 MB PSS idle in the
-  test rig, against 94 MB for the Qt tray it replaced). `telamon-updater` is
-  the window: started when the user opens it (from the panel icon, a
-  notification or the menu), it quits once the window is closed and no
-  operation runs. A second launch raises the existing window (single
-  instance through D-Bus on the session bus, `net.eterneon.telamon.updater`),
-  passing on `--page <updates|settings|reports|sent>` and `--check`.
-  `telamon-updater --tray`, from older autostart entries, hands over to
-  `telamon-updater-tray`.
-- Update glow ("the system is being changed": an update, switch or rollback
-  being staged, apps being updated, or a firmware install running; not checks): `ScreenGlow.qml` draws
-  it around the edges of every screen, not inside the window: one continuous
-  frame per screen (`GlowFrame.qml`, 3 grid units deep, accent colour with a
-  lighter rim at the edge, fading inward). Four straight bands with linear
-  gradients and four corner squares with radial gradients (centred on the
-  inner corner, so the glow turns each corner in a quarter circle) share one
-  set of stops and meet edge to edge without antialiasing: no seam, gap or
-  overlap. On Wayland each screen gets one full-screen, transparent layer-shell
-  overlay (`org.kde.layershell`, scope `telamon-updater-glow`, anchored to all
-  four edges, no keyboard, exclusion zone -1, and `WindowTransparentForInput`,
+Telamon Updater has **no window**. The window (update, go back, switch channel,
+history, settings, crash report review) is the **Updates page of Telamon
+Settings** (`telamon-settings`, another repo; its `docs/DESIGN.md`, "Updates",
+describes the screens). What this repo keeps is what runs without any window:
+the tray, the automatic checks, the notifications, the system helper, the
+screen-edge glow and crash report collection. App ID
+`net.eterneon.telamon.updater`; the package is `telamon-updater` and requires
+`telamon-settings >= 0.3.0`.
+
+### Programs
+
+| Program | What |
+|---|---|
+| `/usr/bin/telamon-updater-tray` | autostarts at login, runs all session: panel icon, schedule, notifications, the glow's supervision. No Qt, no libflatpak: a few MB (2.5 MB PSS idle in the test rig, against 94 MB for the Qt tray it replaced) |
+| `/usr/bin/telamon-updater` (`apps/telamon-updater`) | a small Rust program, no Qt. `--worker <apps-round\|apps-update>`: an app round or update for the tray (libflatpak is loaded for the job only; one JSON line out, ended with the tray, and after 6 hours). `--tray`, from older autostart entries: `exec`s `telamon-updater-tray`. Anything else, as the window was started before (`--page updates\|settings\|reports\|sent`, `--check`, nothing): `exec`s `telamon-settings` on the page that has what that opened (`updates`; `updates check`; `privacy crash-review`), activation token left in the environment, so launchers, pins and scripts that start the updater land in Settings. `TELAMON_SETTINGS_BIN` replaces the program in a debug build only |
+| `/usr/libexec/telamon-updater-glow` (`apps/telamon-updater-glow`) | Qt/QML, no window of its own: draws the glow, nothing else. Started and ended by the tray. `--seconds <n>` ends it after n seconds (it ends itself after 6 hours anyway); `--version` and `--help` need no screen |
+| `/usr/libexec/telamon-system-helper` | the root helper (above) |
+
+The `net.eterneon.telamon.updater.desktop` launcher (`Exec=telamon-updater`) is
+`NoDisplay=true`: the menu entries are Settings'. It stays for pins and
+launchers. The Rust programs are plain cargo builds; the glow is the only CMake
+project. The names `atlas-updater` and `atlas-updater-tray` are links (below,
+"Old names").
+
+### Who opens what
+
+The tray starts `telamon-settings` (next to the tray's directory, else
+`/usr/bin/telamon-settings`; `TELAMON_SETTINGS_BIN` overrides it, for tests and
+developers) with the activation token Plasma sent before the click (none:
+none is passed on). Settings is single-instance and raises itself. The one
+mapping is `open::Open::args`:
+
+| From | Arguments |
+|---|---|
+| panel icon click (Activate), the menu's "Open Updates", a notice's default action (update ready, restart did not happen, driver changed, restart soon) | `updates` |
+| the menu's "Check for Updates" | `updates check` |
+| the crash report notice (its "Review" button and its default action) | `privacy crash-review` |
+| the firmware notice's default action | `updates firmware` |
+| the app updates notice's default action | `updates apps` |
+
+The notices' buttons that do something else (Restart to Update, Restart Now,
+Cancel Restart, Update Apps) act in the tray. Nothing detects whether
+Settings is open: there is no Updater window to look at, so no notice is held
+back for one.
+
+### The tray's session interface
+
+Session bus names `net.eterneon.telamon.updater.Tray` and (this release)
+`net.eterneon.atlas.updater.Tray`, one tray per session (a second one exits),
+object `/net/eterneon/telamon/updater/Tray` (`/net/eterneon/atlas/updater/Tray`
+for the old name). Interface `net.eterneon.telamon.updater.Tray`:
+
+- `Reload()`: read `telamon-updaterrc` and the crash report setting again.
+  Settings calls it after changing the scheduled restart, background app
+  updates or crash reports. Under the old name too.
+- `SetWorking(b on)`: the caller says the system is being changed (an update,
+  switch or go back being staged, apps updating, firmware installing) and
+  releases that with `false`. One boolean only: any other signature is
+  refused by the bus, and the key is the caller's unique name. **New name
+  only**; the old interface has `Reload` alone. Client: 
+  `telamon_updater_base::tray::call_set_working(&conn, on)` (call it on the
+  connection that stays open for the length of the work).
+
+A D-Bus service file for each name starts the tray when it is not running, so
+either call works after the user quit the tray.
+
+### The update glow
+
+"The system is being changed" shows the glow around the screen edges: an
+update, switch or go back being staged, apps being updated or a firmware
+install running; not checks. The tray decides (`working.rs`, a plain state
+machine with no I/O, unit tested) and supervises one `telamon-updater-glow`
+(`glow.rs`; `TELAMON_UPDATER_GLOW_BIN` replaces the program):
+
+- **Wanted** while any caller holds a claim, or the helper reports progress.
+  Claims are per caller (D-Bus unique name): `SetWorking(true)` makes or
+  renews it, `SetWorking(false)` drops it, the caller leaving the session bus
+  (a task per claim follows `NameOwnerChanged` for that name; a crashed
+  Settings leaves no glow) drops it, and a claim not renewed for 3 hours is
+  dropped. At most 16 callers hold claims at once.
+- **Helper progress** (system bus, `bus.rs`): the helper's `Progress`
+  property (above) while it is a non-empty string, under both identities
+  (`net.eterneon.telamon.SystemHelper1` at `/net/eterneon/telamon/SystemHelper`
+  and the legacy ones; either counts, and saying it twice changes nothing).
+  Followed with a match rule on `PropertiesChanged` for that path and
+  interface. The helper is D-Bus activated and exits when idle, so the tray
+  never calls its methods and makes no proxy for it: at start, if the name
+  has an owner, `Progress` is read once with `Properties.Get` sent to that
+  owner's unique name (which cannot start a service); a signal counts only
+  from the name's current owner (another program's signal with the same path
+  is ignored); the name leaving the bus means progress `""`. Without a system
+  bus the tray logs once and looks again every minute.
+- **Process.** Wanted and none running: start it (stdin and stdout null,
+  stderr to the journal, `PR_SET_PDEATHSIG` SIGTERM, reaped). No longer
+  wanted: SIGTERM, and SIGKILL 3 seconds later if it is still there. Wanted
+  again while the old one is ending: the new one starts after the old one
+  ended (never two). It ending while still wanted: started again after 1 s,
+  then 2 s, then 4 s (logged each time); a fourth end within a minute makes
+  the tray give up until nothing was wanted once. A glow that cannot be
+  started (missing program) is logged once. The tray ends it (SIGTERM, then
+  SIGKILL) when it quits, and it ends with the tray if the tray dies.
+- **What it draws** (`ScreenGlow.qml`): one continuous frame per screen
+  (`GlowFrame.qml`, 3 grid units deep, accent colour with a lighter rim at the
+  edge, fading inward). Four straight bands with linear gradients and four
+  corner squares with radial gradients (centred on the inner corner, so the
+  glow turns each corner in a quarter circle) share one set of stops and meet
+  edge to edge without antialiasing: no seam, gap or overlap. On Wayland each
+  screen gets one full-screen, transparent layer-shell overlay
+  (`org.kde.layershell`, scope `telamon-updater-glow`, anchored to all four
+  edges, no keyboard, exclusion zone -1, and `WindowTransparentForInput`,
   which gives it an empty input region). On X11 a full-screen transparent
   window would black out the screen without a compositor, so there are four
   frameless always-on-top tool windows per screen, one strip along each edge,
-  each showing its part of the same screen-sized frame. The windows exist
-  only while the glow is on (none and no timer otherwise) and are rebuilt
-  when screens come or go. Without the layer-shell module, or on another
-  platform, the glow falls back to `TelamonEdgeGlow` inside the window. It
-  breathes: one opacity per window, 0.6 to 1 over 2.4 s, set at 30 frames per
-  second from a timer, so the gradients are never redrawn. It is static (0.9)
-  under reduced motion (`TelamonStyle.reducedMotion`, or Plasma's animation
-  speed at instant) and with software rendering (`TelamonStyle.softwareRendering`:
-  the software scene graph or a software GL driver such as llvmpipe, and
-  `TELAMON_SOFTWARE_RENDERING=0/1` overrides it; with a Telamon.Ui older than
-  1.5.0, the scene graph API and `Shell::watchRenderer`'s GL renderer check). The app never asks for the software scene graph,
-  so it draws on the GPU wherever there is a hardware GL driver. Closing the
-  window while it is on keeps the window's QML (hidden) alive until the
-  operation ends, so the glow stays. Developer option, honoured in every
-  build because it only draws: `TELAMON_UPDATER_GLOW_DEMO=1 telamon-updater`
-  turns the glow on while the window is open, with nothing running (closing
-  the window ends it).
-- The tray owns the session bus name `net.eterneon.telamon.updater.Tray`
-  (one tray per session; a second one exits) with one method, `Reload()`,
-  at `/net/eterneon/telamon/updater/Tray`: read `telamon-updaterrc` and the
-  crash report setting again. The window calls it after changing the
-  scheduled restart, background app updates or crash reports, and once at
-  start; a D-Bus service file starts the tray if the user quit it. The
-  window follows what the tray changes by watching the config folder.
+  each showing its part of the same screen-sized frame. The windows are rebuilt
+  when screens come or go. On another platform, or without the layer-shell
+  module, nothing is drawn (the program says so on stderr). It breathes: one
+  opacity per window, 0.6 to 1 over 2.4 s, set at 30 frames per second from a
+  timer, so the gradients are never redrawn. It is static (0.9) under reduced
+  motion (`TelamonStyle.reducedMotion`, or Plasma's animation speed at instant)
+  and with software rendering (`TelamonStyle.softwareRendering`: the software
+  scene graph or a software GL driver such as llvmpipe;
+  `TELAMON_SOFTWARE_RENDERING=0/1` overrides it). The program never asks for
+  the software scene graph, so it draws on the GPU wherever there is a
+  hardware GL driver.
+
+Tests: `working.rs` (the machine), `open.rs` (the argv, with a fake
+`telamon-settings` at spawn level) and `apps/telamon-updater-tray/tests/tray_bus.rs`
+(the real tray on a private session bus and a private "system" bus, with a fake
+`telamon-settings` and glow and a fake helper serving `Progress`; needs
+`dbus-daemon`).
+
+### Panel icon, notifications, staged updates
+
 - Panel icon: a StatusNotifierItem (`org.kde.StatusNotifierItem-<pid>-1`,
   Id `net.eterneon.telamon.updater`, as KStatusNotifierItem exported it) with
-  a com.canonical.dbusmenu menu: Open, Check for Updates, Restart to Update
-  (while staged), Cancel Scheduled Restart (while one is set), Quit. It
+  a com.canonical.dbusmenu menu: Open Updates, Check for Updates, Restart to
+  Update (while staged), Cancel Scheduled Restart (while one is set), Quit. It
   registers again whenever the StatusNotifierWatcher (Plasma) comes back.
   Icon names come from the icon theme in `kdeglobals` (Papirus's update
   icons when present, else ours), looked up once at start.
@@ -554,145 +657,147 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   (bootc/ostree creates `/run/ostree/staged-deployment` when an update is
   staged), plus a fallback `Status()` call every 6 h. When something new is
   staged, the tray sends a notification (event `updateStaged`) with a
-  "Restart to Update" action, unless the window is open, and the panel
-  icon goes to NeedsAttention.
+  "Restart to Update" action once per staged image, and the panel icon goes
+  to NeedsAttention.
 - The background download and staging is the OS's job
   (`atlasos-update-stage.timer` in the Telamon OS image runs `bootc upgrade`, or
   `rpm-ostree upgrade` on a system with local rpm-ostree changes).
-  The app only shows it.
+  The tray only shows it.
+- The scheduled restart ("Restart Later…" on the Updates page: a time today or
+  tomorrow, saved in `~/.config/telamon-updaterrc`): the tray restarts then,
+  with a notification 5 minutes before, and never without it: a warning that
+  could not be shown, or an update it could not check, turns the restart into
+  a "did not happen" notice; before acting, the tray reads the saved time
+  again. It can be cancelled from Settings, the menu or the notification.
+  Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
+  session bus, so apps can save first. While a firmware install holds the
+  firmware lock the tray postpones it (see "Firmware (fwupd)").
 
-Screens:
-- **Updates**:
-  - Current, staged and rollback versions, each with its date (from
-    `status.booted/staged/rollback.image.{version,timestamp}`).
-  - A "Check for Updates" button (`CheckForUpdate`), and "Download Update"
-    (`Upgrade`) when an update is found but not staged. bootc records the
-    result as the `cachedUpdate` of the entry whose commit the image's ostree
-    ref points to (the image pulled last; after a rollback, the rollback
-    entry), so the booted entry's can be stale: `Status::available_update`
-    reads the ref heads from `/ostree/repo/refs/heads/ostree/container/image`
-    and picks that entry.
-  - An update whose digest is in `/var/lib/atlasos/bad-image-digests`
-    (written by the Telamon OS image's greenboot red.d script when an image
-    fails its boot health checks for the last time and is rolled back) is
-    shown as a warning, "Version X didn't start properly", with "Download
-    Anyway" behind a confirmation instead of "Download Update". The
-    background stager skips it too. The file is read next to the ref heads,
-    without root.
-  - Release notes of the new version as Markdown, from
-    `release_notes_url` with `{version}` filled in (default
-    `https://api.github.com/repos/EternalCoder454/AtlasOS/releases/tags/{version}`,
-    using the `.body` field). The URL can be overridden in
-    `/etc/telamon-updater/updater.toml`. If no release exists: "No release
-    notes for this version".
-  - Flatpak app updates on the same screen, with an "Update Apps" button.
-  - "Download app updates in the background" (Automatic Updates section),
-    **off by default**, saved per user in `telamon-updaterrc`
-    (`[AppUpdates] Automatic`). The tray looks for app updates 10 minutes
-    after it starts, then every 6 hours, and a minute after the switch is
-    turned on, each time in a short-lived `telamon-updater --worker
-    apps-round` (no Qt; it prints its result as one JSON line, dies with
-    the tray, and is ended after 6 hours). A notice counts as given once
-    it is on screen: one that could not be shown comes again next round. One app operation runs at a time: the worker and the window
-    take `$XDG_RUNTIME_DIR/telamon-updater-apps.lock` (a round finding it
-    taken tries again in 5 minutes). A round's error is kept in
-    `[AppUpdates] RoundError` for the window, and `RoundAt` tells an open
-    window to list the apps again. Nothing is looked up while NetworkManager
-    says the connection is metered or offline. Not knowing counts as
-    metered: NetworkManager there but silent or saying "unknown", installed
-    but not running at the moment, the system bus not answering, or the
-    8-second limit on the whole read. Only a system without NetworkManager
-    installed goes ahead (the download then says whether there is a
-    network). The battery is checked only before installing, not before
-    looking. Off: the waiting updates are checked the same way without
-    downloading or installing anything (`check_only`: each run stops before
-    it would start), as is every "Check for App Updates", so rows say what
-    an update asks for before the user presses "Update Apps"; then a
-    notification (`appUpdatesReady`, with "Update Apps" unless something
-    asks for new permissions or the check failed, whose error the page
-    shows) when updates wait, once per set
-    (`[AppUpdates] Notified` holds a hash of the set, cleared when nothing
-    waits). On: they install by themselves through `update` with both
-    options set, unless UPower says the battery is below 30% while unplugged
-    (then nothing is shown). A round that waited tries again in 30 minutes;
-    failed rounds back off: 30 minutes, 1, 2, 4, then every 6 hours, until
-    one succeeds. A failed run gets the notification too, and its error
-    shows on the Updates page until a later round works or the user acts.
-    A run that fails before it could check an app's permissions installs
-    nothing of it, and pressing "Update Apps" then installs it as any
-    manual update would: the user chose it. If the list can't be read again
-    after installing, what waited before less what was installed stands in. Apps
-    held back for new permissions get it without the "Update Apps" button,
-    naming what they ask for; their rows on the Updates page say "Asks for
-    new permissions: ..." (at most five, the weightiest first: the
-    home folder or all files and ways out of the sandbox such as
-    `org.freedesktop.Flatpak` or owning a bus name, then devices and
-    sockets, then the rest) until they are updated, so the
-    user sees it before pressing "Update Apps". Each notice is given once:
-    the key covers the waiting set, the held apps and whether it failed.
-    The held notes live in memory only: after a restart the next round
-    finds them again. A round, a check or an "Update Apps" press that comes
-    while another app operation runs waits for it; a queued "Update Apps"
-    is dropped when that round held apps back, so nothing asking for new
-    permissions installs before the user saw it. If the switch can't be
-    saved, it stays as it was and the page says why. "Update Apps" on a
-    notification, or one pressed while another app operation runs, leaves
-    out what asks for new permissions, as a background run does (the check
-    behind a notice may be hours old, or have failed); what it left out
-    gets a notice and its row's note. The page's "Update Apps" installs
-    everything listed, as the user sees the notes there, after checking
-    again: if anything now asks for more than its row showed (a version
-    published since), or the check fails, nothing installs and the rows
-    get the new notes for the user to press again. It asks for a password
-    as usual.
-  - **Firmware**, below the apps, only when fwupd is there: one row per
-    device with an update (device name, "1.2.2 → 1.2.4", the vendor, the
-    summary, and "Important" for urgency high or critical), with the
-    release notes behind "Details" and an "Install" button per row. Pending
-    installs say "Restart to finish installing" (or "Shut down to finish")
-    and failed ones say what fwupd said. With nothing to install: "Firmware
-    is up to date". With metadata older than 30 days, or never fetched, a
-    note says when the firmware list was last updated. "Install" asks
-    first ("Keep the computer plugged in, and don't unplug <device> or turn
-    the computer off until it finishes"; plus "It finishes when you
-    restart" for needs-reboot, "…shut down" for needs-shutdown), then shows
-    fwupd's progress and its requests ("Unplug the device and plug it back
-    in") in the page; the screen-edge glow is on meanwhile. After a needs-reboot
-    install it offers "Restart to Update" (the same restart as for the
-    system). "Check for Updates" lists the firmware again too (fwupd's
-    local state; no download). The tray lists firmware with each app round
-    (10 minutes after start, then every 6 hours; it needs no network: the
-    metadata is fwupd's) and sends `firmwareReady` ("Firmware updates are
-    available for <devices>", action "Open Telamon Updater" to the Updates
-    page) once per set: `[Firmware] Notified` in `telamon-updaterrc` holds
-    `notice_key`, cleared when nothing waits. No notice while the window
-    is open.
-  - "Restart to Update", and "Restart Later…" (pick a time today or
-    tomorrow; the tray restarts then, with a notification 5 minutes
-    before, and never without it: a warning that could not be shown, or
-    an update it could not check, turns the restart into a "did not
-    happen" notice; before acting, the tray reads the saved time again; the setting persists in `~/.config/telamon-updaterrc`; can be
-    cancelled, from the window, the menu or the notification).
-  - Restart goes through `org.kde.Shutdown /Shutdown logoutAndReboot` on the
-    session bus, so apps can save first.
-- **Go Back**: "Go Back to <rollback version> (<date>)" → `Rollback()`, then
-  offers the restart. When the rollback image is in `bad-image-digests`, the
-  page and the confirmation say it failed its startup checks here.
-- **Channel**: stable or testing (from the booted ref's tag) →
-  `SwitchChannel`, then offers the restart.
-- **History**: the versions this machine has booted, newest first, from
-  `history.jsonl`; below them the app updates this user installed, by hand
-  or in the background, from `~/.local/state/telamon-updater/app-updates.jsonl`
-  (one JSON object per line, cut to the newest 500 past 256 KB). Any app
-  with home access can write there, so the file is opened without following
-  symlinks and without blocking, must be a regular file of this user, and
-  only its last 512 KB are read; the folder is made 0700 (and tightened if
-  it is looser). Entries are cleaned like remote text when read, and lines
-  over 4 KB or dated in the future are dropped. Writers (the tray and the
-  window) take an exclusive `flock`, giving up after 5 seconds in all, and
-  check the file wasn't replaced meanwhile; the trim, under that lock,
-  writes a temporary file with a fresh name (`create_new`, 0600) and
-  renames it.
+### Background app updates (the worker)
+
+"Download app updates in the background" (Settings' Updates page), **off by
+default**, saved per user in `telamon-updaterrc` (`[AppUpdates] Automatic`).
+The tray looks for app updates 10 minutes after it starts, then every 6 hours,
+and a minute after the switch is turned on, each time in a short-lived
+`telamon-updater --worker apps-round` (no Qt; `telamon_updater_core::worker`).
+
+- A notice counts as given once it is on screen: one that could not be shown
+  comes again next round. One app operation runs at a time: the worker and
+  Settings take `$XDG_RUNTIME_DIR/telamon-updater-apps.lock` (a round finding
+  it taken tries again in 5 minutes). A round's error is kept in
+  `[AppUpdates] RoundError` for the page, and `RoundAt` tells an open page to
+  list the apps again. Nothing is looked up while NetworkManager says the
+  connection is metered or offline. Not knowing counts as metered:
+  NetworkManager there but silent or saying "unknown", installed but not
+  running at the moment, the system bus not answering, or the 8-second limit
+  on the whole read. Only a system without NetworkManager installed goes ahead
+  (the download then says whether there is a network). The battery is checked
+  only before installing, not before looking.
+- Off: the waiting updates are checked the same way without downloading or
+  installing anything (`check_only`: each run stops before it would start), as
+  is every "Check for App Updates", so rows say what an update asks for before
+  the user presses "Update Apps"; then a notification (`appUpdatesReady`, with
+  "Update Apps" unless something asks for new permissions or the check
+  failed, whose error the page shows) when updates wait, once per set
+  (`[AppUpdates] Notified` holds a hash of the set, cleared when nothing
+  waits). Its default action opens `updates apps`.
+- On: they install by themselves through `update` with both options set,
+  unless UPower says the battery is below 30% while unplugged (then nothing is
+  shown). A round that waited tries again in 30 minutes; failed rounds back
+  off: 30 minutes, 1, 2, 4, then every 6 hours, until one succeeds. A failed
+  run gets the notification too, and its error shows on the Updates page until
+  a later round works or the user acts. A run that fails before it could check
+  an app's permissions installs nothing of it, and pressing "Update Apps" then
+  installs it as any manual update would: the user chose it. If the list can't
+  be read again after installing, what waited before less what was installed
+  stands in.
+- Apps held back for new permissions get it without the "Update Apps" button,
+  naming what they ask for; their rows say "Asks for new permissions: ..." (at
+  most five, the weightiest first: the home folder or all files and ways out of
+  the sandbox such as `org.freedesktop.Flatpak` or owning a bus name, then
+  devices and sockets, then the rest) until they are updated, so the user sees
+  it before pressing "Update Apps". Each notice is given once: the key covers
+  the waiting set, the held apps and whether it failed. The held notes live in
+  memory only: after a restart the next round finds them again. A round, a
+  check or an "Update Apps" press that comes while another app operation runs
+  waits for it; a queued "Update Apps" is dropped when that round held apps
+  back, so nothing asking for new permissions installs before the user saw it.
+  "Update Apps" on a notification, or one pressed while another app operation
+  runs, leaves out what asks for new permissions, as a background run does (the
+  check behind a notice may be hours old, or have failed); what it left out
+  gets a notice and its row's note. The page's "Update Apps" installs
+  everything listed, as the user sees the notes there, after checking again: if
+  anything now asks for more than its row showed (a version published since),
+  or the check fails, nothing installs and the rows get the new notes for the
+  user to press again. It asks for a password as usual.
+
+### Firmware (listing)
+
+The tray lists firmware with each app round (10 minutes after start, then every
+6 hours; it needs no network: the metadata is fwupd's) and sends
+`firmwareReady` ("Firmware updates are available for <devices>", default
+action `updates firmware`) once per set: `[Firmware] Notified` in
+`telamon-updaterrc` holds `notice_key`, cleared when nothing waits. Installing
+(and everything else about firmware) is Settings' page; see "Firmware (fwupd)".
+
+### telamon-updater-core (what Settings uses)
+
+`crates/telamon-updater-core` is the Qt-free code the old window had, moved
+as it was; Telamon Settings' Updates page wraps it (its backend is written
+against this crate) and `telamon-updater --worker` runs `worker`:
+
+| Module | What |
+|---|---|
+| `apps` | Flatpak updates for the page and the worker: listing, permission notes, `update` with options, check-only |
+| `apphistory` | the app updates this user installed, by hand or in the background, in `~/.local/state/telamon-updater/app-updates.jsonl` (one JSON object per line, cut to the newest 500 past 256 KB). Any app with home access can write there, so the file is opened without following symlinks and without blocking, must be a regular file of this user, and only its last 512 KB are read; the folder is made 0700 (and tightened if it is looser). Entries are cleaned like remote text when read, and lines over 4 KB or dated in the future are dropped. Writers (the worker and Settings) take an exclusive `flock`, giving up after 5 seconds in all, and check the file wasn't replaced meanwhile; the trim, under that lock, writes a temporary file with a fresh name (`create_new`, 0600) and renames it |
+| `notes`, `changelog` | release notes of the new version as Markdown from `release_notes_url` with `{version}` filled in (default `https://api.github.com/repos/EternalCoder454/AtlasOS/releases/tags/{version}`, using the `.body` field; overridable in `/etc/telamon-updater/updater.toml`; none: "No release notes for this version"), rendered from an allow-list, and the changelog page's data |
+| `firmware` | the firmware download and its checks (see "Firmware (fwupd)") |
+| `power` | UPower battery and NetworkManager metered checks |
+| `worker` | `run(job)`: the app update worker |
+| re-exports | `base`, `engine`, `config`, `errors`, `lock`, `notify`, `ops`, `rc`, `restart`, `schedule`, `tray`, `view`: the crates below under one path |
+
+`telamon-updater-base` (no Qt, no libflatpak; the tray links it) holds the
+settings file (`rc`), `ops` (the helper's operations), `schedule`, `view` (a
+status as what a page shows), `restart`, `lock`, the fwupd client, the tray's
+names with `call_set_working` and `call_reload`, the crash report collection
+helper and the file migration. The update a page offers is
+`bootc::Status::available_update` (telamon-framework-system): bootc records
+the result as the `cachedUpdate` of the entry whose commit the image's ostree
+ref points to (the image pulled last; after a rollback, the rollback entry),
+so the booted entry's can be stale; it reads the ref heads from
+`/ostree/repo/refs/heads/ostree/container/image` and picks that entry. An
+update whose digest is in `/var/lib/atlasos/bad-image-digests` (written by the
+Telamon OS image's greenboot red.d script when an image fails its boot health
+checks for the last time and is rolled back) is shown as "Version X didn't
+start properly", with "Download Anyway" behind a confirmation, and the
+background stager skips it too; the file is read next to the ref heads,
+without root.
+
+Developer options (debug builds, or the `fixtures` feature):
+`TELAMON_UPDATER_FIXTURES=<dir>` makes the code read a made-up state from
+`<dir>` instead of calling the helper, Flatpak and so on; the states are
+`crates/telamon-updater-core/fixtures-states/<name>` (`up-to-date`,
+`update-available`, `scheduled`, `installing`, `error`,
+`available-is-bad`, `available-is-rollback`, `rollback-queued`) with the
+shared files in `crates/telamon-updater-core/fixtures`;
+`TELAMON_UPDATER_FIXTURE_HOLD=<op>`, `TELAMON_UPDATER_FIRMWARE_FILES=<dir>`
+(see "Firmware (fwupd)"). Settings reads them through the core crate.
+
+### Crash reports
+
+The tray collects crash reports (when the user turned them on): coredumps of
+the user's own processes, update and rollback events, panics saved by Telamon
+apps. A notice (`crashReport`, "Review") opens `privacy crash-review`;
+reviewing and sending is Settings' (Privacy). See "Privacy and crash reports".
+
+### Where the screens went
+
+Updates (versions, check, download, release notes, apps, firmware, restart and
+"Restart Later…"), Go Back, Channel, History and the crash report screens are
+Telamon Settings'. What they call here: the system helper (`ops`,
+`HelperClient`), `telamon-updater-core`, and the tray's `Reload` and
+`SetWorking`. A firmware install, an update staged by the page, a go back and
+a switch say `SetWorking(true)` for as long as they run, and `false` after.
 
 ## Telamon OS side (the Telamon OS repo, not here)
 
@@ -727,11 +832,11 @@ names**, from the same code. **Remove the old names in the next release**
 | Programs | `/usr/bin/telamon-updater`, `telamon-updater-tray`, `/usr/libexec/telamon-system-helper` | links `/usr/bin/atlas-updater`, `atlas-updater-tray`, `/usr/libexec/atlas-system-helper` (the image's autostart runs `atlas-updater-tray` / `atlas-updater --tray`; its greenboot scripts run `atlas-system-helper record-event ...`; the helper's command line does not depend on argv[0]) |
 | Helper, system bus | name `net.eterneon.telamon.SystemHelper`, object `/net/eterneon/telamon/SystemHelper`, interface `net.eterneon.telamon.SystemHelper1`, errors `net.eterneon.telamon.Error.*`, polkit `net.eterneon.telamon.system.{status,check,upgrade,rollback,switch-channel}` | the same six methods and `Progress` under `net.eterneon.atlas.SystemHelper` / `/net/eterneon/atlas/SystemHelper` / `net.eterneon.atlas.SystemHelper1`, errors `net.eterneon.atlas.Error.*`, polkit `net.eterneon.atlas.system.*` (same defaults; a call that arrives through the old name is checked against the old ids, so the image's polkit rules for them keep applying). Both D-Bus policy files and both activation files ship, and `rules.d/50-telamon-system.rules` covers both id sets (wheel: yes for check and upgrade) |
 | Helper's client | `helper_client` calls the new name | when the new name has no owner and no activation file (an older helper is installed), it calls the old name, decided once when it connects |
-| Tray, session bus | `net.eterneon.telamon.updater.Tray`, `/net/eterneon/telamon/updater/Tray`, `Reload` | the same under `net.eterneon.atlas.updater.Tray` (both names taken; both activation files ship). A tray from before the rename still running owns the old name: the new tray then exits at once, and the window's `Reload` falls back to the old name; the next login starts the new one. The status notifier Id is `net.eterneon.telamon.updater` |
+| Tray, session bus | `net.eterneon.telamon.updater.Tray`, `/net/eterneon/telamon/updater/Tray`, `Reload` and `SetWorking` | `Reload` only, under `net.eterneon.atlas.updater.Tray` (both names taken; both activation files ship). A tray from before the rename still running owns the old name: the new tray then exits at once, and Settings' `Reload` falls back to the old name (`SetWorking` is new-name only: an old tray has no glow program); the next login starts the new one. The status notifier Id is `net.eterneon.telamon.updater` |
 | systemd units | `telamon-system-helper.service`, `telamon-record-boot.service`, `telamon-drivers.service`, `telamon-drivers.timer`, preset `50-telamon-system-helper.preset` | the old unit names are symlinks to the new files in the same directory (aliases: units the image enabled under them keep working). The old preset file is the image's. The helper starts `telamon-drivers.service` |
 | Locks | `$XDG_RUNTIME_DIR/telamon-updater-{apps,crash,firmware}.lock`, `/run/telamon-system-helper.lock` | `atlas-updater-*.lock`, `/run/atlas-system-helper.lock`: **both** are taken, the new one first and then the old, and given up together, so old and new programs (the Store) exclude each other. The helper's lock still names its holder in both files |
 | Settings and state | `~/.config/telamon-updaterrc`, `~/.local/state/telamon-updater/` (`app-updates.jsonl`), `~/.cache/telamon-updater/`, `/etc/telamon-updater/updater.toml` | moved once (below); `/etc/atlas-updater/updater.toml` is read when the new file is absent |
-| Developer variables | `TELAMON_UPDATER_{FIXTURES,FIXTURE_HOLD,PAGE,GLOW_DEMO,FIRMWARE_FILES}` | `ATLAS_UPDATER_*` (the new name wins) |
+| Developer variables | `TELAMON_UPDATER_{FIXTURES,FIXTURE_HOLD,FIRMWARE_FILES}` (and the new `TELAMON_UPDATER_GLOW_BIN`, `TELAMON_SETTINGS_BIN`) | `ATLAS_UPDATER_*` (the new name wins; `ATLAS_UPDATER_PAGE` and `_GLOW_DEMO` went with the window) |
 | `build-rpm.sh` | `TELAMON_LOCAL_RPMS`, `TELAMON_BUILD_CACHE` | `ATLAS_LOCAL_RPMS`, `ATLAS_BUILD_CACHE` |
 
 Not carried over, on purpose: the desktop files `net.eterneon.atlas.updater.desktop`
@@ -739,7 +844,7 @@ and `...-tray.desktop` (the OS image's autostart or masking by those names is
 the image's to change), the icon names `net.eterneon.atlas.updater*`, the
 journal identifiers (`journalctl -t atlas-updater` finds only old entries; use
 `-t telamon-updater`), the single-instance name of the window
-(`net.eterneon.telamon.updater`: the window goes away), the old preset file and
+(`net.eterneon.telamon.updater`: the window went to Settings), the old preset file and
 `/etc/dnf/protected.d/atlas.conf` (the old package's). The framework 2.0.0
 moves its own files itself (`telamon-updaterrc`'s `[Atlas]` group is still
 read, `~/.config/atlas-updater.notifyrc` choices, the crash-reporting settings
@@ -753,7 +858,7 @@ and the "Atlas app" category of crash reports, and the framework's repository
 name `atlas-framework` until it is renamed.
 
 **Moving the user's files** (`telamon_updater_base::migrate`, run by the tray,
-the window and the worker when they start, and by the first use of the
+the worker and Settings when they start, and by the first use of the
 settings or the history): `~/.config/atlas-updaterrc` to `telamon-updaterrc`,
 `~/.local/state/atlas-updater/` to `telamon-updater/` and
 `~/.cache/atlas-updater/` to `telamon-updater/`. Each is a **move** (one
