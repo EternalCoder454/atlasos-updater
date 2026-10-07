@@ -6,20 +6,23 @@ import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
 // The "the system is being changed" glow, drawn around the edges of every
-// screen (not inside one window), as four thin transparent strips per screen.
-// Same meaning and API as AtlasEdgeGlow; to be replaced by it in Atlas.Ui
-// 1.5.0 (AtlasScreenGlow), when this file goes.
+// screen (not inside one window): one continuous frame per screen
+// (GlowFrame), its corners turned in quarter circles. Same meaning and API as
+// AtlasEdgeGlow; to be replaced by it in Atlas.Ui (AtlasScreenGlow), when
+// this file goes.
 //
-//   Wayland: layer-shell overlays (GlowStripLayer, needs layer-shell-qt).
-//   X11:     frameless, always-on-top tool windows.
+//   Wayland: one full-screen layer-shell overlay per screen (GlowLayer, needs
+//            layer-shell-qt).
+//   X11:     four frameless, always-on-top tool windows per screen, one strip
+//            along each edge, each showing its part of the same frame.
 //   Else, or without the layer-shell module: `usable` is false and the caller
 //   shows the in-window AtlasEdgeGlow instead.
 //
-// While `active` is false there are no windows and no timer. The strips take
-// no input and are hidden from screen readers. The glow pulses slowly (2.4 s)
-// at 30 frames per second, and is static under reduced motion, with
-// `animated: false`, and with software rendering (where a pulse across
-// several screens would cost real CPU).
+// While `active` is false there are no windows and no timer. The windows take
+// no input and are hidden from screen readers. The glow breathes (its
+// opacity, 0.6 to 1, over 2.4 s) at 30 frames per second, and is static (0.9)
+// under reduced motion, with `animated: false`, and with software rendering
+// (where repainting whole screens would cost real CPU).
 Item {
     id: root
 
@@ -38,17 +41,18 @@ Item {
     // must show its in-window glow instead.
     readonly property bool usable: onWayland ? layerLoader.status === Loader.Ready : onX11
 
-    // Internal, read by the strips.
+    // Internal, read by the windows.
     readonly property real gridUnit: Kirigami.Units.gridUnit
     readonly property int extraFlags: onX11 ? (Qt.Tool | Qt.WindowStaysOnTopHint) : 0
     readonly property real level: _level
+    readonly property var screens: Qt.application.screens
     readonly property var stripModel: {
         const m = [];
-        for (const s of Qt.application.screens) {
-            for (let e = 0; e < 4; ++e) {
+        for (const s of screens) {
+            for (let p = 0; p < 4; ++p) {
                 m.push({
                     "screen": s,
-                    "edge": e
+                    "part": p
                 });
             }
         }
@@ -57,47 +61,57 @@ Item {
 
     readonly property bool onWayland: Qt.platform.pluginName.startsWith("wayland")
     readonly property bool onX11: Qt.platform.pluginName === "xcb"
-    // AtlasStyle.softwareRendering exists from Atlas.Ui 1.5.0; before that,
-    // the scene graph API and the GL renderer tell.
-    readonly property bool _software: AtlasStyle["softwareRendering"] === true || GraphicsInfo.api === GraphicsInfo.Software || softwareGl
-    readonly property bool _pulsing: animated && Kirigami.Units.longDuration > 0 && !_software
+    // AtlasStyle.softwareRendering (Atlas.Ui 1.5.0 and later) covers the
+    // software scene graph and software GL drivers, and honours
+    // ATLAS_SOFTWARE_RENDERING=0/1; before 1.5.0, the scene graph API and the
+    // GL renderer tell. Atlas.Ui 1.6.1 moves apps that asked for the software
+    // scene graph to the GPU on HiDPI screens; this app never asks, so it
+    // draws on the GPU wherever there is a hardware GL driver.
+    readonly property bool _software: AtlasStyle["softwareRendering"] !== undefined ? AtlasStyle["softwareRendering"] === true : (GraphicsInfo.api === GraphicsInfo.Software || softwareGl)
+    // AtlasStyle.reducedMotion, or (older Atlas.Ui) Plasma's animation speed
+    // set to instant.
+    readonly property bool _reducedMotion: AtlasStyle["reducedMotion"] === true || Kirigami.Units.longDuration === 0
+    readonly property bool _pulsing: animated && !_reducedMotion && !_software
     readonly property real _period: 2400
+    readonly property real _static: 0.9
 
-    // 0.55 to 1: the pulse (a cosine of the phase); static is the middle.
-    property real _level: 0.8
+    // 0.6 to 1: the pulse (a cosine of the phase, brightest at phase 0).
+    property real _level: _static
     property real _phase: 0
-    on_PhaseChanged: _level = 0.775 + 0.225 * Math.cos(_phase * 2 * Math.PI)
+    on_PhaseChanged: _level = 0.8 + 0.2 * Math.cos(_phase * 2 * Math.PI)
     on_PulsingChanged: {
         if (!_pulsing) {
-            _level = 0.8;
+            _level = _static;
         }
     }
 
-    // 30 frames per second (a NumberAnimation would run at the monitor rate).
+    // 30 frames per second (a NumberAnimation would run at the monitor rate,
+    // and every frame recomposites whole screens).
     Timer {
         running: root.active && root.usable && root._pulsing
         interval: 33
         repeat: true
+        triggeredOnStart: true
         onTriggered: root._phase = (Date.now() % root._period) / root._period
     }
 
-    // Wayland: the layer-shell strips, loaded on start so that `usable` is
+    // Wayland: the layer-shell windows, loaded on start so that `usable` is
     // known; the windows themselves exist only while active.
     Loader {
         id: layerLoader
         active: root.onWayland
-        source: "GlowStripLayer.qml"
+        source: "GlowLayer.qml"
         onLoaded: item.glow = root
     }
 
-    // X11: plain tool windows.
+    // X11: plain tool windows, four strips per screen.
     Instantiator {
         active: root.active && root.onX11
         model: root.stripModel
-        delegate: GlowStrip {
+        delegate: GlowWindow {
             required property var modelData
             glow: root
-            edge: modelData.edge
+            part: modelData.part
             screen: modelData.screen
         }
     }

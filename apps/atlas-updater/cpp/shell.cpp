@@ -109,6 +109,9 @@ void Shell::openWindow(const QString &page)
     engine->setInitialProperties({
         {QStringLiteral("backend"), QVariant::fromValue(m_backend)},
         {QStringLiteral("startPage"), page.isEmpty() ? QStringLiteral("updates") : page},
+        // Developer option: the screen-edge glow on while the window is open
+        // (nothing runs; it only draws), to look at it on a real desktop.
+        {QStringLiteral("glowDemo"), qEnvironmentVariable("ATLAS_UPDATER_GLOW_DEMO") == QLatin1String("1")},
     });
     connect(engine, &QQmlApplicationEngine::objectCreationFailed, this, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine->loadFromModule(QStringLiteral("net.eterneon.atlas.updater"), QStringLiteral("Main"));

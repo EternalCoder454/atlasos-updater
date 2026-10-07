@@ -208,12 +208,17 @@ AtlasWindow {
     // staging or installing, or an app update running. Only while the system
     // is being changed: an update, a channel switch or a rollback being
     // staged, or apps being updated. Not for checks, status reads, errors or
-    // idle (ops.rs names the operations). The one source of truth for both
-    // glows below.
-    readonly property bool glowActive: (root.backend.busy && ["download", "switch", "rollback"].indexOf(root.backend.busyOp) >= 0) || (root.backend.appsBusy && root.backend.appsOp === "updateApps") || (root.backend.firmwareBusy && root.backend.firmwareOp === "installFirmware")
+    // idle (ops.rs names the operations). With `glowDemo` the source of truth
+    // for both glows below.
+    readonly property bool glowForOperation: (root.backend.busy && ["download", "switch", "rollback"].indexOf(root.backend.busyOp) >= 0) || (root.backend.appsBusy && root.backend.appsOp === "updateApps") || (root.backend.firmwareBusy && root.backend.firmwareOp === "installFirmware")
+    // Developer option (Shell sets it from ATLAS_UPDATER_GLOW_DEMO=1): the
+    // glow on while the window is open, with nothing running, to look at it.
+    property bool glowDemo: false
+    readonly property bool glowActive: glowForOperation || glowDemo
     // The glow shows on the screens' edges, which outlast this window: Shell
-    // keeps the window's QML alive (hidden) while this is true.
-    readonly property bool glowOutlivesWindow: glowActive && screenGlow.usable
+    // keeps the window's QML alive (hidden) while this is true. (Not for the
+    // demo: closing the window ends it.)
+    readonly property bool glowOutlivesWindow: glowForOperation && screenGlow.usable
     // Set by Shell from the render thread's GL_RENDERER (llvmpipe, softpipe).
     // Goes when Atlas.Ui 1.5.0 (AtlasStyle.softwareRendering) is the minimum.
     property bool softwareGl: false

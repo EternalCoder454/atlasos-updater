@@ -484,19 +484,35 @@ fwupd's listing (a device pending a reboot), not only this session's install.
   `atlas-updater-tray`.
 - Update glow ("the system is being changed": an update, switch or rollback
   being staged, apps being updated, or a firmware install running; not checks): `ScreenGlow.qml` draws
-  it around the edges of every screen, not inside the window. Four
-  transparent, input-transparent strips per screen (3 grid units deep, accent
-  colour fading inward), made while the glow is on and destroyed when it ends
-  (none exist otherwise), and rebuilt when screens come or go. On Wayland
-  they are layer-shell overlays (`org.kde.layershell`, scope
-  `atlas-updater-glow`, no keyboard, exclusion zone -1); on X11 they are
-  frameless always-on-top tool windows. Without the layer-shell module, or
-  on another platform, the glow falls back to `AtlasEdgeGlow` inside the
-  window. It pulses slowly (2.4 s) at 30 frames per second from a timer; it
-  is static under reduced motion and with software rendering (llvmpipe or
-  softpipe, found by `Shell::watchRenderer`; Atlas.Ui 1.5.0 will have this
-  and `AtlasScreenGlow`). Closing the window while it is on keeps the
-  window's QML (hidden) alive until the operation ends, so the glow stays.
+  it around the edges of every screen, not inside the window: one continuous
+  frame per screen (`GlowFrame.qml`, 3 grid units deep, accent colour with a
+  lighter rim at the edge, fading inward). Four straight bands with linear
+  gradients and four corner squares with radial gradients (centred on the
+  inner corner, so the glow turns each corner in a quarter circle) share one
+  set of stops and meet edge to edge without antialiasing: no seam, gap or
+  overlap. On Wayland each screen gets one full-screen, transparent layer-shell
+  overlay (`org.kde.layershell`, scope `atlas-updater-glow`, anchored to all
+  four edges, no keyboard, exclusion zone -1, and `WindowTransparentForInput`,
+  which gives it an empty input region). On X11 a full-screen transparent
+  window would black out the screen without a compositor, so there are four
+  frameless always-on-top tool windows per screen, one strip along each edge,
+  each showing its part of the same screen-sized frame. The windows exist
+  only while the glow is on (none and no timer otherwise) and are rebuilt
+  when screens come or go. Without the layer-shell module, or on another
+  platform, the glow falls back to `AtlasEdgeGlow` inside the window. It
+  breathes: one opacity per window, 0.6 to 1 over 2.4 s, set at 30 frames per
+  second from a timer, so the gradients are never redrawn. It is static (0.9)
+  under reduced motion (`AtlasStyle.reducedMotion`, or Plasma's animation
+  speed at instant) and with software rendering (`AtlasStyle.softwareRendering`:
+  the software scene graph or a software GL driver such as llvmpipe, and
+  `ATLAS_SOFTWARE_RENDERING=0/1` overrides it; with an Atlas.Ui older than
+  1.5.0, the scene graph API and `Shell::watchRenderer`'s GL renderer check). The app never asks for the software scene graph,
+  so it draws on the GPU wherever there is a hardware GL driver. Closing the
+  window while it is on keeps the window's QML (hidden) alive until the
+  operation ends, so the glow stays. Developer option, honoured in every
+  build because it only draws: `ATLAS_UPDATER_GLOW_DEMO=1 atlas-updater`
+  turns the glow on while the window is open, with nothing running (closing
+  the window ends it).
 - The tray owns the session bus name `net.eterneon.atlas.updater.Tray`
   (one tray per session; a second one exits) with one method, `Reload()`
   at `/net/eterneon/atlas/updater/Tray`: read `atlas-updaterrc` and the
