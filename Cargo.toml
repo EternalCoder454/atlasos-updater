@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/telamon-update-engine", "crates/telamon-updater-base", "apps/telamon-updater", "apps/telamon-updater-tray"]
+members = ["crates/telamon-update-engine", "crates/telamon-updater-base", "crates/telamon-updater-core", "apps/telamon-updater", "apps/telamon-updater-tray"]
 
 [workspace.package]
 version = "0.3.0"

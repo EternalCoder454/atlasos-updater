@@ -7,16 +7,17 @@ import Telamon.Ui
 
 // The "the system is being changed" glow, drawn around the edges of every
 // screen (not inside one window): one continuous frame per screen
-// (GlowFrame), its corners turned in quarter circles. Same meaning and API as
-// TelamonEdgeGlow; to be replaced by it in Telamon.Ui (TelamonScreenGlow), when
-// this file goes.
+// (GlowFrame), its corners turned in quarter circles. It is all that
+// telamon-updater-glow shows: Telamon Updater's tray starts that program while
+// an update, a channel switch or a go back is being staged, or apps or
+// firmware are being installed, and ends it afterwards.
 //
 //   Wayland: one full-screen layer-shell overlay per screen (GlowLayer, needs
 //            layer-shell-qt).
 //   X11:     four frameless, always-on-top tool windows per screen, one strip
 //            along each edge, each showing its part of the same frame.
-//   Else, or without the layer-shell module: `usable` is false and the caller
-//   shows the in-window TelamonEdgeGlow instead.
+//   Else, or without the layer-shell module: `usable` is false and nothing
+//   is drawn (the program logs it).
 //
 // While `active` is false there are no windows and no timer. The windows take
 // no input and are hidden from screen readers. The glow breathes (its
@@ -33,12 +34,7 @@ Item {
     property real depth: 3
     // The layer-shell scope (the surface's role name for the compositor).
     property string namespace: Qt.application.name + "-glow"
-    // Set by the app: the main window's GL renderer is llvmpipe or softpipe
-    // (a software GL driver). Goes when Telamon.Ui 1.5.0 is the minimum.
-    property bool softwareGl: false
-
-    // True when screen-edge windows can be made here; false means the caller
-    // must show its in-window glow instead.
+    // True when screen-edge windows can be made here.
     readonly property bool usable: onWayland ? layerLoader.status === Loader.Ready : onX11
 
     // Internal, read by the windows.
@@ -61,16 +57,14 @@ Item {
 
     readonly property bool onWayland: Qt.platform.pluginName.startsWith("wayland")
     readonly property bool onX11: Qt.platform.pluginName === "xcb"
-    // TelamonStyle.softwareRendering (Telamon.Ui 1.5.0 and later) covers the
-    // software scene graph and software GL drivers, and honours
-    // TELAMON_SOFTWARE_RENDERING=0/1; before 1.5.0, the scene graph API and the
-    // GL renderer tell. Telamon.Ui 1.6.1 moves apps that asked for the software
-    // scene graph to the GPU on HiDPI screens; this app never asks, so it
-    // draws on the GPU wherever there is a hardware GL driver.
-    readonly property bool _software: TelamonStyle["softwareRendering"] !== undefined ? TelamonStyle["softwareRendering"] === true : (GraphicsInfo.api === GraphicsInfo.Software || softwareGl)
-    // TelamonStyle.reducedMotion, or (older Telamon.Ui) Plasma's animation speed
-    // set to instant.
-    readonly property bool _reducedMotion: TelamonStyle["reducedMotion"] === true || Kirigami.Units.longDuration === 0
+    // TelamonStyle.softwareRendering covers the software scene graph and
+    // software GL drivers (llvmpipe), and honours TELAMON_SOFTWARE_RENDERING=0/1.
+    // This program never asks for the software scene graph, so it draws on
+    // the GPU wherever there is a hardware GL driver.
+    readonly property bool _software: TelamonStyle.softwareRendering === true
+    // TelamonStyle.reducedMotion: the user's setting, or Plasma's animation
+    // speed set to instant.
+    readonly property bool _reducedMotion: TelamonStyle.reducedMotion === true
     readonly property bool _pulsing: animated && !_reducedMotion && !_software
     readonly property real _period: 2400
     readonly property real _static: 0.9

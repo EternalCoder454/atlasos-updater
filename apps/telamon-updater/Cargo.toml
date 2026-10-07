@@ -1,52 +1,31 @@
 [package]
 name = "telamon-updater"
-description = "Telamon Updater: system updates for Telamon OS (Kirigami UI over CXX-Qt)"
+description = "Telamon Updater's command: the app update worker for its tray, and the old way to open the updates (now Telamon Settings)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-build = "build.rs"
 
-# CMake (Corrosion) links the static library into the C++ executable.
-# `rlib` is there so `cargo test` and `cargo clippy` work as usual.
-[lib]
-name = "telamon_updater"
-crate-type = ["staticlib", "rlib"]
+# Telamon Updater is the background part of updates only: telamon-updater-tray
+# (panel icon, schedule, notifications), the system helper, and
+# telamon-updater-glow (the screen glow). The window is Telamon Settings'
+# Updates page. This command runs the app update jobs the tray starts
+# (`--worker`, libflatpak loaded only for the job) and forwards everything else
+# to `telamon-settings updates`, so what still starts `atlas-updater` or
+# `telamon-updater` ends up in the right place.
+
+[[bin]]
+name = "telamon-updater"
+path = "src/main.rs"
 
 [features]
-# Honour TELAMON_UPDATER_FIXTURES in a release build (screenshots, UI tests).
-fixtures = ["telamon-updater-base/fixtures"]
+fixtures = ["telamon-updater-core/fixtures"]
 
 [dependencies]
-# The update engine (the system helper's client and the progress parser).
-telamon-update-engine = { path = "../../crates/telamon-update-engine" }
-# What the window shares with telamon-updater-tray (settings, ops, schedule).
-telamon-updater-base = { path = "../../crates/telamon-updater-base" }
-# What Telamon apps share. Pinned to a release tag (Cargo.lock holds its commit:
-# build with --locked); move it forward on purpose, together
-# with crates/telamon-update-engine's.
-telamon-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+telamon-updater-core = { path = "../../crates/telamon-updater-core" }
 telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
-telamon-framework-flatpak = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
-cxx = "1"
-cxx-qt = "0.10"
-cxx-qt-lib = "0.10"
 libc = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
-tokio = { version = "1", features = ["rt", "time"] }
-zbus = { version = "5", default-features = false, features = ["tokio"] }
-# Release notes: parsed here, rendered by notes.rs from an allow-list.
-pulldown-cmark = { version = "0.13", default-features = false }
-# Release notes: small blocking client, run on a worker thread.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
-# Firmware download checks (SHA-256, and SHA-1 when that is all a release gives).
-ring = "0.17"
 
 [dev-dependencies]
 tempfile = "3"
-
-[build-dependencies]
-cxx-qt-build = "0.10"

@@ -1,10 +1,9 @@
 //! `telamon-updater --worker <job>`: an app round or an app update for
-//! telamon-updater-tray, run without Qt. libflatpak is loaded for the length of
+//! telamon-updater-tray. libflatpak is loaded for the length of
 //! the job only, so the resident tray stays small. The result goes to stdout
-//! as one line of JSON (telamon_updater_base::worker::Outcome); the window
-//! picks up what changed from the settings file.
+//! as one line of JSON (telamon_updater_base::worker::Outcome); Settings'
+//! Updates page picks up what changed from the settings file.
 
-use std::ffi::{CStr, c_char};
 use std::io::Write;
 
 use telamon_updater_base::worker::{
@@ -13,10 +12,10 @@ use telamon_updater_base::worker::{
 
 use crate::{apphistory, apps, lock, rc, schedule};
 
-/// `RoundError` in [`rc::APPS`]: what the window shows until something works.
+/// `RoundError` in [`rc::APPS`]: what the Updates page shows until something works.
 pub const ROUND_ERROR: &str = "RoundError";
 /// `RoundAt` in [`rc::APPS`]: when a worker last changed the apps; an open
-/// window lists them again.
+/// Updates page lists them again.
 pub const ROUND_AT: &str = "RoundAt";
 
 /// What to do with the settings after a round. Kept apart from the round so
@@ -201,20 +200,9 @@ fn update() -> Outcome {
     out
 }
 
-/// Called from `main.cpp` for `--worker <job>`, before Qt starts. Returns
-/// the exit code.
-///
-/// # Safety
-/// `job` must be null or a valid NUL-terminated string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn telamon_worker(job: *const c_char) -> i32 {
-    let job = if job.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(job) }
-            .to_string_lossy()
-            .into_owned()
-    };
+/// `telamon-updater --worker <job>`: runs the job and prints its result as
+/// one line of JSON. Returns the exit code.
+pub fn run(job: &str) -> i32 {
     // Settings and state from before the rename move to the new names first.
     telamon_updater_base::migrate::adopt_legacy_files();
     // A hung Flatpak or network call must not hold the app update lock
@@ -223,7 +211,7 @@ pub unsafe extern "C" fn telamon_worker(job: *const c_char) -> i32 {
     unsafe {
         libc::alarm(TIME_LIMIT_SECS);
     }
-    let run = match job.as_str() {
+    let run = match job {
         APPS_ROUND => round,
         APPS_UPDATE => update,
         other => {
