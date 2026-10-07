@@ -561,9 +561,9 @@ for the old name). Interface `net.eterneon.telamon.updater.Tray`:
 - `Reload()`: read `telamon-updaterrc` and the crash report setting again.
   Settings calls it after changing the scheduled restart, background app
   updates or crash reports. Under the old name too.
-- `SetWorking(b on)`: the caller says the system is being changed (an update,
-  switch or go back being staged, apps updating, firmware installing) and
-  releases that with `false`. One boolean only: any other signature is
+- `SetWorking(b on)`: the caller says the OS image is being changed (an update
+  being downloaded and staged, a channel switch, a go back; **not** app
+  updates, firmware or checks) and releases that with `false`. One boolean only: any other signature is
   refused by the bus, and the key is the caller's unique name. **New name
   only**; the old interface has `Reload` alone. Client: 
   `telamon_updater_base::tray::call_set_working(&conn, on)` (call it on the
@@ -574,9 +574,10 @@ either call works after the user quit the tray.
 
 ### The update glow
 
-"The system is being changed" shows the glow around the screen edges: an
-update, switch or go back being staged, apps being updated or a firmware
-install running; not checks. The tray decides (`working.rs`, a plain state
+"The OS image is being changed" shows the glow around the screen edges: an
+update being downloaded and staged, a channel switch or a go back. Nothing
+else: not app (Flatpak) updates, not firmware, not checks, not anything the
+helper does in the background that leaves the image alone. The tray decides (`working.rs`, a plain state
 machine with no I/O, unit tested) and supervises one `telamon-updater-glow`
 (`glow.rs`; `TELAMON_UPDATER_GLOW_BIN` replaces the program):
 
@@ -587,7 +588,9 @@ machine with no I/O, unit tested) and supervises one `telamon-updater-glow`
   Settings leaves no glow) drops it, and a claim not renewed for 3 hours is
   dropped. At most 16 callers hold claims at once.
 - **Helper progress** (system bus, `bus.rs`): the helper's `Progress`
-  property (above) while it is a non-empty string, under both identities
+  property (above) while it names an image operation: JSON whose `op` is
+  `upgrade` or `switch` (`telamon_update_engine::progress::is_image_operation`;
+  an empty value, anything that is not JSON and any other `op` do not count), under both identities
   (`net.eterneon.telamon.SystemHelper1` at `/net/eterneon/telamon/SystemHelper`
   and the legacy ones; either counts, and saying it twice changes nothing).
   Followed with a match rule on `PropertiesChanged` for that path and
@@ -608,11 +611,16 @@ machine with no I/O, unit tested) and supervises one `telamon-updater-glow`
   started (missing program) is logged once. The tray ends it (SIGTERM, then
   SIGKILL) when it quits, and it ends with the tray if the tray dies.
 - **What it draws** (`ScreenGlow.qml`): one continuous frame per screen
-  (`GlowFrame.qml`, 3 grid units deep, accent colour with a lighter rim at the
-  edge, fading inward). Four straight bands with linear gradients and four
-  corner squares with radial gradients (centred on the inner corner, so the
-  glow turns each corner in a quarter circle) share one set of stops and meet
-  edge to edge without antialiasing: no seam, gap or overlap. On Wayland each
+  (`GlowFrame.qml`, 1.4 grid units deep, a third to a half of what it was:
+  25 logical pixels at a grid unit of 18) in the accent colour: a pure soft
+  glow, strongest at the screen edge (alpha 0.55, 0.9 in high contrast) and
+  fading with `0.55 * e^1.8` (`e` from 0 at the inner end to 1 at the edge, so
+  the curve reaches zero with zero slope: no rim, no outline, no line where it
+  ends). It is four rectangles with a gradient of 25 stops each, one along
+  each edge; the top and bottom ones run the full width and the left and
+  right ones the full height, so the two glows overlap in a corner and add up
+  like light (`1 - (1 - a)(1 - b)`): there is no corner piece, quarter circle
+  or seam to see. On Wayland each
   screen gets one full-screen, transparent layer-shell overlay
   (`org.kde.layershell`, scope `telamon-updater-glow`, anchored to all four
   edges, no keyboard, exclusion zone -1, and `WindowTransparentForInput`,
@@ -796,8 +804,9 @@ Updates (versions, check, download, release notes, apps, firmware, restart and
 "Restart Later…"), Go Back, Channel, History and the crash report screens are
 Telamon Settings'. What they call here: the system helper (`ops`,
 `HelperClient`), `telamon-updater-core`, and the tray's `Reload` and
-`SetWorking`. A firmware install, an update staged by the page, a go back and
+`SetWorking`. An update staged by the page, a go back and
 a switch say `SetWorking(true)` for as long as they run, and `false` after.
+Firmware installs and app updates do not: only image operations glow.
 
 ## Telamon OS side (the Telamon OS repo, not here)
 

@@ -3,9 +3,10 @@
 //!
 //! - `Reload()`, after it changed a setting the tray acts on (the scheduled
 //!   restart, background app updates, crash reports);
-//! - `SetWorking(b)`: "the system is being changed" (an update, a switch or a
-//!   go back being staged, apps updating, firmware installing). The tray draws
-//!   the screen-edge glow for as long as anybody says so; see
+//! - `SetWorking(b)`: "the OS image is being changed" (an update being
+//!   downloaded and staged, a channel switch, a go back). Not app updates,
+//!   firmware or checks: say nothing for those. The tray draws the
+//!   screen-edge glow for as long as anybody says so; see
 //!   [`call_set_working`].
 //!
 //! Either call starts the tray through D-Bus activation if it isn't running.
@@ -27,8 +28,10 @@ pub const LEGACY_INTERFACE: &str = "net.eterneon.atlas.updater.Tray";
 /// Long enough for D-Bus activation to start the tray.
 const LIMIT: Duration = Duration::from_secs(25);
 
-/// Says whether `conn`'s program is changing the system, to the tray, which
-/// shows the screen-edge glow while anybody does (`SetWorking(on)`).
+/// Says whether `conn`'s program is changing the OS image (an update being
+/// staged, a switch, a go back; never app updates, firmware or checks), to the
+/// tray, which shows the screen-edge glow while anybody does
+/// (`SetWorking(on)`).
 ///
 /// The claim belongs to `conn`: send it on the connection that stays open
 /// for the length of the work, and with `false` when the work is over. The

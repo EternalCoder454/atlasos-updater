@@ -1,8 +1,8 @@
 // The screen-edge glow, as a program of its own. Telamon Updater's tray
-// (plain Rust, a few MB, no Qt) starts it when the system is being changed:
-// an update, a channel switch or a go back being staged, apps being updated
-// or firmware being installed, whether Settings' window is open or not, and
-// ends it (SIGTERM) when that is over. It draws the glow around the edges of
+// (plain Rust, a few MB, no Qt) starts it when the OS image is being changed:
+// an update being staged, a channel switch or a go back (not app updates,
+// firmware or checks), whether Settings' window is open or not, and ends it
+// (SIGTERM) when that is over. It draws the glow around the edges of
 // every screen (qml/ScreenGlow.qml) and does nothing else: no window of its
 // own, no D-Bus name, no input.
 //

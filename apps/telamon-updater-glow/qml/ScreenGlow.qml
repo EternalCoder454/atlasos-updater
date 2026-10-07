@@ -5,12 +5,12 @@ import QtQuick.Window
 import org.kde.kirigami as Kirigami
 import Telamon.Ui
 
-// The "the system is being changed" glow, drawn around the edges of every
-// screen (not inside one window): one continuous frame per screen
-// (GlowFrame), its corners turned in quarter circles. It is all that
-// telamon-updater-glow shows: Telamon Updater's tray starts that program while
-// an update, a channel switch or a go back is being staged, or apps or
-// firmware are being installed, and ends it afterwards.
+// The "the OS image is being changed" glow, drawn around the edges of every
+// screen (not inside one window): one soft frame per screen (GlowFrame), no
+// rim and no visible corner. It is all that telamon-updater-glow shows:
+// Telamon Updater's tray starts that program while an update, a channel
+// switch or a go back is being staged (not for app updates, firmware or
+// checks), and ends it afterwards.
 //
 //   Wayland: one full-screen layer-shell overlay per screen (GlowLayer, needs
 //            layer-shell-qt).
@@ -31,7 +31,7 @@ Item {
     // False holds the pulse still.
     property bool animated: true
     // How far the glow reaches in from the screen edge, in grid units.
-    property real depth: 3
+    property real depth: 1.4
     // The layer-shell scope (the surface's role name for the compositor).
     property string namespace: Qt.application.name + "-glow"
     // True when screen-edge windows can be made here.

@@ -2,17 +2,20 @@
 //! Plain state, no I/O: time comes in as arguments, what to do comes out as
 //! an [`Action`] for the caller (`glow.rs`) to carry out.
 //!
-//! The system is "being changed" (so the glow shows) while
+//! The system is "being changed" (so the glow shows) only while the OS image
+//! is: an update being downloaded and staged, a channel switch, a go back.
+//! Not app (Flatpak) updates, not firmware, not checks. It is so while
 //!
 //! - any caller holds a claim: Settings says `SetWorking(true)` on the
 //!   tray's session interface when it stages an update, switches or goes
-//!   back, updates apps or installs firmware, and `SetWorking(false)` when
-//!   that is over. A claim is the caller's (its D-Bus unique name); it ends
+//!   back (and only then: that is Settings' rule), and `SetWorking(false)`
+//!   when that is over. A claim is the caller's (its D-Bus unique name); it ends
 //!   when the caller says so, when the caller leaves the bus (a crashed
 //!   Settings leaves no glow) and [`CLAIM_LIFETIME`] after the caller last
 //!   said `true` (a safety net, a claim that is renewed lives on); or
 //! - the system helper reports an upgrade or a switch running (its
-//!   `Progress` property is not empty), whether anybody's window is open.
+//!   `Progress` property names one of those two operations), whether
+//!   anybody's window is open.
 //!   The helper has two identities for this release (new and legacy
 //!   names); either one counts, and saying so twice changes nothing.
 //!

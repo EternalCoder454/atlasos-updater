@@ -469,6 +469,39 @@ async fn the_helpers_progress_shows_the_glow_with_settings_closed() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn only_image_operations_in_the_helpers_progress_show_the_glow() {
+    let Some(mut rig) = Rig::new() else { return };
+    let helper = FakeHelper::start(&rig.system, "").await;
+    let glow = rig.well_behaved_glow();
+    rig.start_tray(&glow);
+    let _session = rig.wait_for_tray().await;
+
+    // not the OS image: anything but an upgrade or a switch, under either name
+    for op in ["apps", "firmware", "check", "flatpak"] {
+        let p = format!(r#"{{"op":"{op}","stage":"downloading","done":1,"total":9,"detail":""}}"#);
+        helper.set(&p).await;
+        helper.set_legacy(&p).await;
+    }
+    helper.set("downloading").await;
+    stays(
+        "no glow for what is not the image",
+        Duration::from_millis(800),
+        || rig.starts() == 0,
+    )
+    .await;
+    helper.set("").await;
+    helper.set_legacy("").await;
+
+    // a channel switch is: the image changes
+    let switching = UPGRADING.replace("upgrade", "switch");
+    helper.set(&switching).await;
+    wait_until("a switch starts the glow", || rig.starts() == 1).await;
+    helper.set("").await;
+    wait_until("and its end stops it", || rig.stops() == 1).await;
+    rig.assert_one_at_a_time();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_upgrade_already_running_when_the_tray_starts_is_seen() {
     let Some(mut rig) = Rig::new() else { return };
     let _helper = FakeHelper::start(&rig.system, UPGRADING).await;
