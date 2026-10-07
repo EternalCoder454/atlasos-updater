@@ -21,6 +21,23 @@ pub struct Progress {
     pub detail: String,
 }
 
+/// `Progress::op` of the operations that change the OS image: an update being
+/// downloaded and staged, and a switch of channel (or driver image). They are
+/// the only values the helper reports; the screen-edge glow follows exactly
+/// these ([`is_image_operation`]).
+pub const OP_UPGRADE: &str = "upgrade";
+pub const OP_SWITCH: &str = "switch";
+
+/// Whether the helper's `Progress` property value (`""` when nothing runs)
+/// says that the OS image is being changed: JSON whose `op` is
+/// [`OP_UPGRADE`] or [`OP_SWITCH`]. Anything else (empty, not JSON, another
+/// `op`) is not.
+pub fn is_image_operation(json: &str) -> bool {
+    // Only `op` is looked at, so a newer helper that adds fields still counts.
+    serde_json::from_str::<serde_json::Value>(json)
+        .is_ok_and(|v| matches!(v["op"].as_str(), Some(OP_UPGRADE | OP_SWITCH)))
+}
+
 pub const DOWNLOADING: &str = "downloading";
 pub const INSTALLING: &str = "installing";
 
@@ -296,6 +313,28 @@ mod tests {
             r#"{"op":"upgrade","stage":"downloading","done":1,"total":2,"detail":"x"}"#
         );
         assert_eq!(serde_json::from_str::<Progress>(&j).unwrap(), p);
+    }
+
+    #[test]
+    fn only_an_upgrade_or_a_switch_is_an_image_operation() {
+        let j = |op: &str| {
+            format!(r#"{{"op":"{op}","stage":"downloading","done":1,"total":2,"detail":""}}"#)
+        };
+        assert!(is_image_operation(&j("upgrade")));
+        assert!(is_image_operation(&j("switch")));
+        // not image operations
+        for op in ["apps", "firmware", "check", "flatpak", ""] {
+            assert!(!is_image_operation(&j(op)), "{op}");
+        }
+        assert!(!is_image_operation(""));
+        assert!(!is_image_operation("not json"));
+        assert!(!is_image_operation(r#"{"stage":"downloading"}"#));
+        // what the helper serves for both operations
+        let p = Progress {
+            op: OP_UPGRADE.into(),
+            ..Progress::default()
+        };
+        assert!(is_image_operation(&serde_json::to_string(&p).unwrap()));
     }
 
     #[test]

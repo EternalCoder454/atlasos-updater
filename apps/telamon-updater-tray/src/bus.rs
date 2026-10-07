@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use telamon_update_engine::identity::Identity;
+use telamon_update_engine::progress::is_image_operation;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use zbus::message::Type as MsgType;
@@ -153,8 +154,8 @@ async fn owner_of(conn: &zbus::Connection, name: &str) -> Option<String> {
         .map(|o| o.to_string())
 }
 
-/// Whether `Progress` is not empty, asked of `owner` (a unique name: the
-/// call cannot start anything).
+/// Whether `Progress` says the OS image is being changed, asked of `owner`
+/// (a unique name: the call cannot start anything).
 async fn read_progress(conn: &zbus::Connection, id: Identity, owner: &str) -> Option<bool> {
     let args = (id.interface(), PROGRESS);
     let call = conn.call_method(
@@ -166,14 +167,17 @@ async fn read_progress(conn: &zbus::Connection, id: Identity, owner: &str) -> Op
     );
     let reply = tokio::time::timeout(CALL_LIMIT, call).await.ok()?.ok()?;
     let value: OwnedValue = reply.body().deserialize().ok()?;
-    progress_is_set(&value)
+    image_op_running(&value)
 }
 
-/// `Progress` has a value that is not empty. `None` for anything that is
-/// not a string.
-fn progress_is_set(v: &OwnedValue) -> Option<bool> {
+/// `Progress` names an operation that changes the OS image (an upgrade or a
+/// switch, `telamon_update_engine::progress::is_image_operation`): the only
+/// thing the helper's word turns the glow on for. An empty value, any other
+/// `op` and a value that is not JSON do not. `None` for anything that is not a
+/// string.
+fn image_op_running(v: &OwnedValue) -> Option<bool> {
     let s: &str = v.downcast_ref().ok()?;
-    Some(!s.is_empty())
+    Some(is_image_operation(s))
 }
 
 /// What a `PropertiesChanged` body says about `Progress`: `Some(Some(set))`
@@ -183,7 +187,7 @@ fn progress_change(body: &zbus::message::Body) -> Option<Option<bool>> {
     let (_, changed, invalidated): (String, HashMap<String, OwnedValue>, Vec<String>) =
         body.deserialize().ok()?;
     if let Some(v) = changed.get(PROGRESS) {
-        return Some(progress_is_set(v));
+        return Some(image_op_running(v));
     }
     invalidated.iter().any(|p| p == PROGRESS).then_some(None)
 }
@@ -256,12 +260,23 @@ mod tests {
     use zbus::zvariant::Value;
 
     #[test]
-    fn progress_is_set_only_by_a_not_empty_string() {
+    fn the_glow_follows_only_image_operations() {
         let v = |s: &str| OwnedValue::try_from(Value::from(s.to_string())).unwrap();
-        assert_eq!(progress_is_set(&v("")), Some(false));
-        assert_eq!(progress_is_set(&v(r#"{"op":"upgrade"}"#)), Some(true));
+        assert_eq!(image_op_running(&v("")), Some(false));
+        assert_eq!(image_op_running(&v(r#"{"op":"upgrade"}"#)), Some(true));
+        assert_eq!(image_op_running(&v(r#"{"op":"switch"}"#)), Some(true));
+        // anything else the helper (or a newer one) might report: no glow
+        for other in [
+            r#"{"op":"apps"}"#,
+            r#"{"op":"firmware"}"#,
+            r#"{"op":"check"}"#,
+            r#"{"stage":"downloading"}"#,
+            "downloading",
+        ] {
+            assert_eq!(image_op_running(&v(other)), Some(false), "{other}");
+        }
         let n = OwnedValue::try_from(Value::from(7u32)).unwrap();
-        assert_eq!(progress_is_set(&n), None);
+        assert_eq!(image_op_running(&n), None);
     }
 
     #[test]

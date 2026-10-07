@@ -170,7 +170,8 @@ pub enum Msg {
     SetWorking(String, bool),
     /// A caller that held a claim left the session bus.
     SenderGone(String),
-    /// The system helper's `Progress` is (not) empty, under this name.
+    /// The system helper's `Progress` does (not) name an image operation (an
+    /// upgrade or a switch), under this name.
     Helper(working::Helper, bool),
 }
 
