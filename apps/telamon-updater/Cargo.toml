@@ -1,0 +1,31 @@
+[package]
+name = "telamon-updater"
+description = "Telamon Updater's command: the app update worker for its tray, and the old way to open the updates (now Telamon Settings)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Telamon Updater is the background part of updates only: telamon-updater-tray
+# (panel icon, schedule, notifications), the system helper, and
+# telamon-updater-glow (the screen glow). The window is Telamon Settings'
+# Updates page. This command runs the app update jobs the tray starts
+# (`--worker`, libflatpak loaded only for the job) and forwards everything else
+# to `telamon-settings updates`, so what still starts `atlas-updater` or
+# `telamon-updater` ends up in the right place.
+
+[[bin]]
+name = "telamon-updater"
+path = "src/main.rs"
+
+[features]
+fixtures = ["telamon-updater-core/fixtures"]
+
+[dependencies]
+telamon-updater-core = { path = "../../crates/telamon-updater-core" }
+telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

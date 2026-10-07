@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Telamon Updater (tray)
+Comment=Watches for Telamon OS and app updates, and restarts when you scheduled it
+Exec=telamon-updater-tray
+Icon=net.eterneon.telamon.updater
+Terminal=false
+NoDisplay=true
+OnlyShowIn=KDE;
+X-KDE-autostart-phase=2
+X-KDE-StartupNotify=false

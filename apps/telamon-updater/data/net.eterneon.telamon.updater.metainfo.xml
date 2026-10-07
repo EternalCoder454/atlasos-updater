@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.eterneon.telamon.updater</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Telamon Updater</name>
+  <summary>Keeps Telamon OS and your apps up to date in the background</summary>
+  <description>
+    <p>Telamon Updater keeps Telamon OS and Flatpak apps up to date in the background. It checks for updates, tells you when one is ready to install, restarts when you scheduled it, draws a glow around the screen edges while the system is being changed, and collects crash reports for you to review.</p>
+    <p>The window, where you update, go back to the previous version and pick a channel, is the Updates page of Telamon Settings. Telamon Updater opens it from its panel icon and notifications.</p>
+    <p>It never collects usage data. If it crashes, it can save a report with system information and resource use, but nothing is sent unless you choose to send it.</p>
+  </description>
+  <launchable type="desktop-id">net.eterneon.telamon.updater.desktop</launchable>
+  <url type="homepage">https://github.com/EternalCoder454/AtlasOS</url>
+  <url type="vcs-browser">https://github.com/EternalCoder454/atlasos-updater</url>
+  <url type="bugtracker">https://github.com/EternalCoder454/atlasos-updater/issues</url>
+  <developer id="net.eterneon">
+    <name>Eterneon</name>
+  </developer>
+  <categories>
+    <category>System</category>
+  </categories>
+  <provides>
+    <binary>telamon-updater</binary>
+    <id>net.eterneon.atlas.updater.desktop</id>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.3.0" date="2026-10-07">
+      <description>
+        <p>Renamed to Telamon Updater (it was Atlas Updater). Your settings and history come along. The window is now the Updates page of Telamon Settings; Telamon Updater is the background part: the panel icon, notifications, automatic checks and the glow while the system is being changed.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-10-01"/>
+  </releases>
+</component>

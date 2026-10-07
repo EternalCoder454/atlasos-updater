@@ -1,0 +1,33 @@
+[package]
+name = "telamon-update-engine"
+description = "Telamon Updater's update engine: the privileged system helper and its client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "telamon_update_engine"
+
+[[bin]]
+name = "telamon-system-helper"
+path = "src/bin/telamon-system-helper.rs"
+
+[dependencies]
+# bootc status, history and events (shared with every Telamon app). Pinned:
+# a release tag, Cargo.lock holds its commit (build with --locked). Move it
+# forward on purpose, together with apps/telamon-updater's.
+telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# safe killpg (the helper's one unsafe block is the pre_exec that hands bootc its progress pipe)
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+
+[dev-dependencies]
+tempfile = "3"
+# paused time for the progress throttle test
+tokio = { version = "1", features = ["test-util"] }
