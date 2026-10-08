@@ -154,6 +154,21 @@ removal), and skipping the run if it can't. Go Back and a switch to the
 other channel remain the ways to an older build; an image of another
 reference is never compared.
 
+**A newer image over a staged one.** A staged update does not stop the
+search for a newer one. `bootc upgrade --check` compares the registry with the
+image pulled last (the staged one), so the check records the newer image as
+the staged entry's `cachedUpdate`, and `available_update` shows it next to the
+staged image (`view::View::available_replaces_staged`: an update is staged and
+`available` is not it; not for an image that failed its boot checks, the one
+the user went back from, or while a rollback is queued). `Upgrade` then pulls
+the newest image and bootc stages it over the staged one (one staged
+deployment at a time), so a single restart lands on the newest; the same
+downgrade checks apply to the staged image as to the booted one. The page and
+the tray must therefore keep offering "Check for Updates" and "Download
+Update" while something is staged, and name the staged version in what they
+offer to restart into. The background stager does the same
+(`tests/update-stage` in the Telamon OS image).
+
 **Retries.** The steps that fetch from the registry (`bootc upgrade
 --check`, `bootc upgrade`, `bootc switch`, `rpm-ostree upgrade`/`rebase`,
 `skopeo inspect`) are run up to 3 times, 3 s and then 10 s apart, when
@@ -667,6 +682,9 @@ Tests: `working.rs` (the machine), `open.rs` (the argv, with a fake
   staged, the tray sends a notification (event `updateStaged`) with a
   "Restart to Update" action once per staged image, and the panel icon goes
   to NeedsAttention.
+- The tooltip names the staged version; when a newer image is available it says
+  so ("<staged> is ready. <newer> is newer: download it in Updates to restart
+  into it instead.") and does not say "Restart to install it".
 - The background download and staging is the OS's job
   (`atlasos-update-stage.timer` in the Telamon OS image runs `bootc upgrade`, or
   `rpm-ostree upgrade` on a system with local rpm-ostree changes).
@@ -786,7 +804,7 @@ Developer options (debug builds, or the `fixtures` feature):
 `<dir>` instead of calling the helper, Flatpak and so on; the states are
 `crates/telamon-updater-core/fixtures-states/<name>` (`up-to-date`,
 `update-available`, `scheduled`, `installing`, `error`,
-`available-is-bad`, `available-is-rollback`, `rollback-queued`) with the
+`available-is-bad`, `available-is-rollback`, `rollback-queued`, `staged-newer-available`) with the
 shared files in `crates/telamon-updater-core/fixtures`;
 `TELAMON_UPDATER_FIXTURE_HOLD=<op>`, `TELAMON_UPDATER_FIRMWARE_FILES=<dir>`
 (see "Firmware (fwupd)"). Settings reads them through the core crate.
