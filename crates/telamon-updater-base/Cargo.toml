@@ -17,8 +17,8 @@ fixtures = []
 telamon-update-engine = { path = "../telamon-update-engine" }
 # Pinned to a release tag (Cargo.lock holds its commit: build with
 # --locked); move it forward on purpose, together with the other crates'.
-telamon-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
-telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0", features = ["notify"] }
+telamon-framework-core = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.2" }
+telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.2", features = ["notify"] }
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }

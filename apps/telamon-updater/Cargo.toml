@@ -24,7 +24,7 @@ fixtures = ["telamon-updater-core/fixtures"]
 
 [dependencies]
 telamon-updater-core = { path = "../../crates/telamon-updater-core" }
-telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+telamon-framework-system = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.2" }
 libc = "0.2"
 
 [dev-dependencies]
