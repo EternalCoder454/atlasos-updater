@@ -3512,6 +3512,130 @@ echo "error: unexpected argument '--progress-fd' found in the pipe" >&2; exit 2"
         );
     }
 
+    // ---- an update is staged and the registry has moved on ----
+    //
+    // Booted is 44.20261001. 44.20261002 (digest "three") is staged and waits
+    // for a restart; the registry may hold 44.20261003 ("five") by now.
+
+    const THREE: (&str, &str, &str) = ("44.20261002", "2026-10-02T04:00:00Z", "sha256:three");
+    const FIVE: (&str, &str, &str) = ("44.20261003", "2026-10-03T04:00:00Z", "sha256:five");
+
+    fn staged(image: (&str, &str, &str)) -> String {
+        plain_with_staged(image.0, image.1, image.2)
+    }
+
+    /// A machine with `before` staged whose `bootc upgrade` leaves `after`
+    /// staged, and a registry that answers with `registry`.
+    fn restaging(
+        before: (&str, &str, &str),
+        after: (&str, &str, &str),
+        registry: Result<(&str, &str, &str), &str>,
+    ) -> (Arc<Stager>, Core, tempfile::TempDir) {
+        let d = tempfile::tempdir().unwrap();
+        let stager = Arc::new(Stager {
+            calls: Mutex::default(),
+            before: staged(before),
+            after: staged(after),
+            cleanup_fails: false,
+            before_fails: false,
+            flaky: 0,
+        });
+        let f = Arc::new(Registry {
+            stager: stager.clone(),
+            out: registry
+                .map(|(v, t, dg)| skopeo_json(v, t, dg))
+                .map_err(str::to_string),
+        });
+        let c = Core::new(f).with_events(d.path().join("events.jsonl"));
+        (stager, c, d)
+    }
+
+    fn staged_version(json: &str) -> Option<String> {
+        Status::from_json(json)
+            .unwrap()
+            .status
+            .staged?
+            .version()
+            .map(str::to_string)
+    }
+
+    fn pulled(calls: &[Vec<String>]) -> bool {
+        calls.iter().any(|c| c[0] == "upgrade")
+    }
+
+    #[test]
+    fn a_newer_image_published_after_one_was_staged_replaces_the_staged_one() {
+        let (stager, c, d) = restaging(THREE, FIVE, Ok(FIVE));
+        let json = c.execute(&Op::Upgrade).unwrap();
+        // one restart now lands on the newest
+        assert_eq!(staged_version(&json).as_deref(), Some("44.20261003"));
+        let calls = stager.calls();
+        assert!(pulled(&calls), "{calls:?}");
+        // the staged image is not taken out: it was replaced by bootc itself
+        assert!(!ran(&calls, &["rpm-ostree", "cleanup", "-p"]));
+        let events = events::read(&d.path().join("events.jsonl"));
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            ["update-staged"]
+        );
+        assert_eq!(events[0].version.as_deref(), Some("44.20261003"));
+    }
+
+    #[test]
+    fn the_staged_image_being_the_newest_is_left_alone() {
+        // nothing newer on the registry: bootc reports "Staged update
+        // present, not changed" and the status stays as it was
+        let (stager, c, d) = restaging(THREE, THREE, Ok(THREE));
+        let json = c.execute(&Op::Upgrade).unwrap();
+        assert_eq!(staged_version(&json).as_deref(), Some("44.20261002"));
+        let calls = stager.calls();
+        assert!(!ran(&calls, &["rpm-ostree", "cleanup", "-p"]));
+        // not news again
+        assert!(events::read(&d.path().join("events.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn an_image_older_than_the_staged_one_is_refused_before_the_pull() {
+        // the tag went back to 44.20261002 after 44.20261003 was staged:
+        // newer than the booted image, older than the staged one
+        let (stager, c, d) = restaging(FIVE, THREE, Ok(THREE));
+        match c.execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("Nothing was downloaded"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let calls = stager.calls();
+        assert!(!pulled(&calls), "{calls:?}");
+        // what is staged stays staged
+        assert!(!ran(&calls, &["rpm-ostree", "cleanup", "-p"]));
+        assert_eq!(
+            events::read(&d.path().join("events.jsonl"))
+                .iter()
+                .map(|e| e.event.as_str())
+                .collect::<Vec<_>>(),
+            ["update-failed"]
+        );
+    }
+
+    #[test]
+    fn an_older_image_pulled_over_the_staged_one_is_taken_out_again() {
+        // the registry can't be asked, so the pull goes on and replaces the
+        // staged 44.20261003 with the older 44.20261002; that is undone
+        let (stager, c, _d) = restaging(FIVE, THREE, Err("registry unreachable"));
+        match c.execute(&Op::Upgrade) {
+            Err(HelperError::Failed(m)) => {
+                assert!(m.starts_with(DOWNGRADE_REFUSED), "{m}");
+                assert!(m.contains("was removed too"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let calls = stager.calls();
+        assert!(pulled(&calls));
+        assert!(ran(&calls, &["rpm-ostree", "cleanup", "-p"]));
+    }
+
     /// [`Registry`] on a machine with a registry login file.
     struct LoggedIn(Registry);
 

@@ -248,6 +248,22 @@ struct Tray {
     glow_start_logged: bool,
 }
 
+/// The panel tooltip while an update is staged: the version a restart starts.
+/// When a newer image has been published since, it says so and where the newer
+/// one is downloaded (the staged one is replaced by it), so "restart" never
+/// hides that a newer version is a download away.
+fn staged_tip(view: &View) -> String {
+    let staged = &view.staged.version;
+    if view.available_replaces_staged {
+        format!(
+            "Update {staged} is ready. {} is newer: download it in Updates to restart into it instead.",
+            view.available.version
+        )
+    } else {
+        format!("Update {staged} is ready. Restart to install it.")
+    }
+}
+
 /// What a notification's action opens in Telamon Settings, if it opens
 /// anything: its default action (a click on the notice) and the buttons
 /// that are only "open".
@@ -294,10 +310,7 @@ impl Tray {
         let at = self.scheduled_at;
         let urgent = staged && ((self.soon_shown && at > 0) || self.restart_failed);
         let mut tip = if staged {
-            format!(
-                "Update {} is ready. Restart to install it.",
-                self.view.staged.version
-            )
+            staged_tip(&self.view)
         } else if firmware {
             "Firmware updates are available.".to_string()
         } else {
@@ -1809,6 +1822,31 @@ mod tests {
             needs_shutdown: false,
             internal: false,
         }
+    }
+
+    #[test]
+    fn the_tooltip_names_the_version_a_restart_starts_and_a_newer_one() {
+        let slot = |v: &str| view::Slot {
+            present: true,
+            version: v.into(),
+            ..Default::default()
+        };
+        let mut v = View {
+            staged: slot("44.20261008-3"),
+            restart_needed: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            staged_tip(&v),
+            "Update 44.20261008-3 is ready. Restart to install it."
+        );
+        // 44.20261008-5 was published after -3 was staged
+        v.available = slot("44.20261008-5");
+        v.available_replaces_staged = true;
+        let tip = staged_tip(&v);
+        assert!(tip.starts_with("Update 44.20261008-3 is ready."), "{tip}");
+        assert!(tip.contains("44.20261008-5 is newer"), "{tip}");
+        assert!(!tip.contains("Restart to install it"), "{tip}");
     }
 
     #[test]

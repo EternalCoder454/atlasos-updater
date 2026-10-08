@@ -19,6 +19,13 @@ pub struct View {
     /// [`Status::available_update`]: the newest image a check found, when it
     /// is neither booted nor staged.
     pub available: Slot,
+    /// An update is staged and a newer image has been published since:
+    /// `available` is not the staged image, and downloading it replaces the
+    /// staged one (`bootc upgrade` stages the newest image over the staged
+    /// one), so one restart lands on the newest. False for an available image
+    /// that is the one the user went back from or failed its boot checks (it is
+    /// never offered over a good staged update), and while a rollback is queued.
+    pub available_replaces_staged: bool,
     /// `stable`, `testing`, or empty for a custom ref.
     pub channel: String,
     /// A restart will switch to something new (staged, or a queued rollback).
@@ -74,12 +81,20 @@ pub fn from_status(st: &Status) -> View {
     };
     let rollback = slot(st.status.rollback.as_ref());
     let queued = st.status.rollback_queued;
+    let staged = slot(st.status.staged.as_ref());
+    let available_is_rollback = available.present
+        && rollback.present
+        && !available.digest.is_empty()
+        && available.digest == rollback.digest;
+    let available_is_bad = available.present && st.is_bad_image(&available.digest);
     View {
-        available_is_rollback: available.present
-            && rollback.present
-            && !available.digest.is_empty()
-            && available.digest == rollback.digest,
-        available_is_bad: available.present && st.is_bad_image(&available.digest),
+        available_replaces_staged: available.present
+            && staged.present
+            && !queued
+            && !available_is_rollback
+            && !available_is_bad,
+        available_is_rollback,
+        available_is_bad,
         rollback_is_bad: rollback.present && st.is_bad_image(&rollback.digest),
         rollback_queued: queued,
         rollback_target: if queued {
@@ -88,7 +103,7 @@ pub fn from_status(st: &Status) -> View {
             String::new()
         },
         current: slot(booted),
-        staged: slot(st.status.staged.as_ref()),
+        staged,
         rollback,
         available,
         channel: st.channel().map(|c| c.to_string()).unwrap_or_default(),
@@ -201,6 +216,90 @@ mod tests {
         s.bad_image_digests = vec!["sha256:bbb".into()];
         let v = from_status(&s);
         assert!(v.available_is_bad && v.available_is_rollback && v.rollback_is_bad);
+    }
+
+    /// A host with `staged`, `booted` and `rollback` entries ("VERSION" or
+    /// "VERSION>CACHED"), the staged entry's commit being the ref's head, as
+    /// after the stager pulled it. Digests are `sha256:<version>`.
+    fn host(staged: &str, rollback: &str, queued: bool) -> Status {
+        const R: &str = r#"{"image":"ghcr.io/e/atlasos:testing","transport":"registry"}"#;
+        let img = |v: &str| {
+            format!(
+                r#"{{"image":{R},"version":"{v}","timestamp":"2026-10-08T00:00:00Z","imageDigest":"sha256:{v}"}}"#
+            )
+        };
+        let entry = |spec: &str| -> String {
+            if spec.is_empty() {
+                return "null".into();
+            }
+            let (v, c) = spec.split_once('>').unwrap_or((spec, ""));
+            let cached = if c.is_empty() { "null".into() } else { img(c) };
+            format!(
+                r#"{{"image":{},"cachedUpdate":{cached},"ostree":{{"checksum":"c-{v}","deploySerial":0,"stateroot":"default"}}}}"#,
+                img(v)
+            )
+        };
+        let mut s = st(&format!(
+            r#"{{"apiVersion":"org.containers.bootc/v1","kind":"BootcHost","spec":{{"image":{R}}},
+               "status":{{"staged":{},"booted":{},"rollback":{},"rollbackQueued":{queued},"type":"bootcHost"}}}}"#,
+            entry(staged),
+            // booted 44.1 still carries the check result from before the stager ran
+            entry("44.1>44.3"),
+            entry(rollback),
+        ));
+        // the ref points to the commit pulled last: the staged one
+        s.image_ref_heads = vec![format!("c-{}", staged.split('>').next().unwrap())];
+        s
+    }
+
+    #[test]
+    fn a_newer_image_published_after_one_was_staged_replaces_it() {
+        // booted 44.1, 44.3 staged, 44.5 published and checked for
+        let v = from_status(&host("44.3>44.5", "44.0", false));
+        assert_eq!(v.staged.version, "44.3");
+        assert_eq!(v.available.version, "44.5");
+        assert!(v.available_replaces_staged);
+        assert!(v.restart_needed);
+    }
+
+    #[test]
+    fn nothing_newer_than_the_staged_image_just_waits_for_the_restart() {
+        // the check found the staged image itself (a staged entry with no
+        // cachedUpdate: nothing newer on the registry)
+        let v = from_status(&host("44.3", "44.0", false));
+        assert!(v.restart_needed && v.staged.present);
+        assert!(!v.available.present && !v.available_replaces_staged);
+    }
+
+    #[test]
+    fn an_image_older_than_the_staged_one_does_not_replace_it() {
+        // the tag went back to 44.2 after 44.3 was staged: never downgraded
+        let v = from_status(&host("44.3>44.2", "44.0", false));
+        assert!(v.staged.present);
+        assert!(!v.available.present && !v.available_replaces_staged);
+    }
+
+    #[test]
+    fn a_bad_or_went_back_from_image_does_not_replace_the_staged_one() {
+        // 44.5 failed its boot checks here
+        let mut s = host("44.3>44.5", "44.0", false);
+        s.bad_image_digests = vec!["sha256:44.5".into()];
+        let v = from_status(&s);
+        assert!(v.available.present && v.available_is_bad && !v.available_replaces_staged);
+        // 44.5 is the version the user went back from
+        let v = from_status(&host("44.3>44.5", "44.5", false));
+        assert!(v.available_is_rollback && !v.available_replaces_staged);
+        // a queued rollback is never mixed with a download
+        let v = from_status(&host("44.3>44.5", "44.0", true));
+        assert!(!v.available_replaces_staged);
+    }
+
+    #[test]
+    fn without_a_staged_update_an_available_one_replaces_nothing() {
+        let cached = r#","cachedUpdate":{"image":{"image":"ghcr.io/eternalcoder454/atlasos:stable","transport":"registry"},
+                       "version":"44.20261009","timestamp":"2026-10-09T04:00:00Z","imageDigest":"sha256:bbb"}"#;
+        let v = from_status(&build(cached, "null"));
+        assert!(v.available.present && !v.available_replaces_staged);
     }
 
     #[test]

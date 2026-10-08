@@ -1,0 +1,4 @@
+{
+ "tag_name": "44.20261008-5",
+ "body": "## What's new\n\n- Plasma 6.7.5 and KDE Frameworks 6.30\n- Faster boot: the update stage now runs before login\n- Fixed a rare freeze when waking from sleep on AMD graphics\n\n### Notes\n\nIf something goes wrong, use **Go back** in Telamon Updater. See the [changelog](https://github.com/EternalCoder454/AtlasOS)."
+}
