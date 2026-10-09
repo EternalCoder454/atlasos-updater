@@ -170,7 +170,25 @@ impl Cached {
 
 /// The list cached for `url` (the file's first line), if any.
 pub fn read_cache(path: &Path, url: &str, now: SystemTime) -> Option<Cached> {
-    let file = std::fs::read_to_string(path).ok()?;
+    // The folder is the user's own, but any app with access to home can put
+    // anything there: a regular file only, of a sane size.
+    let mut file = String::new();
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .ok()?;
+        if !f.metadata().ok()?.is_file() {
+            return None;
+        }
+        let n = f.take(CACHE_MAX + 1).read_to_string(&mut file).ok()?;
+        if n as u64 > CACHE_MAX {
+            return None;
+        }
+    }
     let (head, text) = file.split_once('\n')?;
     if head != url {
         return None;
@@ -185,18 +203,47 @@ pub fn read_cache(path: &Path, url: &str, now: SystemTime) -> Option<Cached> {
     })
 }
 
+/// Most a cached list may be (GitHub's page of releases is far smaller).
+const CACHE_MAX: u64 = 8 * 1024 * 1024;
+
+/// Makes the temporary names of this process differ from call to call.
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Keeps the list GitHub gave for `url`, if it is one (a JSON array); a
 /// failure only costs a fetch next time.
 pub fn write_cache(path: &Path, url: &str, text: &str) -> bool {
     if !serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_array()) {
         return false;
     }
-    let tmp = path.with_extension("tmp");
-    path.parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(&tmp, format!("{url}\n{text}")))
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .is_ok()
+    // A new file of our own each time (never one that was already there, nor
+    // a link): the tray and Settings may both write.
+    let tmp = path.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)?;
+        let done = f
+            .write_all(format!("{url}\n{text}").as_bytes())
+            .and_then(|()| std::fs::rename(&tmp, path));
+        if done.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        done
+    };
+    write().is_ok()
 }
 
 #[cfg(test)]
@@ -383,5 +430,31 @@ mod tests {
         assert!(!write_cache(&p, "u", r#"{"message":"Not Found"}"#));
         assert!(!write_cache(&p, "u", "<html>"));
         assert_eq!(read_cache(&p, "u", SystemTime::now()).unwrap().text, "[]");
+    }
+
+    #[test]
+    fn the_cache_is_never_a_link_nor_huge_and_a_write_leaves_only_the_cache() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("releases.json");
+        // a link at the cache's own name is not read
+        let other = d.path().join("other");
+        std::fs::write(&other, "u\n[]").unwrap();
+        std::os::unix::fs::symlink(&other, &p).unwrap();
+        assert!(read_cache(&p, "u", SystemTime::now()).is_none());
+        std::fs::remove_file(&p).unwrap();
+        // a file over the cap is not read
+        let big = format!("u\n{}", " ".repeat(CACHE_MAX as usize));
+        std::fs::write(&p, big).unwrap();
+        assert!(read_cache(&p, "u", SystemTime::now()).is_none());
+        // a write leaves no temporary file behind, and the cache is 0600
+        std::fs::remove_file(&p).unwrap();
+        std::fs::remove_file(&other).unwrap();
+        assert!(write_cache(&p, "u", "[]"));
+        assert!(write_cache(&p, "u", "[]"));
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+        assert_eq!(read_cache(&p, "u", SystemTime::now()).unwrap().text, "[]");
+        let mode =
+            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&p).unwrap().permissions());
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

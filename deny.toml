@@ -1,0 +1,49 @@
+# cargo-deny: supply-chain policy for Telamon Updater (see docs/SECURITY.md).
+# CI runs `cargo deny check` and `cargo audit` (.github/workflows/ci.yml).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# An advisory that does not apply goes here with the reason, never silently.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-roots: the CA list the notes fetch trusts
+]
+
+[bans]
+multiple-versions = "warn"
+# git and path dependencies have no version requirement; they are pinned by tag
+# and limited by [sources]. Registry dependencies all carry versions.
+wildcards = "allow"
+# The helper runs as root and talks to the registry only through bootc and
+# skopeo: it must not link a TLS stack or an HTTP client of its own.
+deny = [
+    { crate = "openssl", reason = "TLS is rustls (notes fetch) or curl (framework); nothing links OpenSSL" },
+    { crate = "openssl-sys", reason = "same" },
+    { crate = "native-tls", reason = "same" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The Telamon framework is the only git dependency, pinned by tag (and by
+# commit in Cargo.lock).
+allow-git = ["https://github.com/EternalCoder454/atlas-framework"]

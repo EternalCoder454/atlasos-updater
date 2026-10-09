@@ -569,6 +569,9 @@ struct BootInfo {
     image: Option<String>,
 }
 
+/// Longer than any channel name ("testing" is the longest).
+const MAX_CHANNEL_LEN: usize = 16;
+
 /// The five operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
@@ -621,6 +624,14 @@ impl Op {
     /// Reject bad arguments before anything else happens.
     pub fn validate(&self) -> Result<(), HelperError> {
         if let Op::SwitchChannel(c) = self {
+            // Checked before anything else touches the string: the caller is
+            // not authorized yet (D-Bus allows messages of up to 128 MB), and
+            // a parse error would send the whole string back to it.
+            if c.len() > MAX_CHANNEL_LEN {
+                return Err(HelperError::InvalidArgument(
+                    "channel must be \"stable\" or \"testing\"".into(),
+                ));
+            }
             c.parse::<Channel>()
                 .map_err(|e| HelperError::InvalidArgument(e.to_string()))?;
         }
@@ -2122,6 +2133,18 @@ mod tests {
             assert!(matches!(e, HelperError::InvalidArgument(_)), "{bad:?}");
         }
         assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn an_oversized_channel_is_refused_and_not_echoed_back() {
+        let big = "x".repeat(8 * 1024 * 1024);
+        let e = Op::SwitchChannel(big).validate().unwrap_err();
+        let HelperError::InvalidArgument(msg) = e else {
+            panic!("not an InvalidArgument");
+        };
+        assert!(msg.len() < 100, "the refusal repeats the argument");
+        // the longest real channel still passes
+        assert!(Op::SwitchChannel("testing".into()).validate().is_ok());
     }
 
     #[test]

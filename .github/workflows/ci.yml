@@ -1,0 +1,83 @@
+# Telamon Updater CI: formatting, lints, tests, and a supply-chain check.
+# Runs in Fedora 44, the release the OS image and the package are built on.
+# Nothing here has a secret or a write permission.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New advisories appear without a push: look again every Monday.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # a push to a pull request replaces its older run; a main run is never cancelled
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The tray's bus tests need dbus-daemon; fail instead of skipping.
+  TELAMON_REQUIRE_DBUS_TESTS: "1"
+
+jobs:
+  test:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install the build dependencies
+        run: |
+          dnf -y --setopt=install_weak_deps=False install \
+            cargo rust clippy rustfmt gcc git pkgconf-pkg-config \
+            flatpak-devel glib2-devel dbus-daemon
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  supply-chain:
+    name: cargo audit, cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install Rust
+        run: dnf -y --setopt=install_weak_deps=False install cargo rust gcc git pkgconf-pkg-config
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        with:
+          path: ~/.cargo-tools
+          key: tools-cargo-audit-0.22.2-cargo-deny-0.20.2
+      - name: Install cargo-audit and cargo-deny
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: cargo install --locked --root ~/.cargo-tools cargo-audit@0.22.2 cargo-deny@0.20.2
+      - name: Known vulnerabilities in Cargo.lock (RustSec)
+        run: ~/.cargo-tools/bin/cargo-audit audit --deny warnings
+      - name: Licences, banned crates, sources (deny.toml)
+        run: ~/.cargo-tools/bin/cargo-deny --locked check

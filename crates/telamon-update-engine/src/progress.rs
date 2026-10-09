@@ -218,7 +218,7 @@ impl RpmOstreeParser {
             && (line.contains("Fetching layer ") || line.contains("Fetching ostree chunk "))
         {
             if complete && line.ends_with("...done") {
-                self.finished += parse_size(paren(line)?)?;
+                self.finished = self.finished.saturating_add(parse_size(paren(line)?)?);
             }
             return Some(self.downloading());
         }
@@ -245,7 +245,7 @@ impl RpmOstreeParser {
     }
 
     fn need(&mut self, rest: &str) -> Option<Progress> {
-        self.needed += parse_size(paren(rest)?)?;
+        self.needed = self.needed.saturating_add(parse_size(paren(rest)?)?);
         Some(self.downloading())
     }
 
@@ -452,6 +452,17 @@ mod tests {
         // a size that rounds up past the total is clamped
         let got = p.feed(b"[4/3] Fetching layer zzz (100.0 MB)...done\n");
         assert_eq!((got[0].done, got[0].total), (300_000_000, 300_000_000));
+    }
+
+    #[test]
+    fn rpm_ostree_sizes_that_overflow_do_not_panic() {
+        // the sizes come from a registry's manifest, through rpm-ostree
+        let mut p = RpmOstreeParser::new();
+        p.feed(b"custom layers needed: 2 (1e300 MB)\n");
+        p.feed(b"custom layers needed: 2 (1e300 MB)\n");
+        p.feed(b"[1/2] Fetching layer a (1e300 MB)...done\n");
+        let got = p.feed(b"[2/2] Fetching layer b (1e300 MB)...done\n");
+        assert_eq!(got[0].done, got[0].total);
     }
 
     #[test]

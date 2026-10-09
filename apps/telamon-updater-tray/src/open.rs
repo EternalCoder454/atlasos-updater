@@ -34,11 +34,14 @@ impl Open {
     }
 }
 
-/// The program: `TELAMON_SETTINGS_BIN` if set (tests and developers), else
-/// `telamon-settings` next to the tray, else `/usr/bin/telamon-settings`.
+/// The program: `TELAMON_SETTINGS_BIN` if set (tests and developers: a
+/// release build ignores it), else `telamon-settings` next to the tray, else
+/// `/usr/bin/telamon-settings`.
 pub fn settings_bin() -> PathBuf {
     settings_bin_from(
-        std::env::var_os("TELAMON_SETTINGS_BIN").map(PathBuf::from),
+        std::env::var_os("TELAMON_SETTINGS_BIN")
+            .map(PathBuf::from)
+            .filter(|_| cfg!(debug_assertions)),
         std::env::current_exe().ok(),
     )
 }
@@ -103,6 +106,21 @@ mod tests {
         assert_eq!(settings_bin_from(Some("".into()), Some(exe)), sibling);
     }
 
+    /// Run `cmd` to the end. A script written a moment ago can answer "text
+    /// file busy" while another test's thread has forked with its write
+    /// handle still open; that passes in a few milliseconds.
+    fn run(cmd: &mut std::process::Command) -> std::process::ExitStatus {
+        for _ in 0..200 {
+            match cmd.status() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other.unwrap(),
+            }
+        }
+        cmd.status().unwrap()
+    }
+
     /// A `telamon-settings` that writes its arguments (one per line) and
     /// the activation token to `out`.
     fn fake_settings(dir: &std::path::Path) -> (PathBuf, PathBuf) {
@@ -133,7 +151,7 @@ mod tests {
             (Open::Apps, vec!["arg:updates", "arg:apps"]),
         ] {
             let _ = std::fs::remove_file(&out);
-            let status = command(&bin, what, Some("tok123".into())).status().unwrap();
+            let status = run(&mut command(&bin, what, Some("tok123".into())));
             assert!(status.success());
             let got = std::fs::read_to_string(&out).unwrap();
             let mut want = want;
@@ -154,7 +172,7 @@ mod tests {
             .map(|(_, v)| v);
         assert_eq!(token, Some(None));
         let mut cmd = cmd;
-        assert!(cmd.status().unwrap().success());
+        assert!(run(&mut cmd).success());
         let got = std::fs::read_to_string(&out).unwrap();
         assert!(got.ends_with("token:unset\n"), "{got}");
     }

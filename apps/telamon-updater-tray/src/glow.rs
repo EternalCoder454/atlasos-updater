@@ -12,7 +12,12 @@ use tokio::process::{Child, Command};
 pub const DEFAULT_BIN: &str = "/usr/libexec/telamon-updater-glow";
 
 pub fn glow_bin() -> PathBuf {
-    glow_bin_from(std::env::var_os("TELAMON_UPDATER_GLOW_BIN").map(PathBuf::from))
+    // (a release build ignores the variable, as telamon-updater does for its own)
+    glow_bin_from(
+        std::env::var_os("TELAMON_UPDATER_GLOW_BIN")
+            .map(PathBuf::from)
+            .filter(|_| cfg!(debug_assertions)),
+    )
 }
 
 fn glow_bin_from(env: Option<PathBuf>) -> PathBuf {
@@ -155,7 +160,21 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let mut g = Glow::new(script);
-        g.spawn().unwrap();
+        // "Text file busy" while another test thread has forked with the
+        // script still open for writing: it passes in milliseconds
+        let mut tries = 0;
+        loop {
+            match g.spawn() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 200 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => {
+                    other.unwrap();
+                    break;
+                }
+            }
+        }
         assert!(g.running());
         // a second spawn changes nothing
         g.spawn().unwrap();
