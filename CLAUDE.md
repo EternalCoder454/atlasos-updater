@@ -5,7 +5,7 @@ Fedora Kinoite 44 bootc image (repo `~/Documents/AtlasOS`, not renamed yet).
 Telamon Updater is the **background part** of updating: it has no window. The
 window (update, go back, switch channel, history, crash report review) is the
 Updates page of Telamon Settings (the `telamon-settings` repo, its
-`docs/DESIGN.md` "Updates"). Read `docs/DESIGN.md` first: it fixes the layout,
+`docs/DESIGN.md` "Updates"). Read `docs/DESIGN.md` first (and `docs/SECURITY.md` before you touch the helper, its polkit actions, D-Bus policy or units: a test fails if their shape changes): it fixes the layout,
 the system helper's D-Bus API, the tray's session interface, the glow and the
 telamon-update-engine API. Change it only together with the code that
 implements the change.
@@ -82,5 +82,6 @@ implements the change.
 | Format | `cargo fmt --all --check` |
 | Lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | Tests | `TELAMON_REQUIRE_DBUS_TESTS=1 cargo test --workspace --locked` (needs `dbus-daemon` for the private-bus tests, the tray's `tests/tray_bus.rs` among them; without the variable they skip) |
+| Supply chain | `cargo audit --deny warnings` and `cargo deny --locked check` (`deny.toml`; CI runs both weekly too; install with `cargo install --locked cargo-audit cargo-deny`) |
 | Glow | `cmake -S apps/telamon-updater-glow -B /build/glow -G Ninja && cmake --build /build/glow` (needs telamon-ui, layer-shell-qt, Qt 6 devel; `--target all_qmllint` for qmllint) |
 | RPMs | `packaging/build-rpm.sh /src/out` (host: `podman run --rm --security-opt label=disable -v "$PWD":/src ... fedora:44 /src/packaging/build-rpm.sh /src/out`; unset `CARGO_TARGET_DIR` in the container) |
