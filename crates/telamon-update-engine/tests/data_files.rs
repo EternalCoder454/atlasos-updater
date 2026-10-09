@@ -120,3 +120,227 @@ fn the_units_and_the_preset_use_the_new_names() {
         "telamon-system-helper\ntelamon-updater\n"
     );
 }
+
+// ---- Secure phase: what the shipped files may and may not grant (docs/SECURITY.md)
+
+/// `(allow_any, allow_inactive, allow_active)` of an action's `<defaults>`.
+fn defaults(body: &str) -> (String, String, String) {
+    let get = |tag: &str| {
+        body.split(&format!("<{tag}>"))
+            .nth(1)
+            .and_then(|r| r.split(&format!("</{tag}>")).next())
+            .unwrap_or_else(|| panic!("no <{tag}>"))
+            .trim()
+            .to_string()
+    };
+    (get("allow_any"), get("allow_inactive"), get("allow_active"))
+}
+
+#[test]
+fn only_status_and_check_are_open_to_users_everything_else_asks_an_administrator() {
+    let all = actions(&data("polkit-1/actions/net.eterneon.telamon.system.policy"));
+    for (id, body) in &all {
+        let (any, inactive, active) = defaults(body);
+        let name = id.rsplit('.').next().unwrap();
+        match name {
+            // reads what `bootc status` says; harmless for anyone
+            "status" => assert_eq!(
+                (any.as_str(), inactive.as_str(), active.as_str()),
+                ("yes", "yes", "yes"),
+                "{id}"
+            ),
+            // may use the network: only a user at the machine, never remote
+            "check" => assert_eq!(
+                (any.as_str(), inactive.as_str(), active.as_str()),
+                ("no", "no", "yes"),
+                "{id}"
+            ),
+            // changes what boots next: an administrator, from any session
+            "upgrade" | "rollback" | "switch-channel" => assert_eq!(
+                (any.as_str(), inactive.as_str(), active.as_str()),
+                ("auth_admin", "auth_admin", "auth_admin_keep"),
+                "{id}"
+            ),
+            other => panic!("{id}: an action ({other}) the tests do not know"),
+        }
+        // a prompt must say what it is for
+        assert!(
+            body.contains("<message>") && body.contains("<description>"),
+            "{id}"
+        );
+        // never lets a program be run with chosen arguments
+        assert!(!body.contains("policykit.exec"), "{id}");
+    }
+}
+
+#[test]
+fn the_rule_grants_only_check_and_upgrade_to_local_active_wheel() {
+    let rules = data("polkit-1/rules.d/50-telamon-system.rules");
+    // one rule, one condition, one result
+    assert_eq!(rules.matches("polkit.addRule").count(), 1);
+    assert_eq!(rules.matches("polkit.Result.").count(), 1);
+    assert!(rules.contains("return polkit.Result.YES;"));
+    assert!(rules.contains("subject.local && subject.active && subject.isInGroup(\"wheel\")"));
+    // no way for the rule to read the caller's input
+    for bad in ["action.lookup", "subject.user ==", "eval(", "polkit.spawn"] {
+        assert!(!rules.contains(bad), "{bad}");
+    }
+}
+
+#[test]
+fn the_dbus_policy_lets_only_root_own_the_names_and_allows_only_named_interfaces() {
+    for file in [
+        "dbus-1/system.d/net.eterneon.telamon.SystemHelper.conf",
+        "dbus-1/system.d/net.eterneon.atlas.SystemHelper.conf",
+    ] {
+        let conf = data(file);
+        // owning: root's policy only
+        let owns: Vec<_> = conf.match_indices("<allow own=").map(|(i, _)| i).collect();
+        assert_eq!(owns.len(), 1, "{file}");
+        let root = conf.find("<policy user=\"root\">").unwrap();
+        let default = conf.find("<policy context=\"default\">").unwrap();
+        assert!(
+            root < owns[0] && owns[0] < default,
+            "{file}: own is not in root's policy"
+        );
+        // sending: every allow names an interface, and there is no allow_*
+        // of a user, group or the whole bus
+        for line in conf.lines().filter(|l| l.contains("<allow")) {
+            assert!(
+                line.contains("own=") || line.contains("send_destination"),
+                "{file}: {line}"
+            );
+        }
+        let after_default = &conf[default..];
+        assert_eq!(
+            after_default.matches("<allow send_destination").count(),
+            after_default.matches("send_interface").count(),
+            "{file}: a send without an interface"
+        );
+        for bad in [
+            "<allow user=",
+            "<allow group=",
+            "<deny",
+            "eavesdrop",
+            "receive_",
+        ] {
+            assert!(!conf.contains(bad), "{file}: {bad}");
+        }
+    }
+}
+
+#[test]
+fn the_helper_exposes_six_methods_and_only_the_channel_takes_an_argument() {
+    let src = std::fs::read_to_string(format!(
+        "{}/src/helper/service.rs",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    // the production part of the file, before its tests
+    let src = src.split("#[cfg(test)]").next().unwrap();
+    let mut methods = Vec::new();
+    for iface in src.split("#[zbus::interface(").skip(1) {
+        let body = iface.split("\n}\n").next().unwrap();
+        let mut sig = None::<(String, Vec<String>)>;
+        for line in body.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("async fn ") {
+                sig = Some((rest.split('(').next().unwrap().to_string(), Vec::new()));
+            } else if t.starts_with(") ->") || t.starts_with("-> ") {
+                let (name, args) = sig.take().unwrap();
+                if name != "progress" {
+                    let want: &[&str] = if name == "switch_channel" {
+                        &["channel: String,"]
+                    } else {
+                        &[]
+                    };
+                    assert_eq!(args, want, "{name} takes an argument from the caller");
+                    methods.push(name);
+                }
+            } else if let Some((_, args)) = sig.as_mut() {
+                // `&self`, the message header and the connection come from
+                // zbus, not from the caller
+                let own = t == "&self,"
+                    || t.starts_with("#[zbus(header)]")
+                    || t.starts_with("#[zbus(connection)]");
+                if !own && !t.is_empty() {
+                    args.push(t.to_string());
+                }
+            }
+        }
+    }
+    methods.sort();
+    methods.dedup();
+    assert_eq!(
+        methods,
+        [
+            "cancel_rollback",
+            "check_for_update",
+            "rollback",
+            "status",
+            "switch_channel",
+            "upgrade"
+        ]
+    );
+}
+
+#[test]
+fn the_helper_units_are_sandboxed_as_far_as_bootc_allows() {
+    // what every unit that runs the helper must keep (docs/SECURITY.md)
+    let all = [
+        "ProtectHome=yes",
+        "ProtectKernelModules=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectControlGroups=yes",
+        "ProtectClock=yes",
+        "ProtectHostname=yes",
+        "LockPersonality=yes",
+        "RestrictRealtime=yes",
+        "SystemCallArchitectures=native",
+        "PrivateTmp=yes",
+    ];
+    for unit in [
+        "telamon-system-helper.service",
+        "telamon-drivers.service",
+        "telamon-record-boot.service",
+    ] {
+        let text = data(&format!("systemd/{unit}"));
+        for want in all {
+            assert!(text.lines().any(|l| l == want), "{unit} lost {want}");
+        }
+        // the capabilities that must never come back
+        let caps = text
+            .lines()
+            .find(|l| l.starts_with("CapabilityBoundingSet="))
+            .unwrap_or_else(|| panic!("{unit}: no CapabilityBoundingSet"));
+        for cap in [
+            "CAP_SYS_MODULE",
+            "CAP_SYS_BOOT",
+            "CAP_SYS_RAWIO",
+            "CAP_SYS_TIME",
+            "CAP_NET_ADMIN",
+            "CAP_NET_RAW",
+            "CAP_BPF",
+            "CAP_PERFMON",
+        ] {
+            assert!(caps.contains(cap), "{unit}: {cap} is no longer removed");
+        }
+        assert!(
+            caps.starts_with("CapabilityBoundingSet=~"),
+            "{unit}: must be a deny list"
+        );
+        // none of them lets a user run it with arguments
+        assert!(!text.contains("User="), "{unit}");
+    }
+    // no network at all for the one that only reads bootc status
+    let boot = data("systemd/telamon-record-boot.service");
+    assert!(boot.contains("\nPrivateNetwork=yes\n"));
+    assert!(boot.contains("\nRestrictAddressFamilies=AF_UNIX\n"));
+    // the helper and the drivers run reach registries, and only over IP
+    for unit in ["telamon-system-helper.service", "telamon-drivers.service"] {
+        assert!(
+            data(&format!("systemd/{unit}"))
+                .contains("\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\n")
+        );
+    }
+}
