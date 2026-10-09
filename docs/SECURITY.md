@@ -116,8 +116,10 @@ registry can be asked and again on what was staged (taken out with
 
 ### Release notes, firmware, Flatpak, crash reports (the user side)
 
-- **Release notes** are fetched over https only (redirects stay on https), at
-  most 2 MiB, 15 s, rendered through an allow-list (raw HTML shown as text,
+- **Release notes** are fetched over https by default (an administrator may
+  configure `http://` or `file://` in `/etc/telamon-updater/updater.toml`; a
+  `file://` read is not size-capped), redirects stay on https, at most 2 MiB
+  for a download, 15 s, rendered through an allow-list (raw HTML shown as text,
   images dropped, only https links, a link whose text names another host gets
   that host appended). The cache file under `~/.cache` is read as a regular
   file of at most 8 MiB, written through a new `O_EXCL | O_NOFOLLOW` file.
@@ -169,7 +171,7 @@ syscalls need are already gone. They are a VM exercise, not a guess.
 |---|---|---|---|---|
 | U1 | `SwitchChannel` validated its argument before polkit and echoed the whole string in the error: an unauthorized caller could make the root helper copy and return a message of up to 128 MB | low | refused above 16 bytes, fixed text | `an_oversized_channel_is_refused_and_not_echoed_back` |
 | U2 | The progress parser added registry-reported layer sizes with `+=` (a panic in a debug build, wrong numbers in release) | info | `saturating_add` | `rpm_ostree_sizes_that_overflow_do_not_panic` |
-| U3 | `~/.cache/telamon-updater/releases.json` was read without a size cap or link check, and written through a fixed temp name that followed links | low | `O_NOFOLLOW`, regular file, 8 MiB cap; unique `O_EXCL` 0600 temp file | `the_cache_is_never_a_link_nor_huge_and_the_write_never_follows_one` |
+| U3 | `~/.cache/telamon-updater/releases.json` was read without a size cap or link check, and written through a fixed temp name that followed links | low | `O_NOFOLLOW`, regular file, 8 MiB cap; unique `O_EXCL` 0600 temp file | `the_cache_is_never_a_link_nor_huge_and_a_write_leaves_only_the_cache` |
 | U4 | The tray honoured `TELAMON_SETTINGS_BIN` and `TELAMON_UPDATER_GLOW_BIN` in release builds (`telamon-updater` already did not) | info | debug builds only | the tray's bus tests (debug) still use them |
 | U5 | No CI at all; nothing checked advisories, licences or sources | medium (process) | `.github/workflows/ci.yml`: fmt, clippy `-D warnings`, tests with D-Bus, `cargo audit`, `cargo deny` (weekly too); `deny.toml` | the workflow |
 | U6 | The shipped polkit, D-Bus and unit files were only tested for parity between the two identities | process | tests for the defaults, the rule, root-only ownership, the method list and argument shapes, and the unit floor | `tests/data_files.rs` (5 new tests) |
@@ -179,7 +181,8 @@ Checked and fine: the polkit subject, the six-method interface, the parse of
 every enum argument, bootc/skopeo/rpm-ostree invocation, the lock files, the
 state-file writes, the downgrade refusal, the drivers decision, fwupd's call
 set and trust flags, the release-notes renderer, the Flatpak calls, every
-`unsafe` outside the helper (flock, memfd seals, fcntl, prctl, alarm), and the
+`unsafe` outside the helper (including flock, memfd seals, fcntl, prctl, alarm,
+kill, setlocale and the time and locale calls), and the
 absence of `sh -c` anywhere.
 
 ## Accepted, and what is left
@@ -191,6 +194,7 @@ absence of `sh -c` anywhere.
 | A firmware lock that cannot be read counts as "no flash" | `XDG_RUNTIME_DIR` unset means no session bus either | postpone on error |
 | The https filter of firmware URLs checks literal IPs and `localhost` only | the URL comes from signed LVFS metadata or a root-added remote | a resolver that refuses private addresses |
 | `ureq` uses the bundled `webpki-roots`, not the system store | admin-installed CAs are ignored; the list ages with the package | `rustls-platform-verifier` |
+| An unauthorized caller can still make the bus deliver (and zbus parse) a message of up to 128 MB before the helper sees the argument | the cap stops the echo and the copy, not the receive | lower `max_message_size` in the D-Bus policy |
 | `check` is allowed to any active local user | Settings must show updates to standard users | a cached result per boot |
 | The helper's units are at 6.0-6.7 | see "Units" | VM-verified sandboxing options |
 | Firmware installs in Settings must hold `lock::FIRMWARE` for the tray's restart gate to work | lives in Telamon Settings | check there |
@@ -206,5 +210,6 @@ yanked crates denied) on every push and weekly.
 
 ## Reporting
 
-Use GitHub's private vulnerability reporting on this repository, or email the
-maintainer; please do not open a public issue for a way to gain root.
+Private vulnerability reporting is not enabled on this repository yet; until it
+is, contact the maintainer (EternalCoder454 on GitHub) directly rather than
+opening a public issue for a way to gain root.

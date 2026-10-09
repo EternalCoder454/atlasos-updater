@@ -18,8 +18,23 @@ fn ops() -> Vec<Op> {
     ]
 }
 
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<!--") {
+        out.push_str(&rest[..i]);
+        rest = match rest[i..].find("-->") {
+            Some(j) => &rest[i + j + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The `<action id=...>` blocks of the policy, by id.
 fn actions(policy: &str) -> Vec<(String, String)> {
+    let policy = strip_xml_comments(policy);
     policy
         .split("<action id=\"")
         .skip(1)
@@ -168,23 +183,38 @@ fn only_status_and_check_are_open_to_users_everything_else_asks_an_administrator
             body.contains("<message>") && body.contains("<description>"),
             "{id}"
         );
-        // never lets a program be run with chosen arguments
-        assert!(!body.contains("policykit.exec"), "{id}");
+        // never lets a program be run with chosen arguments, and implies
+        // nothing else: no annotation at all
+        assert!(!body.contains("<annotate"), "{id}");
     }
 }
 
 #[test]
 fn the_rule_grants_only_check_and_upgrade_to_local_active_wheel() {
+    // Every word of the rule, comments aside: a widened condition or id list
+    // is a change to review, not one a substring test lets through.
     let rules = data("polkit-1/rules.d/50-telamon-system.rules");
-    // one rule, one condition, one result
-    assert_eq!(rules.matches("polkit.addRule").count(), 1);
-    assert_eq!(rules.matches("polkit.Result.").count(), 1);
-    assert!(rules.contains("return polkit.Result.YES;"));
-    assert!(rules.contains("subject.local && subject.active && subject.isInGroup(\"wheel\")"));
-    // no way for the rule to read the caller's input
-    for bad in ["action.lookup", "subject.user ==", "eval(", "polkit.spawn"] {
-        assert!(!rules.contains(bad), "{bad}");
-    }
+    let code: String = rules
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        code,
+        "polkit.addRule(function(action, subject) { var ids = [ \
+         \"net.eterneon.telamon.system.check\", \"net.eterneon.telamon.system.upgrade\", \
+         \"net.eterneon.atlas.system.check\", \"net.eterneon.atlas.system.upgrade\" ]; \
+         if (ids.indexOf(action.id) >= 0 && subject.local && subject.active && \
+         subject.isInGroup(\"wheel\")) { return polkit.Result.YES; } });"
+            .replace("\\\n", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    // and it is the only rules file the package ships
+    let dir = format!("{}/data/polkit-1/rules.d", env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
 }
 
 #[test]
@@ -193,7 +223,21 @@ fn the_dbus_policy_lets_only_root_own_the_names_and_allows_only_named_interfaces
         "dbus-1/system.d/net.eterneon.telamon.SystemHelper.conf",
         "dbus-1/system.d/net.eterneon.atlas.SystemHelper.conf",
     ] {
-        let conf = data(file);
+        let conf = strip_xml_comments(&data(file));
+        let conf = conf.split_whitespace().collect::<Vec<_>>().join(" ");
+        let bus = file
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .trim_end_matches(".conf")
+            .to_string();
+        // every allowance concerns the helper's own name, and nothing else
+        for part in conf.split("send_destination=\"").skip(1) {
+            assert_eq!(part.split('"').next().unwrap(), bus, "{file}");
+        }
+        for part in conf.split("own=\"").skip(1) {
+            assert_eq!(part.split('"').next().unwrap(), bus, "{file}");
+        }
         // owning: root's policy only
         let owns: Vec<_> = conf.match_indices("<allow own=").map(|(i, _)| i).collect();
         assert_eq!(owns.len(), 1, "{file}");
@@ -205,7 +249,7 @@ fn the_dbus_policy_lets_only_root_own_the_names_and_allows_only_named_interfaces
         );
         // sending: every allow names an interface, and there is no allow_*
         // of a user, group or the whole bus
-        for line in conf.lines().filter(|l| l.contains("<allow")) {
+        for line in conf.split("<allow").skip(1) {
             assert!(
                 line.contains("own=") || line.contains("send_destination"),
                 "{file}: {line}"
@@ -229,59 +273,130 @@ fn the_dbus_policy_lets_only_root_own_the_names_and_allows_only_named_interfaces
     }
 }
 
+/// `(name, parameters)` of every `fn` in `body`, parameters split at the
+/// top-level commas, whatever the layout of the signature.
+fn functions(body: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(i) = body[at..].find("fn ") {
+        let start = at + i;
+        at = start + 3;
+        // a whole word: not the tail of another identifier
+        if body[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = &body[start + 3..];
+        let Some(open) = rest.find('(') else { continue };
+        let name = rest[..open].trim().to_string();
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let (mut depth, mut cur, mut params) = (0, String::new(), Vec::new());
+        for c in rest[open..].chars() {
+            match c {
+                '(' | '[' | '<' => {
+                    depth += 1;
+                    if depth > 1 {
+                        cur.push(c);
+                    }
+                }
+                ')' | ']' | '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    cur.push(c);
+                }
+                ',' if depth == 1 => params.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        params.push(cur);
+        let params = params
+            .iter()
+            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|p| !p.is_empty())
+            .collect();
+        out.push((name, params));
+    }
+    out
+}
+
 #[test]
 fn the_helper_exposes_six_methods_and_only_the_channel_takes_an_argument() {
-    let src = std::fs::read_to_string(format!(
+    // every interface attribute anywhere in the engine
+    let mut sources = Vec::new();
+    let mut dirs = vec![std::path::PathBuf::from(format!(
+        "{}/src",
+        env!("CARGO_MANIFEST_DIR")
+    ))];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                sources.push(std::fs::read_to_string(&p).unwrap());
+            }
+        }
+    }
+    let all = sources.join("\n");
+    let interfaces = all.matches("zbus::interface").count() + all.matches("#[interface").count();
+    assert_eq!(interfaces, 2, "a D-Bus interface was added or removed");
+
+    let service = std::fs::read_to_string(format!(
         "{}/src/helper/service.rs",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
     // the production part of the file, before its tests
-    let src = src.split("#[cfg(test)]").next().unwrap();
-    let mut methods = Vec::new();
-    for iface in src.split("#[zbus::interface(").skip(1) {
+    let service = service.split("#[cfg(test)]").next().unwrap();
+    let blocks: Vec<&str> = service.split("#[zbus::interface(").skip(1).collect();
+    assert_eq!(blocks.len(), 2);
+    for iface in blocks {
         let body = iface.split("\n}\n").next().unwrap();
-        let mut sig = None::<(String, Vec<String>)>;
-        for line in body.lines() {
-            let t = line.trim();
-            if let Some(rest) = t.strip_prefix("async fn ") {
-                sig = Some((rest.split('(').next().unwrap().to_string(), Vec::new()));
-            } else if t.starts_with(") ->") || t.starts_with("-> ") {
-                let (name, args) = sig.take().unwrap();
-                if name != "progress" {
-                    let want: &[&str] = if name == "switch_channel" {
-                        &["channel: String,"]
-                    } else {
-                        &[]
-                    };
-                    assert_eq!(args, want, "{name} takes an argument from the caller");
-                    methods.push(name);
-                }
-            } else if let Some((_, args)) = sig.as_mut() {
-                // `&self`, the message header and the connection come from
-                // zbus, not from the caller
-                let own = t == "&self,"
-                    || t.starts_with("#[zbus(header)]")
-                    || t.starts_with("#[zbus(connection)]");
-                if !own && !t.is_empty() {
-                    args.push(t.to_string());
-                }
+        let mut methods = Vec::new();
+        for (name, params) in functions(body) {
+            // `&self`, the message header and the connection come from zbus,
+            // not from the caller
+            let args: Vec<_> = params
+                .iter()
+                .filter(|p| {
+                    *p != "&self"
+                        && !p.starts_with("#[zbus(header)]")
+                        && !p.starts_with("#[zbus(connection)]")
+                })
+                .cloned()
+                .collect();
+            if name == "progress" {
+                assert!(args.is_empty(), "the property takes nothing");
+                continue;
             }
+            let want: &[&str] = if name == "switch_channel" {
+                &["channel: String"]
+            } else {
+                &[]
+            };
+            assert_eq!(args, want, "{name} takes an argument from the caller");
+            methods.push(name);
         }
+        methods.sort();
+        assert_eq!(
+            methods,
+            [
+                "cancel_rollback",
+                "check_for_update",
+                "rollback",
+                "status",
+                "switch_channel",
+                "upgrade"
+            ]
+        );
     }
-    methods.sort();
-    methods.dedup();
-    assert_eq!(
-        methods,
-        [
-            "cancel_rollback",
-            "check_for_update",
-            "rollback",
-            "status",
-            "switch_channel",
-            "upgrade"
-        ]
-    );
 }
 
 #[test]
